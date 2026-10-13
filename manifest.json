@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Zonos Dispute Researcher",
-  "version": "0.14.0",
-  "description": "Adds a Research merchant panel to Zonos duty dispute pages and hands the research to Claude on claude.ai.",
+  "version": "0.14.1",
+  "description": "Adds a Notes and Research panel to Zonos duty dispute pages: shared notes, saved Claude answers, and merchant research via Claude.",
   "homepage_url": "https://github.com/kars3n-zonos/zonos-dispute-researcher",
   "icons": {
     "16": "extension/icons/icon16.png",
@@ -11,7 +11,7 @@
     "128": "extension/icons/icon128.png"
   },
   "action": {
-    "default_title": "Open research panel",
+    "default_title": "Open Notes and Research",
     "default_icon": {
       "16": "extension/icons/icon16.png",
       "32": "extension/icons/icon32.png"

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.14.0
-// @description  Adds a "Research merchant" panel to duty dispute pages, checks the merchant's site, and hands the research to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
+// @version      0.14.1
+// @description  Adds a "Notes and Research" panel to duty dispute pages: shared notes and saved Claude answers for each dispute, plus merchant research handed to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
 // @updateURL    https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js
@@ -1488,7 +1488,7 @@
     const status = h('div', { class: 'status', role: 'status' });
     const openBtn = h('button', { class: 'primary', type: 'button', text: 'Open in Claude', onclick: () => run(handoff) });
     const copyBtn = h('button', { class: 'secondary', type: 'button', text: 'Copy prompt', onclick: () => run(copyPrompt) });
-    const launch = h('button', { class: 'launch', type: 'button', text: 'Research merchant', hidden: true, onclick: () => open() });
+    const launch = h('button', { class: 'launch', type: 'button', text: 'Notes and Research', hidden: true, onclick: () => open() });
     const tokenInput = h('input', { type: 'password', placeholder: 'Paste your Entry Assistant token', 'aria-label': 'Entry Assistant token', autocomplete: 'off' });
     const tokenNote = h('p', { class: 'hint' });
     // A new name also goes to the notes server, which puts it on the notes you already wrote
@@ -1547,9 +1547,9 @@
         h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => saveToken() }),
         h('button', { class: 'secondary', type: 'button', text: 'Test', onclick: () => testConnection() })),
       tokenNote);
-    const panel = h('aside', { class: 'panel', hidden: true, 'aria-label': 'Merchant research' },
+    const panel = h('aside', { class: 'panel', hidden: true, 'aria-label': 'Notes and Research' },
       h('header', {},
-        h('strong', { text: 'Merchant research' }),
+        h('strong', { text: 'Notes and Research' }),
         h('button', { class: 'icon', type: 'button', 'aria-label': 'Close panel', text: '×', onclick: () => close() })),
       body,
       h('footer', {},
@@ -1626,7 +1626,7 @@
     function updateLaunchLabel() {
       const id = location.pathname.split('/').filter(Boolean).pop();
       const n = DISPUTE_PATH.test(location.pathname) ? noteCount(id) : 0;
-      launch.textContent = n ? `Research merchant · ${n} ${n === 1 ? 'note' : 'notes'}` : 'Research merchant';
+      launch.textContent = n ? `Notes and Research · ${n} ${n === 1 ? 'note' : 'notes'}` : 'Notes and Research';
     }
 
     function submitNote() {
@@ -2114,7 +2114,7 @@
     let ui = null;
     let lastPath = null;
     // A way in from the Tampermonkey toolbar menu, in case the button doesn't show
-    GM_registerMenuCommand('Open research panel', () => {
+    GM_registerMenuCommand('Open Notes and Research', () => {
       ui = ui || createPanel();
       ui.open();
     });

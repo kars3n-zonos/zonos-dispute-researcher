@@ -1,6 +1,6 @@
 # Zonos Dispute Researcher
 
-A Tampermonkey userscript, also packaged as a Chrome extension, for the Zonos brokerage dashboard. On a duty dispute page it adds a **Research merchant** button. The button gathers the dispute's details, checks the merchant's website, looks up the HTS codes in the Entry Assistant API, and opens claude.ai with a research prompt ready to send.
+A Tampermonkey userscript, also packaged as a Chrome extension, for the Zonos brokerage dashboard. On a duty dispute page it adds a **Notes and Research** button. The panel it opens holds the dispute's shared notes and saved Claude answers. It also gathers the dispute's details, checks the merchant's website, looks up the HTS codes in the Entry Assistant API, and opens claude.ai with a research prompt ready to send.
 
 It never clicks or changes anything on the dashboard, and it never sends a message on claude.ai. You review the prompt and press Enter.
 
@@ -26,7 +26,7 @@ This repo is also a Chrome extension. It runs the same script file, so it works 
 1. On this page, click **Code → Download ZIP** and unzip it.
 2. Go to `chrome://extensions` and turn on **Developer mode** (top right).
 3. Click **Load unpacked** and choose the unzipped folder (the one containing `manifest.json`).
-4. Pin it: click the puzzle-piece icon in Chrome's toolbar, then the pin next to **Zonos Dispute Researcher**. On a dispute page, the **Research merchant** button appears as usual; the toolbar icon opens the panel too.
+4. Pin it: click the puzzle-piece icon in Chrome's toolbar, then the pin next to **Zonos Dispute Researcher**. On a dispute page, the **Notes and Research** button appears as usual; the toolbar icon opens the panel too.
 
 The extension keeps its own settings, so paste the Entry Assistant token under **Settings** again.
 
@@ -36,7 +36,7 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 
 ## Set up
 
-1. Open a dispute (`brokerage.dashboard.zonos.com/duty-disputes/<id>`) and click **Research merchant** in the bottom-right corner.
+1. Open a dispute (`brokerage.dashboard.zonos.com/duty-disputes/<id>`) and click **Notes and Research** in the bottom-right corner.
 2. In the panel, open **Settings**, paste the Entry Assistant token (ask the repo owner), click **Save**, then **Test**. It should say "Connected".
 3. The first time the script contacts a site, Tampermonkey may ask for permission. Allow it.
 
@@ -52,7 +52,7 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 - The **Notes** box at the top of the panel is a scratch pad for each dispute: links, reminders, anything you can't submit yet.
 - **Add note** (or Ctrl+Enter) saves it with your name and the time. Set your name under **Settings**. Links are clickable, and you can edit or delete any note.
 - What you're typing is kept as a draft, even if you close the panel or the tab.
-- The launch button shows how many notes a dispute has, for example "Research merchant · 2 notes".
+- The launch button shows how many notes a dispute has, for example "Notes and Research · 2 notes".
 - **Shared notes:** everyone using the script shares notes automatically, with nothing to set up. You're let in because you're signed in to the dashboard with a zonos.com account. Your name comes from your email; change it under **Settings** and your notes, old ones included, show the new name.
 - Coworkers' notes appear within about 15 seconds while the panel is open, marked with a colored bar. Only the person who wrote a note can edit or delete it.
 - Notes are saved on your computer first, so nothing is lost if the notes server can't be reached; they sync when it's back. Notes you wrote before shared notes existed are shared the first time they sync.
@@ -74,7 +74,7 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 
 ## Troubleshooting
 
-- **No button.** On a dispute page the Tampermonkey icon should show a number. No number: check **Allow User Scripts** and that the script is switched on in the dashboard. A number but no button: click the Tampermonkey icon, then **Open research panel**.
+- **No button.** On a dispute page the Tampermonkey icon should show a number. No number: check **Allow User Scripts** and that the script is switched on in the dashboard. A number but no button: click the Tampermonkey icon, then **Open Notes and Research**.
 - **Is it running?** Press F12 and open the Console. It should show `[Dispute Researcher] v… running on …`.
 - **HTS lookup failed.** The panel and the message after Copy or Open say why. **Settings → Test** checks the token.
 
