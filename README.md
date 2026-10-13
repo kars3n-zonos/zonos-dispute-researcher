@@ -66,6 +66,12 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 
 ### What Claude's answer looks like
 
+Claude has to research before it answers, every time:
+
+- It runs a list of required searches for each line: each model or part number, the product name, its price and datasheet, the merchant's description, and the merchant's site.
+- It works through every research step, checks that each one is done, and reviews what it found before replying.
+- If web search is off in that chat, it says so instead of answering. Turn web search on and send again.
+
 Every answer uses the same template, one block per line, so answers are quick to scan and compare:
 
 - **Dispute:** what the merchant wants changed, from what to what.
@@ -75,7 +81,7 @@ Every answer uses the same template, one block per line, so answers are quick to
   - Section 232 for 232 disputes: the metal, how much of the item it is, where it was melted or smelted, and the Chapter 99 heading.
   - Value, weight or quantity checks for those claims.
   - Discrepancies between what was found and what the merchant says, and Missing info.
-- **More details:** a line per claim, the item found, what the photos show, the closest CBP rulings (CROSS), and the Entry Assistant lookups.
+- **More details:** a line per claim, the item found, every search Claude ran and what it found, what the photos show, the closest CBP rulings (CROSS), the Entry Assistant lookups, and a check mark for each research step.
 - **Verdict:** "The merchant's claim is substantiated / somewhat substantiated / not substantiated because …", with the proof in the sentence itself: what shows it, where it comes from, and which rule it meets or fails. Then the evidence for and against.
 
 ### Claude's answers

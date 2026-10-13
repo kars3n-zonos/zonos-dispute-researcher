@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.15.1
+// @version      0.16.0
 // @description  Adds a "Notes and Research" panel to duty dispute pages: shared notes and saved Claude answers for each dispute, plus merchant research handed to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -922,12 +922,34 @@
     return [...found.values()].slice(0, 8);
   }
 
+  // The searches Claude must run for a line, every time, and log in its reply: each product number in
+  // quotes, the product name (which also covers all-digit model numbers the number finder skips), its price,
+  // its datasheet, the merchant's description if it differs, and the merchant's own site
+  function requiredSearches(item, website) {
+    const desc = item.fields.find(f => /^description$/i.test(f.label));
+    const ids = productNumbers({ items: [item], orderDocs: [] }).map(x => x.id).slice(0, 4);
+    const name = clean(item.title).slice(0, 80) || clean(desc?.current).slice(0, 80);
+    const key = ids[0] ? `"${ids[0]}"` : name;
+    const host = website && new URL(website).hostname.replace(/^www\./, '');
+    const queries = [
+      ...ids.map(id => `"${id}"`),
+      name,
+      ids[0] && !name.toLowerCase().includes(ids[0].toLowerCase()) && `${name} ${ids[0]}`,
+      `${key} price`,
+      `${key} datasheet OR specifications`,
+      clean(desc?.claimed) && clean(desc.claimed).toLowerCase() !== name.toLowerCase() && clean(desc.claimed).slice(0, 80),
+      host && `site:${host} ${ids[0] || name}`,
+    ].filter(q => q && q.replace(/"/g, '').trim().length >= 3);
+    return [...new Map(queries.map(q => [q.toLowerCase(), q])).values()].slice(0, 8);
+  }
+
   // Product numbers first, then names from photo filenames, then the customs descriptions
   function queriesFor(item, dispute) {
     const desc = item.fields.find(f => /^description$/i.test(f.label));
     const photos = [...item.docs, ...dispute.orderDocs].filter(d => isImage(d.name));
     const fromFiles = photos.map(d => fileNameQuery(d.name, dispute.org));
-    const ids = productNumbers(dispute).map(x => x.id);
+    // This line's own numbers only, so another line's part number doesn't end up in its searches
+    const ids = productNumbers({ items: [item], orderDocs: dispute.orderDocs }).map(x => x.id);
     const all = [...ids, ...fromFiles, desc?.claimed, desc?.current].map(q => clean(q).slice(0, 80)).filter(q => q.length >= 3);
     return [...new Set(all)].slice(0, 5);
   }
@@ -1279,7 +1301,8 @@
     const any232 = kinds.some(k => k.s232);
     const productClaim = about(PRODUCT_CLAIM) || any232;
 
-    L.push("I'm a customs broker reviewing a duty dispute. For each claim below, find out whether there's real evidence for it. Research thoroughly, then reply briefly in the exact template at the end.");
+    L.push("I'm a customs broker reviewing a duty dispute. For each claim below, find out whether there's real evidence for it, then reply in the exact template at the end. The reply is short; the research isn't.");
+    L.push('', "**Research is required every time, before you write anything.** Work in this order: do every step under \"How to research\", check that each one is done, review what you found, and only then reply. Search the web and open the pages you find. Run every search under \"Required searches\" for each line, then follow up on what they turn up. Don't fill in the template from this prompt or from memory: everything here is the merchant's side or the entry as filed, and it's what you're checking. If you can't search the web in this chat, don't answer; reply only: \"I can't search the web in this chat. Turn on web search and send this again.\"");
 
     L.push('', '## Merchant', `- Name: ${d.org || 'unknown'}`);
     const website = normalizeUrl(s.website);
@@ -1315,6 +1338,7 @@
           if (p.description) L.push(`  Description: ${p.description}`);
         }
       }
+      L.push('', 'Required searches (run every one and list it under Searches run in the reply):', ...requiredSearches(item, website).map(q => `- ${q}`));
       const terms = queriesFor(item, d);
       const searchUrl = s.site && siteSearchUrl(s.site);
       if (terms.length && searchUrl) {
@@ -1356,7 +1380,7 @@
       items.length > 1 && `There are ${items.length} lines. Research each one on its own, since they may be different products, and keep each line's findings to its own block in the reply.`,
       hasImages && IMAGE_STEP,
       siteStep,
-      'Search the web for each product number in quotes, one at a time, including any you found in the images. Then search the brand and model, then a plain description of the item. Try variations: with and without dashes or spaces, and partial numbers. Don\'t stop at the first result.',
+      "Run every Required search for each line, then follow up: open the best results (the manufacturer's page, the merchant's listing, marketplace listings), and search again for any new model, part or brand names you found there or in the images. Try variations: with and without dashes or spaces, and partial numbers. Don't stop at the first result.",
       "Find how the item is marketed: listing titles, categories, and what it fits or is compatible with, on the merchant's site and on marketplaces. Compare that with the declared description and the merchant's description. For example, a lever sold for ATVs or motorcycles is a vehicle part, not a farm machinery part.",
       `Find prices for the same item: the merchant's site, eBay (including sold listings), AliExpress, Amazon and anywhere else it's sold. Compare them with the declared value${declared.length === 1 ? ` (${declared[0]})` : ''}.`,
       valueStep,
@@ -1376,6 +1400,11 @@
     L.push('', '## How to research', ...steps.map((step, i) => `${i + 1}. ${step}`));
     L.push('', "If a page won't open, say which one and try another route: the site's search, its sitemap, or a web search limited to the site (site: plus the domain and the product number).");
     L.push('Use as many searches as it takes. A thorough answer matters more than a fast one.');
+    L.push('', '## Before you reply',
+      `1. **Do every step.** Go through all ${steps.length} steps above, in order, for every line. Don't skip one because this prompt seems to answer it already.`,
+      "2. **Check every step.** Go back through the steps one at a time and confirm each one is done. Do any you missed now. If one can't be done (a page won't open, nothing exists online), note why.",
+      "3. **Review what you found.** Re-read your findings against each claim's Check and against the template's labels. If findings contradict each other, or a label has nothing behind it, search again to settle it.",
+      '4. **Then reply,** in the template below. Under Steps checked, mark each step by number.');
 
     // The reply is a fill-in template, built per line from what that line's dispute is about, so every answer
     // has the same sections in the same order. The "### Line N" headings let the script save each line's
@@ -1386,10 +1415,11 @@
       "- Keep every line, even when the answer is \"Not found\". Don't add, rename or reorder sections, and write nothing before the first heading or after the last line.",
       '- One short line per bullet, sub-bullets for lists. No paragraphs, no greeting, no recap of the dispute.',
       "- Put HTS and Chapter 99 codes in backticks. Link a source for every fact. If you can't find something, say so under Missing info instead of guessing.",
+      '- Under Searches run, list every Required search plus any others you ran, each with what it found and the best link. A search that found nothing still goes in, marked "nothing relevant". If a fact comes only from this prompt rather than your research, say so.',
       "- Under Discrepancies, give one sub-bullet for each place what you found contradicts what the merchant says, with its source. For example: their code covers microphones up to 10 mm across, but this one is 60 mm.",
       "- The verdict must carry its proof. Don't just say what the item \"clearly\" is: say what shows it (which photo, document or listing, with its link) and which rule it meets or fails (the HTS heading or subheading text, the origin rule, the Section 232 heading). One or two sentences on one line, starting exactly with \"The merchant's claim is\".",
       `  An example of the level of proof wanted (not of the content): "The merchant's claim is somewhat substantiated because the item is a finished microphone, not a part: the merchant's own listing ([link]) sells it as a complete USB condenser mic and photo 2 shows it assembled with its cable, so heading 8518 is right but their subheading (parts of microphones) is not; it belongs with complete microphones in 8518.10."`);
-    items.forEach((item, i) => L.push('', ...replyBlock(item, s, { hasImages, platformUnknown: platformUnknown && i === 0 })));
+    items.forEach((item, i) => L.push('', ...replyBlock(item, s, { hasImages, platformUnknown: platformUnknown && i === 0, stepCount: steps.length })));
     return L.filter(line => line !== false).join('\n');
   }
 
@@ -1404,7 +1434,7 @@
     return `**Dispute:** ${asks.join(' · ') || 'see the claims above'}${k.s232 && !named232 ? ' · Section 232' : ''}`;
   }
 
-  function replyBlock(item, s, { hasImages, platformUnknown }) {
+  function replyBlock(item, s, { hasImages, platformUnknown, stepCount }) {
     const facts = s.facts?.[item.line]?.data;
     const k = disputeKinds(item, facts);
     const metal = k.s232 || (!!facts && facts.codes.some(c => /232|steel|aluminum|copper/i.test(c.extra || '')));
@@ -1438,10 +1468,13 @@
       '#### More details',
       ...fields.map(f => `- **${f} claim:** <supported | partly supported | not supported> — <why, with a link>`),
       "- **Item found:** <name, brand, model or part number> — [merchant's listing](<link>)",
+      '- **Searches run:**',
+      '  - `<each search you ran, starting with the Required searches>` → <what it found, with the best link; or "nothing relevant">',
       hasImages && '- **Read from images:** <only the text and numbers that matter, and which photo>',
       k.product && '- **Rulings (CROSS):** <the closest CBP rulings: number, what they cover, and how this item compares; or "none close">',
       "- **API checks:** <what you looked up with the entry-assistant skill, or why you couldn't>",
       platformUnknown && "- **Platform:** <what the merchant's site runs on>",
+      `- **Steps checked:** <each of the ${stepCount} How to research steps by number for this line: ✓ done, or ✗ and why it couldn't be done>`,
       '',
       '#### Verdict',
       "**The merchant's claim is <substantiated | somewhat substantiated | not substantiated>** because <the proof: what the evidence shows, where it comes from, and the rule it meets or fails>.",
