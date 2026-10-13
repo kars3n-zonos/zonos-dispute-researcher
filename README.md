@@ -42,7 +42,7 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 
 ## Use
 
-- The panel shows the item, the merchant's claims, the HTS facts, matches on the merchant's site, and the documents to attach.
+- The panel only shows what the dispute page doesn't: your notes, a card for each line to tick, the merchant website, the documents to attach, and the Claude buttons. Everything else (claims, HTS facts, product numbers, matches on the merchant's site) still goes into the prompt.
 - **Open in Claude** opens claude.ai with the prompt and files filled in. Check it, then press Enter.
 - **Copy prompt** copies the prompt if you'd rather paste it yourself.
 - For Claude to run its own HTS lookups, add the entry-assistant skill in claude.ai and allow its code sandbox to reach `entry.kars3n.com`.
@@ -53,12 +53,14 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 - **Add note** (or Ctrl+Enter) saves it with your name and the time. Set your name under **Settings**. Links are clickable, and you can edit or delete any note.
 - What you're typing is kept as a draft, even if you close the panel or the tab.
 - The launch button shows how many notes a dispute has, for example "Research merchant · 2 notes".
-- **Shared notes:** paste your notes key under **Settings** (ask the repo owner for one), and your notes are shared with everyone who has a key. Coworkers' notes appear within about 15 seconds while the panel is open, marked with a colored bar. Only the person who wrote a note can edit or delete it.
-- Notes are saved on your computer first, so nothing is lost if the notes server can't be reached; they sync when it's back. Without a key, notes stay in your own Tampermonkey.
+- **Shared notes:** everyone using the script shares notes automatically, with nothing to set up. You're let in because you're signed in to the dashboard with a zonos.com account. Your name comes from your email; change it under **Settings** and your notes, old ones included, show the new name.
+- Coworkers' notes appear within about 15 seconds while the panel is open, marked with a colored bar. Only the person who wrote a note can edit or delete it.
+- Notes are saved on your computer first, so nothing is lost if the notes server can't be reached; they sync when it's back. Notes you wrote before shared notes existed are shared the first time they sync.
+- If joining fails, the reason shows under the notes. The repo owner can still make a notes key by hand; paste it under **Settings**.
 
 ### Disputes with several lines
 
-- Each line has a tick box. Only ticked lines, plus the order-level documents, go into the prompt. Claude answers in one block per line, each ending with its own verdict sentence.
+- Each line with claims gets a card showing what's claimed (HS code, Value…) and whether it's been researched. Click a card to tick it; ticked cards are outlined in orange. Only ticked lines, plus the order-level documents, go into the prompt. Claude answers in one block per line, each ending with its own verdict sentence.
 - Lines not researched yet start ticked; lines already sent to Claude or answered start unticked.
 - With more than 3 claims across several lines, the panel suggests splitting them over a few chats, because Claude digs deeper with fewer at a time.
 
@@ -77,5 +79,6 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 ## Privacy
 
 - It reads the dispute page only. It sends product details, the merchant's reasons and the files you tick to claude.ai. It leaves out customer names, emails, tracking numbers, broker notes and claim decisions.
-- Every document on the dispute, including invoices and receipts, is ticked to attach by default. Untick any you don't want sent.
+- Every document on the ticked lines and the order, including invoices and receipts, is attached by default. Open **Documents to attach** to untick any you don't want sent.
+- To join shared notes, the script sends the notes server (notes.kars3n.com) your dashboard sign-in token. It does this once, and again about once a month to renew. The token comes from the dashboard's login and lasts 60 seconds. The server checks it and keeps only your name, your zonos.com email and an id, never the token itself. You then get your own notes key, which lasts 30 days and renews while you use the dashboard.
 - The Entry Assistant token is stored in Tampermonkey on your computer, never in this script.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.12.0
+// @version      0.13.0
 // @description  Adds a "Research merchant" panel to duty dispute pages, checks the merchant's site, and hands the research to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -229,10 +229,19 @@
   // and times, so a shared server can hold the same notes later.
   const NOTES_PREFIX = 'zdr:notes:';
   const AUTHOR_KEY = 'zdr:author';
-  // Shared notes live on the notes server; without a key, notes stay on this computer only
+  // Shared notes live on the notes server. Anyone signed in to this dashboard joins on their own: the
+  // script shows the server the dashboard's sign-in token (Clerk keeps a 60-second one in the __session
+  // cookie), the server checks it and the zonos.com email, and hands back a notes key for 30 days, which
+  // is renewed while you keep using the dashboard. A key pasted under Settings is used instead.
   const NOTES_API = 'https://notes.kars3n.com/api/v1';
-  const NOTES_KEY = 'zdr:notesKey';
-  const sharedNotesOn = () => !!GM_getValue(NOTES_KEY, '');
+  const NOTES_KEY = 'zdr:notesKey'; // pasted by hand
+  const NOTES_JOIN = 'zdr:notesJoin'; // { key, name, expiresAt } from joining, plus { failedAt, error } after a failed try
+  const SESSION_ISSUER = 'https://clerk.zonos.com';
+  const JOIN_RETRY_MS = 2 * 60 * 1000;
+  const JOIN_RENEW_MS = 3 * 24 * 60 * 60 * 1000;
+  const manualNotesKey = () => GM_getValue(NOTES_KEY, '');
+  const joinRecord = () => GM_getValue(NOTES_JOIN, null) || {};
+  const sharedNotesOn = () => !!(manualNotesKey() || joinRecord().key) || location.host === DASHBOARD_HOST;
 
   // A note is shown unless it's waiting to be deleted on the server. Notes without `mine: false`
   // are your own (everything written before shared notes was turned on).
@@ -264,9 +273,78 @@
   });
   const saveDraft = (id, text) => changeNotes(id, pad => { pad.draft = text; });
 
-  async function notesApi(method, path, body) {
-    const key = GM_getValue(NOTES_KEY, '');
-    if (!key) throw apiError('no-token', 'No shared notes key is saved.');
+  const jwtClaims = token => {
+    try { return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); } catch { return null; }
+  };
+
+  // The dashboard's current sign-in token. Clerk renews the cookie about every 50 seconds while the page
+  // is open, so if the one there is about to run out, wait a little for the next.
+  async function dashboardSignIn() {
+    if (location.host !== DASHBOARD_HOST) return null;
+    const end = Date.now() + 15000;
+    for (;;) {
+      const best = document.cookie.split(';').map(c => c.trim())
+        .filter(c => /^__session(_[^=]*)?=/.test(c))
+        .map(c => ({ token: c.slice(c.indexOf('=') + 1), claims: jwtClaims(c.slice(c.indexOf('=') + 1)) }))
+        .filter(t => t.claims?.iss === SESSION_ISSUER)
+        .sort((a, b) => b.claims.exp - a.claims.exp)[0];
+      if (best && best.claims.exp * 1000 > Date.now() + 5000) return best.token;
+      if (Date.now() > end) return null;
+      await sleep(500);
+    }
+  }
+
+  // Trades the dashboard sign-in for a notes key. A failure is remembered for two minutes, in every tab,
+  // so a problem doesn't turn into a request every 15 seconds.
+  let joining = null;
+  function joinNotes() {
+    if (!joining) joining = runJoin().finally(() => { joining = null; });
+    return joining;
+  }
+  async function runJoin() {
+    const fail = (kind, message) => {
+      GM_setValue(NOTES_JOIN, { ...joinRecord(), failedAt: Date.now(), error: message });
+      return apiError(kind, message);
+    };
+    const token = await dashboardSignIn();
+    if (!token) throw fail('join', "Couldn't join shared notes: no current dashboard sign-in found. Reload the page.");
+    let r;
+    try {
+      r = await gmRequest({
+        method: 'POST', url: `${NOTES_API}/register`, timeout: 15000,
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        data: JSON.stringify({ token, name: GM_getValue(AUTHOR_KEY, '') || undefined }),
+      });
+    } catch (e) {
+      throw fail('unreachable', /too long/.test(e.message) ? 'The notes server took too long to respond.' : "Couldn't reach the notes server.");
+    }
+    let json = null;
+    try { json = JSON.parse(r.responseText); } catch { /* handled below */ }
+    if (r.status !== 200 || !json?.key) throw fail('join', `Couldn't join shared notes: ${json?.error || `the notes server answered ${r.status}.`}`);
+    GM_setValue(NOTES_JOIN, { key: json.key, name: json.name, expiresAt: json.expiresAt });
+    if (!GM_getValue(AUTHOR_KEY, '')) GM_setValue(AUTHOR_KEY, json.name);
+    return json.key;
+  }
+
+  // A pasted key wins. Otherwise use the joined key, joining first if there's none and renewing it a few
+  // days before it runs out (keeping the old one if renewing fails).
+  async function notesKey() {
+    const manual = manualNotesKey();
+    if (manual) return manual;
+    const rec = joinRecord();
+    const usable = rec.key && !(rec.expiresAt < Date.now());
+    const due = !rec.key || rec.expiresAt - Date.now() < JOIN_RENEW_MS;
+    const waiting = rec.failedAt && Date.now() - rec.failedAt < JOIN_RETRY_MS;
+    if (due && !waiting && location.host === DASHBOARD_HOST) {
+      try { return await joinNotes(); } catch (e) { if (!usable) throw e; }
+    }
+    if (usable) return rec.key;
+    if (rec.error) throw apiError('join', rec.error);
+    throw apiError('no-token', 'Open a dispute on the dashboard to join shared notes.');
+  }
+
+  async function notesApi(method, path, body, retried = false) {
+    const key = await notesKey();
     let r;
     try {
       r = await gmRequest({
@@ -279,7 +357,13 @@
     }
     let json = null;
     try { json = JSON.parse(r.responseText); } catch { /* handled by status below */ }
-    if (r.status === 401) throw apiError('bad-token', 'The notes server rejected your key. Check it under Settings.');
+    if (r.status === 401) {
+      if (manualNotesKey()) throw apiError('bad-token', 'The notes server rejected your key. Check it under Settings.');
+      // A joined key that ran out or was dropped: join again once (unless another tab already has)
+      if (joinRecord().key === key) GM_setValue(NOTES_JOIN, {});
+      if (!retried && location.host === DASHBOARD_HOST) return notesApi(method, path, body, true);
+      throw apiError('bad-token', 'The notes server no longer accepts this sign-in. Reload the dashboard.');
+    }
     if (r.status < 200 || r.status >= 300) throw Object.assign(apiError('server', json?.error || `The notes server answered ${r.status}.`), { status: r.status });
     return json;
   }
@@ -1076,8 +1160,8 @@
   /* ------------------------------------------------- dashboard: the panel */
 
   const PANEL_CSS = `
-    :host { all: initial; --bg:#ffffff; --fg:#18181b; --muted:#71717a; --line:#e4e4e7; --soft:#f4f4f5; --accent:#b45309; --accent-fg:#ffffff; --ok:#15803d; --warn:#b45309; --err:#b91c1c; }
-    :host([data-theme="dark"]) { --bg:#0c0c0d; --fg:#f4f4f5; --muted:#a1a1aa; --line:#27272a; --soft:#18181b; --accent:#f59e0b; --accent-fg:#111111; --ok:#4ade80; --warn:#fbbf24; --err:#f87171; }
+    :host { all: initial; --bg:#ffffff; --fg:#18181b; --muted:#71717a; --line:#e4e4e7; --soft:#f4f4f5; --tint:#fff7ed; --accent:#b45309; --accent-fg:#ffffff; --ok:#15803d; --warn:#b45309; --err:#b91c1c; }
+    :host([data-theme="dark"]) { --bg:#0c0c0d; --fg:#f4f4f5; --muted:#a1a1aa; --line:#27272a; --soft:#18181b; --tint:#2a1d0a; --accent:#f59e0b; --accent-fg:#111111; --ok:#4ade80; --warn:#fbbf24; --err:#f87171; }
     * { box-sizing: border-box; }
     .wrap { font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); }
     button { font: inherit; cursor: pointer; }
@@ -1087,7 +1171,6 @@
     .panel { position: fixed; top: 0; right: 0; height: 100vh; width: min(460px, 100vw); z-index: 2147483001; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border-left: 1px solid var(--line); box-shadow: -10px 0 30px rgba(0,0,0,.3); }
     [hidden] { display: none !important; }
     header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
-    header .sub { display: block; color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; margin-top: 2px; }
     .icon { background: none; border: 0; color: var(--muted); font-size: 20px; line-height: 1; padding: 2px 6px; border-radius: 6px; }
     .icon:hover { color: var(--fg); background: var(--soft); }
     .body { flex: 1; overflow-y: auto; padding: 14px 16px; }
@@ -1102,33 +1185,27 @@
     .muted { color: var(--muted); }
     .hint { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
     .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
-    .kv { display: grid; grid-template-columns: 96px 1fr; gap: 2px 8px; margin-top: 8px; font-size: 12px; }
-    .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
-    .item { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
-    .item.quiet { color: var(--muted); font-size: 12px; padding: 8px 12px; }
-    .item-title { font-weight: 600; margin-bottom: 8px; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
-    th { color: var(--muted); font-weight: 500; }
-    td.claimed { color: var(--accent); font-weight: 600; }
-    ul { margin: 0; padding-left: 18px; }
-    li { margin: 4px 0; }
-    .reason { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
-    .reason.open { display: block; }
-    .chip { display: inline-block; margin-left: 6px; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; font-size: 11px; color: var(--muted); }
-    .ids { display: flex; flex-wrap: wrap; gap: 6px; } .ids .chip { margin-left: 0; font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--fg); }
-    .sub-block { margin-top: 10px; }
-    .doc { display: flex; align-items: baseline; gap: 6px; margin: 3px 0; font-size: 12px; overflow-wrap: anywhere; }
+    .chip { display: inline-block; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; font-size: 11px; color: var(--muted); }
+    .sub-block { margin: 6px 0 0 40px; }
+    .lines { display: grid; gap: 8px; }
+    .line { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start; padding: 10px 12px; border: 2px solid var(--line); border-radius: 8px; cursor: pointer; }
+    .line:hover { border-color: var(--muted); }
+    .line.on { border-color: var(--accent); background: var(--tint); }
+    .line input { width: 18px; height: 18px; margin: 1px 0 0; accent-color: var(--accent); cursor: pointer; }
+    .line-main { min-width: 0; }
+    .line:not(.on) .line-main { color: var(--muted); }
+    .line-name { display: flex; gap: 6px; align-items: baseline; min-width: 0; }
+    .line-name strong { white-space: nowrap; }
+    .line-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .line-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; }
+    .tag { padding: 0 6px; border-radius: 4px; background: var(--soft); font-size: 11px; color: var(--fg); }
+    .docs summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+    .doc { display: flex; align-items: baseline; gap: 6px; margin: 4px 0 0 2px; font-size: 12px; overflow-wrap: anywhere; }
     a { color: var(--accent); }
     .actions { display: flex; gap: 8px; }
     .status { min-height: 18px; margin-top: 8px; font-size: 12px; color: var(--muted); }
     .fine { margin: 6px 0 0; font-size: 11px; color: var(--muted); }
-    .fact { font-size: 12px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-    .item-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
-    .item-head .item-title { margin: 0; }
-    .pick { display: flex; align-items: baseline; gap: 6px; cursor: pointer; }
-    .item.off { opacity: .6; }
-    .chip.state { margin-left: 0; white-space: nowrap; }
+    .chip.state { white-space: nowrap; }
     .chip.v-yes { color: var(--ok); border-color: currentColor; }
     .chip.v-some { color: var(--warn); border-color: currentColor; }
     .chip.v-no { color: var(--err); border-color: currentColor; }
@@ -1154,7 +1231,6 @@
     // Keep the dashboard's keyboard shortcuts from firing while typing in the panel
     for (const type of ['keydown', 'keyup', 'keypress']) host.addEventListener(type, e => e.stopPropagation());
 
-    const subtitle = h('span', { class: 'sub' });
     const body = h('div', { class: 'body' });
     const status = h('div', { class: 'status', role: 'status' });
     const openBtn = h('button', { class: 'primary', type: 'button', text: 'Open in Claude', onclick: () => run(handoff) });
@@ -1162,16 +1238,31 @@
     const launch = h('button', { class: 'launch', type: 'button', text: 'Research merchant', hidden: true, onclick: () => open() });
     const tokenInput = h('input', { type: 'password', placeholder: 'Paste your Entry Assistant token', 'aria-label': 'Entry Assistant token', autocomplete: 'off' });
     const tokenNote = h('p', { class: 'hint' });
+    // A new name also goes to the notes server, which puts it on the notes you already wrote
     const authorInput = h('input', {
       type: 'text', placeholder: 'Your name, shown on your notes', 'aria-label': 'Your name, shown on your notes',
-      value: GM_getValue(AUTHOR_KEY, ''), onchange: e => GM_setValue(AUTHOR_KEY, clean(e.target.value)),
+      value: GM_getValue(AUTHOR_KEY, ''),
+      onchange: () => {
+        const name = clean(authorInput.value);
+        GM_setValue(AUTHOR_KEY, name);
+        if (name && (manualNotesKey() || joinRecord().key)) {
+          notesApi('PATCH', '/me', { name }).then(
+            () => { GM_setValue(NOTES_JOIN, { ...joinRecord(), name }); setNotesKeyNote(`Your notes now show as ${name}.`, 'ok'); if (state) syncNow(); },
+            e => setNotesKeyNote(e.message, 'err'));
+        }
+      },
     });
-    const notesKeyInput = h('input', { type: 'password', placeholder: 'Paste your shared notes key', 'aria-label': 'Shared notes key', autocomplete: 'off' });
+    const notesKeyInput = h('input', { type: 'password', placeholder: 'Notes key (only if joining by yourself fails)', 'aria-label': 'Shared notes key', autocomplete: 'off' });
     const notesKeyNote = h('p', { class: 'hint' });
     const setNotesKeyNote = (text, kind = '') => { notesKeyNote.textContent = text; notesKeyNote.className = `hint ${kind}`; };
-    const refreshNotesKeyNote = () => setNotesKeyNote(sharedNotesOn()
-      ? 'Notes key saved. Your notes are shared with everyone who has a key.'
-      : 'No notes key: notes stay on this computer. Ask the repo owner for a key to share them.');
+    function refreshNotesKeyNote() {
+      const rec = joinRecord();
+      if (!authorInput.value && root.activeElement !== authorInput) authorInput.value = GM_getValue(AUTHOR_KEY, '');
+      if (manualNotesKey()) setNotesKeyNote('Using the notes key you pasted. To join through your dashboard sign-in instead, empty the box and click Save.');
+      else if (rec.key) setNotesKeyNote(`Shared notes: joined through your dashboard sign-in as ${rec.name}.`, 'ok');
+      else if (rec.error) setNotesKeyNote(rec.error, 'err');
+      else setNotesKeyNote('Shared notes: you join on your own through your dashboard sign-in.');
+    }
     async function testNotesKey() {
       setNotesKeyNote('Testing…');
       try {
@@ -1187,7 +1278,8 @@
       else GM_deleteValue(NOTES_KEY);
       notesKeyInput.value = '';
       refreshNotesKeyNote();
-      if (value) testNotesKey().then(() => state && syncNow());
+      // With the box emptied, this joins through the dashboard sign-in
+      testNotesKey().then(() => state && syncNow());
     }
     const settings = h('details', { class: 'settings' },
       h('summary', { text: 'Settings' }),
@@ -1204,7 +1296,7 @@
       tokenNote);
     const panel = h('aside', { class: 'panel', hidden: true, 'aria-label': 'Merchant research' },
       h('header', {},
-        h('div', {}, h('strong', { text: 'Merchant research' }), subtitle),
+        h('strong', { text: 'Merchant research' }),
         h('button', { class: 'icon', type: 'button', 'aria-label': 'Close panel', text: '×', onclick: () => close() })),
       body,
       h('footer', {},
@@ -1236,6 +1328,7 @@
       return syncNotes(id).then(() => {
         if (state && state.data.disputeId === id) render();
         updateLaunchLabel();
+        if (!settings.open) refreshNotesKeyNote();
       });
     }
     function startPolling() {
@@ -1402,7 +1495,6 @@
         oninput: e => { state.website = e.target.value; },
         onkeydown: e => { if (e.key === 'Enter') checkSite(); },
       });
-      subtitle.textContent = data.disputeId;
       render();
       state.factsPromise = loadFacts();
       if (state.website) checkSite();
@@ -1453,69 +1545,16 @@
     function render() {
       const s = state;
       const d = s.data;
-      const ids = productNumbers(d);
-      const kv = pairs => h('dl', { class: 'kv' }, pairs.filter(([, v]) => v).map(([k, v]) => [h('dt', { text: k }), h('dd', {}, v)]));
-
-      let siteInfo = null;
-      if (s.siteError) siteInfo = h('p', { class: 'hint err', text: s.siteError });
-      else if (s.checking && !s.site) siteInfo = h('p', { class: 'hint', text: 'Checking the site…' });
-      else if (s.site) {
-        siteInfo = h('div', {},
-          kv([
-            ['Platform', s.site.platforms.length ? s.site.platforms.join(', ') : s.site.generator || 'Not recognized'],
-            ['Page title', s.site.title],
-            ['Went to', s.site.finalUrl !== normalizeUrl(s.website) ? h('a', { href: s.site.finalUrl, target: '_blank', rel: 'noopener noreferrer', text: s.site.finalUrl }) : null],
-          ]),
-          s.site.blocked && h('p', { class: 'hint warn', text: 'The site may have blocked this check (bot protection). Claude may still be able to read it.' }),
-          s.checking && h('p', { class: 'hint', text: "Searching the merchant's products…" }));
-      }
-
-      const docList = docs => docs.length > 0 && h('div', { class: 'sub-block' },
-        h('p', { class: 'label', text: 'Attach to Claude' }),
-        docs.map(doc => h('label', { class: 'doc' },
-          h('input', { type: 'checkbox', checked: !!s.checked[doc.name], onchange: e => { s.checked[doc.name] = e.target.checked; render(); } }),
-          h('span', { text: doc.name }))));
-
-      const matchList = line => {
-        const found = s.matches[line];
-        if (!found) return null;
-        return h('div', { class: 'sub-block' },
-          h('p', { class: 'label', text: 'Possible matches on merchant site' }),
-          found.length
-            ? h('ul', {}, found.map(p => h('li', {},
-                h('a', { href: p.url, target: '_blank', rel: 'noopener noreferrer', text: p.title }),
-                p.vendor && h('span', { class: 'muted', text: ` · ${p.vendor}` }))))
-            : h('p', { class: 'hint', text: 'None found. Claude will search more widely.' }));
-      };
-
-      const factsBlock = line => {
-        const f = s.facts[line];
-        if (!f) return null;
-        let content;
-        if (f.loading) content = h('p', { class: 'hint', text: 'Looking up HTS codes…' });
-        else if (f.error) content = h('p', { class: 'hint warn', text: f.error });
-        else {
-          const rows = [
-            ...f.data.codes.map(c => (c.notFound
-              ? `${c.role} ${c.asked}: not found in the current HTS`
-              : `${c.role} ${c.code}: ${c.meaning} · ${c.general || 'no rate listed'}${c.extra ? ` · extra: ${c.extra}` : ''}`)),
-            f.data.compare?.summary && `Split: ${clean(f.data.compare.summary)}`,
-            ...f.data.origins.map(o => `Made in ${o.originName || o.from}: ${o.notFound ? 'no answer' : `${o.originRate || o.general || 'no rate listed'}${o.extra ? ` + ${o.extra}` : ''}`}`),
-            ...[...f.data.codes, ...f.data.origins.slice(1)].filter(c => c.chapter99?.length)
-              .map(c => `Chapter 99 headings to check (${c.code}${c.originName ? `, made in ${c.originName}` : ''}): ${c.chapter99.map(x => x.code).join(', ')}`),
-          ].filter(Boolean);
-          content = h('div', {},
-            rows.length > 0 && h('ul', {}, rows.map(t => h('li', { class: 'fact', title: t, text: t }))),
-            f.data.problems.length > 0 && h('p', { class: 'hint warn', text: `Some lookups failed: ${f.data.problems.join('; ')}` }));
-        }
-        return content && h('div', { class: 'sub-block' }, h('p', { class: 'label', text: 'HTS facts' }), content);
-      };
-
-      // A value claim can only be checked against the price paid, which is usually on the invoice or receipt
-      const allDocs = [...d.items.flatMap(i => i.docs), ...d.orderDocs];
-      const valueHint = d.items.some(i => i.inDispute && claimsOf(i).some(c => /value/i.test(c.field)))
-        && allDocs.some(doc => !isImage(doc.name) && !s.checked[doc.name])
-        && h('p', { class: 'hint warn', text: 'Value claim: tick the invoice or receipt so Claude can check the price paid.' });
+      // The panel only shows what the dashboard page doesn't: the site check result is one line, and the
+      // HTS facts, claim details and product numbers go into the prompt without being shown here
+      const matchCount = Object.values(s.matches).reduce((n, found) => n + found.length, 0);
+      const siteLine = s.siteError ? h('p', { class: 'hint err', text: s.siteError })
+        : s.checking ? h('p', { class: 'hint', text: s.site ? "Searching the merchant's products…" : 'Checking the site…' })
+        : s.site && h('p', { class: `hint${s.site.blocked ? ' warn' : ''}`, text: [
+            `Checked: ${s.site.platforms.join(', ') || s.site.generator || 'platform not recognized'}`,
+            Object.keys(s.matches).length > 0 && (matchCount ? `${matchCount} possible product ${matchCount === 1 ? 'match' : 'matches'}` : 'no product matches'),
+            s.site.blocked && 'the site may block automated checks',
+          ].filter(Boolean).join(' · ') });
 
       const rec = loadRecord(d.disputeId);
       const inDispute = d.items.filter(i => i.inDispute);
@@ -1537,30 +1576,37 @@
           open && h('pre', { class: 'saved', text: answerPart(answer.text, item.line) }));
       };
 
-      const items = d.items.map(item => (item.inDispute
-        ? h('div', { class: `item${s.selected.has(item.line) ? '' : ' off'}` },
-            h('div', { class: 'item-head' },
-              h('label', { class: 'pick' },
-                h('input', { type: 'checkbox', checked: s.selected.has(item.line), 'aria-label': `Research line ${item.line}`, onchange: e => toggleLine(item.line, e.target.checked) }),
-                h('span', { class: 'item-title', text: `Line ${item.line}: ${item.title}` })),
-              (({ text, kind }) => h('span', { class: `chip state ${kind}`, text }))(lineStatus(rec.lines[item.line]))),
-            savedAnswer(item),
-            h('table', {},
-              h('thead', {}, h('tr', {}, ['Field', 'Current', 'Claimed'].map(t => h('th', { text: t })))),
-              h('tbody', {}, item.fields.map(f => h('tr', {},
-                h('td', { text: f.label }),
-                h('td', { text: f.current }),
-                h('td', { class: f.claimed ? 'claimed' : 'muted', text: f.claimed || 'unchanged' }))))),
-            item.claims.length > 0 && h('div', { class: 'sub-block' },
-              h('p', { class: 'label', text: "Merchant's reasons" }),
-              h('ul', {}, item.claims.map(c => h('li', {},
-                h('strong', { text: c.field }),
-                c.status && h('span', { class: 'chip', text: c.status }),
-                h('div', { class: 'reason', title: 'Click to show all', text: c.reason || 'No reason given', onclick: e => e.currentTarget.classList.toggle('open') }))))),
-            factsBlock(item.line),
-            s.selected.has(item.line) && docList(item.docs),
-            matchList(item.line))
-        : h('div', { class: 'item quiet', text: `Line ${item.line}: ${item.title}${item.note ? ` · ${item.note}` : ''}` })));
+      // One card per line with claims: the whole card is the tick box, and a ticked card is outlined and
+      // tinted, so it's plain which lines go to Claude. Lines without claims aren't listed.
+      const lineCard = item => {
+        const on = s.selected.has(item.line);
+        const { text, kind } = lineStatus(rec.lines[item.line]);
+        const fields = [...new Set(claimsOf(item).map(c => c.field))];
+        return h('div', {},
+          h('label', { class: `line${on ? ' on' : ''}` },
+            h('input', { type: 'checkbox', checked: on, 'aria-label': `Research line ${item.line}: ${item.title}`, onchange: e => toggleLine(item.line, e.target.checked) }),
+            h('span', { class: 'line-main' },
+              h('span', { class: 'line-name', title: item.title },
+                h('strong', { text: `Line ${item.line}` }),
+                h('span', { class: 'line-title', text: item.title })),
+              h('span', { class: 'line-tags' },
+                fields.map(f => h('span', { class: 'tag', text: f })),
+                h('span', { class: `chip state ${kind}`, text })))),
+          savedAnswer(item));
+      };
+
+      // Documents of the ticked lines plus the order's own; all attached unless unticked, folded away by default
+      const docs = [...new Map([...inDispute.filter(i => s.selected.has(i.line)).flatMap(i => i.docs), ...d.orderDocs].map(doc => [doc.name, doc])).values()];
+      const attached = docs.filter(doc => s.checked[doc.name]).length;
+      const docsBlock = docs.length > 0 && h('details', { class: 'section docs', open: !!s.docsOpen, ontoggle: e => { s.docsOpen = e.currentTarget.open; } },
+        h('summary', { text: `Documents to attach: ${attached} of ${docs.length}` }),
+        docs.map(doc => h('label', { class: 'doc' },
+          h('input', { type: 'checkbox', checked: !!s.checked[doc.name], onchange: e => { s.checked[doc.name] = e.target.checked; render(); } }),
+          h('span', { text: doc.name }))));
+      // A value claim can only be checked against the price paid, which is usually on the invoice or receipt
+      const valueHint = picked.some(i => claimsOf(i).some(c => /value/i.test(c.field)))
+        && docs.some(doc => !isImage(doc.name) && !s.checked[doc.name])
+        && h('p', { class: 'hint warn', text: 'Value claim: tick the invoice or receipt so Claude can check the price paid.' });
 
       // Many claims in one chat get shallower research, so suggest splitting big batches
       const batchHint = picked.length > 1 && pickedClaims > 3
@@ -1588,8 +1634,7 @@
               h('div', { class: 'row', style: 'margin-top:6px' },
                 h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: saveAnswer }),
                 h('button', { class: 'secondary', type: 'button', text: 'Cancel', onclick: () => { s.answerOpen = false; render(); } })))
-          : h('button', { class: 'secondary', type: 'button', text: "Paste Claude's answer", onclick: () => { s.answerOpen = true; render(); answerInput.focus(); } }),
-        h('p', { class: 'hint', text: 'Saving it records the verdict on each line, so this dispute shows what has been researched. On claude.ai, Save answer to dispute does the same.' }));
+          : h('button', { class: 'secondary', type: 'button', text: "Paste Claude's answer", title: 'Records the verdict on each line. On claude.ai, Save answer to dispute does the same.', onclick: () => { s.answerOpen = true; render(); answerInput.focus(); } }));
 
       const pad = loadNotes(d.disputeId);
       const shown = visibleNotes(pad);
@@ -1628,7 +1673,7 @@
       const waiting = shown.filter(n => n.pending).length;
       notesState.className = `hint${shared && pad.syncError ? ' warn' : ''}`;
       notesState.textContent = !shared
-        ? 'Saved on this computer only. Add a notes key under Settings to share with your team.'
+        ? 'Saved on this computer only.'
         : pad.syncError
           ? `${pad.syncError} Saved here; it will sync when it can${waiting ? ` (${waiting} waiting)` : ''}.`
           : pad.syncedAt
@@ -1646,22 +1691,22 @@
 
       rest.replaceChildren(...[
         h('div', { class: 'section' },
-          h('p', { class: 'label', text: 'Merchant' }),
-          h('div', { text: d.org || 'Unknown merchant' }),
-          h('div', { class: 'row', style: 'margin-top:8px' },
+          h('p', { class: 'label', text: 'Lines to research' }),
+          inDispute.length > 0
+            ? [h('p', { class: 'hint summary', text: `Ticked lines go to Claude · ${claimCount} ${claimCount === 1 ? 'claim' : 'claims'} on ${inDispute.length} ${inDispute.length === 1 ? 'line' : 'lines'} · ${doneCount} researched` }),
+              h('div', { class: 'lines' }, inDispute.map(lineCard)),
+              batchHint, noneHint]
+            : h('p', { class: 'hint', text: 'No line on this dispute has a claim.' })),
+        h('div', { class: 'section' },
+          h('p', { class: 'label', text: 'Merchant website' }),
+          h('div', { class: 'row' },
             siteInput,
             h('button', { class: 'secondary', type: 'button', text: 'Check site', disabled: s.checking, onclick: () => checkSite() })),
           s.guessed && h('p', { class: 'hint', text: "Guessed from the merchant's email domain. Change it if it's wrong." }),
-          siteInfo),
-        h('div', { class: 'section' },
-          h('p', { class: 'label', text: 'Items' }),
-          inDispute.length > 0 && h('p', { class: 'hint summary', text: `${claimCount} ${claimCount === 1 ? 'claim' : 'claims'} on ${inDispute.length} ${inDispute.length === 1 ? 'line' : 'lines'} · ${doneCount} of ${inDispute.length} researched` }),
-          batchHint, noneHint, valueHint, items),
+          siteLine),
+        docsBlock,
+        valueHint,
         answerSection,
-        ids.length > 0 && h('div', { class: 'section' },
-          h('p', { class: 'label', text: 'Product numbers found' }),
-          h('div', { class: 'ids' }, ids.map(x => h('span', { class: 'chip', title: `From ${x.from}`, text: x.id })))),
-        d.orderDocs.length > 0 && h('div', { class: 'section' }, h('p', { class: 'label', text: 'Order documents' }), docList(d.orderDocs)),
       ].filter(Boolean));
 
       body.scrollTop = scroll;
