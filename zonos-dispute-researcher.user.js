@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.17.0
+// @version      0.18.0
 // @description  Adds a "Notes and Research" panel to duty dispute pages: shared notes and saved Claude answers for each dispute, plus merchant research handed to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -928,7 +928,14 @@
   function requiredSearches(item, website) {
     const desc = item.fields.find(f => /^description$/i.test(f.label));
     const ids = productNumbers({ items: [item], orderDocs: [] }).map(x => x.id).slice(0, 4);
-    const name = clean(item.title).slice(0, 80) || clean(desc?.current).slice(0, 80);
+    // A listing title is often a marketing sentence, which searches badly: cut it at the first comma or
+    // period, and if it's still long, use the shortest description that still names the item
+    const wordCount = t => clean(t).split(' ').filter(Boolean).length;
+    const cut = t => clean(t).split(/[,.;:!?(]| [-–] /)[0].trim();
+    const titleName = cut(item.title);
+    const name = (titleName && wordCount(titleName) <= 8 ? titleName : null)
+      || [desc?.current, desc?.claimed].map(cut).filter(t => wordCount(t) >= 2 && wordCount(t) <= 8).sort((a, b) => a.length - b.length)[0]
+      || titleName.split(' ').slice(0, 8).join(' ');
     const key = ids[0] ? `"${ids[0]}"` : name;
     const host = website && new URL(website).hostname.replace(/^www\./, '');
     const queries = [
@@ -1285,7 +1292,7 @@
   const MINOR_FIELDS = /^(qty|quantity)/i;
 
   // Claude on claude.ai can only reach the API through the entry-assistant skill (it holds its own token)
-  const SKILL_STEP = "Use the entry-assistant skill (it calls the Entry Assistant API) for anything else relevant: look up any other code the evidence points to (such as the code for how the item is actually marketed) and compare it with the current one; read the section, chapter and Chapter 99 notes named above; and check the duties and Chapter 99 headings for the origin you actually find. If you can't use the skill, say so under API checks and carry on.";
+  const SKILL_STEP = "Use the entry-assistant skill (it calls the Entry Assistant API) for anything else relevant: look up any other code the evidence points to (such as the code for how the item is actually marketed) and compare it with the current one; read the section, chapter and Chapter 99 notes named above; and check the duties and Chapter 99 headings for the origin you actually find. If you can't use the skill, use your own HTS knowledge and carry on.";
 
   const IMAGE_STEP = 'Start with the attached images, before searching. Zoom in on small print and note every marking you can read: brands and logos; model, part, SKU and serial numbers; barcodes (UPC/EAN); "Made in" or "Product of" marks; material, fiber and care tags; stamped, cast or engraved marks; certification marks and IDs (CE, UL, FCC ID); packaging and shipping labels. Say what each image shows; if something is too blurry to read, say so instead of guessing.';
 
@@ -1338,7 +1345,7 @@
           if (p.description) L.push(`  Description: ${p.description}`);
         }
       }
-      L.push('', 'Required searches (run every one and list it under Searches run in the reply):', ...requiredSearches(item, website).map(q => `- ${q}`));
+      L.push('', "Required searches (run every one; the reply doesn't list them):", ...requiredSearches(item, website).map(q => `- ${q}`));
       const terms = queriesFor(item, d);
       const searchUrl = s.site && siteSearchUrl(s.site);
       if (terms.length && searchUrl) {
@@ -1386,7 +1393,7 @@
       valueStep,
       productClaim && "Find the manufacturer's own page for the item, plus spec sheets or datasheets.",
       productClaim && 'Answer every "What to find" point.',
-      productClaim && "Work out what decides the HS code. Read the wording of the current code, the merchant's code and any code the evidence points to, down to the subheading and statistical suffix, plus the section and chapter notes. List the facts each one turns on (type, function, materials and their shares, power or size limits, ingredients, who or what it's for) and look for evidence of each. Whatever you can't find goes under Info still needed.",
+      productClaim && "Work out what decides the HS code. Read the wording of the current code, the merchant's code and any code the evidence points to, down to the subheading and statistical suffix, plus the section and chapter notes. List the facts each one turns on (type, function, materials and their shares, power or size limits, ingredients, who or what it's for) and look for evidence of each. Settle every classification question yourself, using the HTS text, the section and chapter notes, the Explanatory Notes, the GRIs and CBP rulings; only facts that just the merchant can supply go under Ask the merchant for.",
       (productClaim || metalMatters) && "Find what it's made of. If it's metal, say which metal (steel, stainless steel, aluminum, copper or brass, zinc alloy) and roughly how much of its weight is metal, using the images, listings and spec sheets.",
       productClaim && 'Look for country-of-origin evidence: "Made in" marks in the images or on listings; where the manufacturer is based and where it has factories; the same product sold by overseas sellers on AliExpress, Alibaba, 1688, DHgate, Temu or Amazon. A barcode prefix only shows where the barcode was registered, not where the item was made.',
       hasChapter99 && "Using the Chapter 99 headings above, work out which ones apply. For Section 232 headings that comes down to the metal, the share of the weight that is metal, what the item is used for (for example motorcycle or other vehicle parts), and where it's made.",
@@ -1405,7 +1412,7 @@
       `1. **Do every step.** Go through all ${steps.length} steps above, in order, for every line. Don't skip one because this prompt seems to answer it already.`,
       "2. **Check every step.** Go back through the steps one at a time and confirm each one is done. Do any you missed now. If one can't be done (a page won't open, nothing exists online), note why.",
       "3. **Review what you found.** Re-read your findings against each claim's Check and against the template's labels. If findings contradict each other, or a label has nothing behind it, search again to settle it.",
-      '4. **Then reply,** in the template below. Under Steps checked, mark each step by number.');
+      "4. **Then reply,** in the template below. Don't list the steps or the searches in the reply.");
 
     // The reply is a fill-in template, built per line from what that line's dispute is about, so every answer
     // has the same sections in the same order. The "### Line N" headings let the script save each line's
@@ -1415,13 +1422,14 @@
       '- Copy the headings and bold labels exactly, in the same order. Replace each <…> with what you found and drop the angle brackets.',
       "- Keep every line, even when the answer is \"Not found\". Don't add, rename or reorder sections, and write nothing before the first heading or after the last line.",
       '- One short line per bullet, sub-bullets for lists. No paragraphs, no greeting, no recap of the dispute.',
-      "- Put HTS and Chapter 99 codes in backticks. Link a source for every fact. If you can't find something, say so under Info still needed instead of guessing.",
-      "- Under Info still needed, list only what's missing to get the most accurate HS code: facts the HTS wording turns on (in the heading, subheading, statistical suffix or a section or chapter note) that neither your research nor the merchant's documents show. Some examples: a motor's power source (electric, hydraulic, pneumatic), type (AC or DC, universal, rotary or linear) and output in watts; a pump's kind (centrifugal, rotary, reciprocating); a medicine's active ingredient (such as ibuprofen) and whether it's put up in measured doses for retail sale; a garment's fiber content and whether it's knit or woven; an article's metal and whether it's a part or a finished good. Those are only examples: work out the deciding facts for whatever this item is. Give one bullet per missing fact, saying which codes it decides between and exactly which document, photo or spec would show it. If nothing is missing, write a single bullet: \"Nothing: the research settles it\".",
-      '- Under Searches run, list every Required search plus any others you ran, each with what it found and the best link. A search that found nothing still goes in, marked "nothing relevant". If a fact comes only from this prompt rather than your research, say so.',
+      "- Put HTS and Chapter 99 codes in backticks. Link a source for every fact. If you can't find something, say so instead of guessing.",
+      "- Write only the final reply. No progress notes while you research (\"Now the API…\", \"Next search…\"), and no mention of the Entry Assistant API, the entry-assistant skill or what you looked up: state what you found (codes, rates, notes, rulings) as facts.",
+      "- Settle classification questions yourself, from the HTS text, the section and chapter notes, the Explanatory Notes and CBP rulings, and give your conclusion under Code it should be. Never hand one back as something to ask.",
+      "- Under Ask the merchant for, list only things that pass all three tests: (1) they would change or confirm the code or the duty, not just be nice to know; (2) your research couldn't settle them; (3) the merchant can actually provide them, such as their supplier's spec sheet or invoice, the material composition, an ingredient list, or a photo of the label or nameplate. Never a ruling request, a lab test or a legal question. The facts that matter are what the HTS wording turns on, in the heading, subheading, statistical suffix or a section or chapter note. Some examples: a motor's power source (electric, hydraulic, pneumatic), type (AC or DC, universal, rotary or linear) and output in watts; a pump's kind (centrifugal, rotary, reciprocating); a medicine's active ingredient (such as ibuprofen) and whether it's put up in measured doses for retail sale; a garment's fiber content and whether it's knit or woven; an article's metal and whether it's a part or a finished good. Those are only examples: work out the deciding facts for whatever this item is. Give one bullet per request: what to ask for, and which code or duty it changes. If nothing passes the tests, write a single bullet: \"Nothing: the code is settled\".",
       "- Under Discrepancies, give one sub-bullet for each place what you found contradicts what the merchant says, with its source. For example: their code covers microphones up to 10 mm across, but this one is 60 mm.",
       "- The verdict must carry its proof. Don't just say what the item \"clearly\" is: say what shows it (which photo, document or listing, with its link) and which rule it meets or fails (the HTS heading or subheading text, the origin rule, the Section 232 heading). One or two sentences on one line, starting exactly with \"The merchant's claim is\".",
       `  An example of the level of proof wanted (not of the content): "The merchant's claim is somewhat substantiated because the item is a finished microphone, not a part: the merchant's own listing ([link]) sells it as a complete USB condenser mic and photo 2 shows it assembled with its cable, so heading 8518 is right but their subheading (parts of microphones) is not; it belongs with complete microphones in 8518.10."`);
-    items.forEach((item, i) => L.push('', ...replyBlock(item, s, { hasImages, platformUnknown: platformUnknown && i === 0, stepCount: steps.length })));
+    items.forEach((item, i) => L.push('', ...replyBlock(item, s, { hasImages, platformUnknown: platformUnknown && i === 0 })));
     return L.filter(line => line !== false).join('\n');
   }
 
@@ -1436,7 +1444,7 @@
     return `**Dispute:** ${asks.join(' · ') || 'see the claims above'}${k.s232 && !named232 ? ' · Section 232' : ''}`;
   }
 
-  function replyBlock(item, s, { hasImages, platformUnknown, stepCount }) {
+  function replyBlock(item, s, { hasImages, platformUnknown }) {
     const facts = s.facts?.[item.line]?.data;
     const k = disputeKinds(item, facts);
     const metal = k.s232 || (!!facts && facts.codes.some(c => /232|steel|aluminum|copper/i.test(c.extra || '')));
@@ -1469,17 +1477,13 @@
       '#### More details',
       ...fields.map(f => `- **${f} claim:** <supported | partly supported | not supported> — <why, with a link>`),
       "- **Item found:** <name, brand, model or part number> — [merchant's listing](<link>)",
-      '- **Searches run:**',
-      '  - `<each search you ran, starting with the Required searches>` → <what it found, with the best link; or "nothing relevant">',
       hasImages && '- **Read from images:** <only the text and numbers that matter, and which photo>',
       k.product && '- **Rulings (CROSS):** <the closest CBP rulings: number, what they cover, and how this item compares; or "none close">',
-      "- **API checks:** <what you looked up with the entry-assistant skill, or why you couldn't>",
       platformUnknown && "- **Platform:** <what the merchant's site runs on>",
-      `- **Steps checked:** <each of the ${stepCount} How to research steps by number for this line: ✓ done, or ✗ and why it couldn't be done>`,
       '',
-      // What's still missing for the most accurate code, so it's clear what to ask the merchant for
-      '#### Info still needed',
-      '- **<the missing fact>:** <which codes it decides between> — <what would show it, such as a spec sheet, a photo of the label or nameplate, an ingredient list or a mill certificate>',
+      // Only what the merchant can supply that would change or confirm the code or duty
+      '#### Ask the merchant for',
+      '- **<what to ask for, such as the supplier spec sheet, material composition, ingredient list or a photo of the label>:** <which code or duty it would change or confirm, and why>',
       '',
       '#### Verdict',
       "**The merchant's claim is <substantiated | somewhat substantiated | not substantiated>** because <the proof: what the evidence shows, where it comes from, and the rule it meets or fails>.",

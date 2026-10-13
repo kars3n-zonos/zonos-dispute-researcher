@@ -81,8 +81,8 @@ Every answer uses the same template, one block per line, so answers are quick to
   - Section 232 for 232 disputes: the metal, how much of the item it is, where it was melted or smelted, and the Chapter 99 heading.
   - Value, weight or quantity checks for those claims.
   - Discrepancies between what was found and what the merchant says.
-- **More details:** a line per claim, the item found, every search Claude ran and what it found, what the photos show, the closest CBP rulings (CROSS), the Entry Assistant lookups, and a check mark for each research step.
-- **Info still needed:** what's missing, online and from the merchant, to get the most accurate HS code. That means the facts the code wording turns on, such as a motor's type and wattage, a medicine's active ingredient, fiber content or the metal. Each one says which codes it decides between and what would show it, for example a spec sheet or a photo of the label.
+- **More details:** a line per claim, the item found, what the photos show, and the closest CBP rulings (CROSS). The searches, research steps and Entry Assistant lookups happen but aren't listed.
+- **Ask the merchant for:** only what would change or confirm the code or duty, can't be found by research, and the merchant can actually provide: a supplier spec sheet, the material composition, an ingredient list, a label photo and so on. Each says which code or duty it affects. Classification questions are Claude's to settle, never something to ask.
 - **Verdict:** "The merchant's claim is substantiated / somewhat substantiated / not substantiated because …", with the proof in the sentence itself: what shows it, where it comes from, and which rule it meets or fails. Then the evidence for and against.
 
 ### Claude's answers
