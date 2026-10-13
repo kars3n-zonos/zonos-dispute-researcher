@@ -68,22 +68,23 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 
 Claude has to research before it answers, every time:
 
-- It runs a list of required searches for each line: each model or part number, the product name, its price and datasheet, the merchant's description, and the merchant's site.
-- It works through every research step, checks that each one is done, and reviews what it found before replying.
+- It runs a set of required searches for each line (model and part numbers, the product name, price, datasheet and the merchant's site) and works through every research step. None of that is listed in the answer.
+- It sticks to the dispute: it checks the merchant's claim against the entry as filed rather than classifying the item from scratch, and names a different code only if the evidence rules out both the current code and the merchant's.
 - If web search is off in that chat, it says so instead of answering. Turn web search on and send again.
 
-Every answer uses the same template, one block per line, so answers are quick to scan and compare:
+Every answer is short and uses the same layout, one block per line:
 
 - **Dispute:** what the merchant wants changed, from what to what.
-- **At a glance:**
-  - Code it should be (HS code disputes only), Description it should be (what it is, what it does and what it's made of), Prices found (low and high, with links, against the declared value), and Marketed use.
-  - Made of and Origin, with the evidence for each.
-  - Section 232 for 232 disputes: the metal, how much of the item it is, where it was melted or smelted, and the Chapter 99 heading.
-  - Value, weight or quantity checks for those claims.
+- **The findings:**
+  - Code it should be (HS code disputes only).
+  - Description it should be: what it is, what it does and what it's made of.
+  - Prices found: low and high, with links, against the declared value.
+  - Marketed use.
+  - Only for those disputes: Origin, Section 232, a tariff provision, or a value, weight or quantity check.
   - Discrepancies between what was found and what the merchant says.
-- **More details:** a line per claim, the item found, what the photos show, and the closest CBP rulings (CROSS). The searches, research steps and Entry Assistant lookups happen but aren't listed.
-- **Ask the merchant for:** only what would change or confirm the code or duty, can't be found by research, and the merchant can actually provide: a supplier spec sheet, the material composition, an ingredient list, a label photo and so on. Each says which code or duty it affects. Classification questions are Claude's to settle, never something to ask.
-- **Verdict:** "The merchant's claim is substantiated / somewhat substantiated / not substantiated because …", with the proof in the sentence itself: what shows it, where it comes from, and which rule it meets or fails. Then the evidence for and against.
+  - Ask the merchant for: only when one specific document would change the answer, otherwise left out.
+- **More details:** one line per claim, plus the closest CBP ruling for HS code and description disputes.
+- **Verdict:** "The merchant's claim is substantiated / somewhat substantiated / not substantiated because …", with the proof in the sentence itself.
 
 ### Claude's answers
 
