@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.13.0
+// @version      0.14.0
 // @description  Adds a "Research merchant" panel to duty dispute pages, checks the merchant's site, and hands the research to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -148,11 +148,10 @@
 
   /* ------------------------------------------- memory: what's been researched */
 
-  // One record per dispute: when each line went to Claude, and the verdict from Claude's saved answer.
-  // Shared by the dashboard and claude.ai, since Tampermonkey storage is the same on both.
+  // One record per dispute on this computer: when each line went to Claude. (Claude's answers are kept
+  // with the shared notes.) Used by the dashboard and claude.ai, since Tampermonkey storage is the same on both.
   const DISPUTE_PREFIX = 'zdr:dispute:';
   const DISPUTE_TTL_MS = 120 * 24 * 60 * 60 * 1000;
-  const MAX_SAVED_ANSWERS = 6;
 
   const loadRecord = id => GM_getValue(DISPUTE_PREFIX + id, null) || { id, lines: {}, answers: [], updatedAt: 0 };
 
@@ -178,8 +177,9 @@
     saveRecord(rec);
   }
 
-  // The lookahead skips the prompt's own template sentence ("substantiated / somewhat substantiated / …")
-  const VERDICT_RE = /the merchant['’]s claim is (not substantiated|somewhat substantiated|substantiated)\b(?!\s*\/)[^\n]*/i;
+  // The lookahead skips the prompt's own template sentence ("substantiated / somewhat substantiated / …");
+  // Markdown emphasis around the verdict ("is **not substantiated**") is allowed
+  const VERDICT_RE = /the merchant['’]s claim is[\s*_]*(not substantiated|somewhat substantiated|substantiated)\b(?![*_]*\s*\/)[^\n]*/i;
 
   // Splits Claude's answer at its "Line N" headings and pulls out each line's verdict sentence.
   // An answer without headings covers every line it was asked about.
@@ -189,36 +189,35 @@
     marks.forEach((m, i) => {
       const part = text.slice(m.index, i + 1 < marks.length ? marks[i + 1].index : undefined);
       const v = part.match(VERDICT_RE);
-      if (v) found[+m[1]] = { verdict: v[1].toLowerCase(), sentence: clean(v[0]) };
+      if (v) found[+m[1]] = { verdict: v[1].toLowerCase(), sentence: plainText(v[0]) };
     });
     if (!Object.keys(found).length) {
       const v = text.match(VERDICT_RE);
-      if (v) for (const line of lines) found[line] = { verdict: v[1].toLowerCase(), sentence: clean(v[0]) };
+      if (v) for (const line of lines) found[line] = { verdict: v[1].toLowerCase(), sentence: plainText(v[0]) };
     }
     return found;
   }
 
+  // A Markdown sentence as plain text: links become their text, emphasis and code marks go
+  const plainText = md => clean(md.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/\*\*|__|~~|`/g, '').replace(/(^|[^\w*])\*(?=\S)([^*]+?)\*(?!\w)/g, '$1$2').replace(/\*+$/, ''));
+
+  // Claude's answer goes in with the dispute's notes (as Markdown), so it's shared with everyone
   function recordAnswer(id, lines, text) {
-    const rec = loadRecord(id);
-    const verdicts = parseVerdicts(text, lines);
-    const now = Date.now();
-    for (const line of new Set([...lines, ...Object.keys(verdicts).map(Number)])) {
-      const v = verdicts[line];
-      rec.lines[line] = { ...rec.lines[line], answeredAt: now, ...(v ? { verdict: v.verdict, verdictSentence: v.sentence } : {}) };
-    }
-    rec.answers = [...(rec.answers || []), { savedAt: now, lines, text: text.slice(0, 20000) }].slice(-MAX_SAVED_ANSWERS);
-    saveRecord(rec);
-    return verdicts;
+    addAnswer(id, lines, text);
+    return parseVerdicts(text, lines);
   }
 
   const shortDate = ts => new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const capitalized = s => s[0].toUpperCase() + s.slice(1);
 
-  function lineStatus(l) {
-    if (l?.verdict) {
-      const kind = l.verdict === 'substantiated' ? 'v-yes' : l.verdict === 'somewhat substantiated' ? 'v-some' : 'v-no';
-      return { text: `${l.verdict[0].toUpperCase()}${l.verdict.slice(1)} · ${shortDate(l.answeredAt)}`, kind };
+  // `l` is this computer's record of the line (when it went to Claude), `la` the newest shared answer for it
+  function lineStatus(l, la) {
+    const by = la && la.answer.mine === false ? ` · ${la.answer.author}` : '';
+    if (la?.verdict) {
+      const kind = la.verdict === 'substantiated' ? 'v-yes' : la.verdict === 'somewhat substantiated' ? 'v-some' : 'v-no';
+      return { text: `${capitalized(la.verdict)} · ${shortDate(la.answer.createdAt)}${by}`, kind };
     }
-    if (l?.answeredAt) return { text: `Answer saved ${shortDate(l.answeredAt)}, no verdict found`, kind: '' };
+    if (la) return { text: `Answer saved ${shortDate(la.answer.createdAt)}${by}, no verdict found`, kind: '' };
     if (l?.sentAt) return { text: `Sent to Claude ${shortDate(l.sentAt)}`, kind: '' };
     return { text: 'Not researched yet', kind: '' };
   }
@@ -244,10 +243,23 @@
   const sharedNotesOn = () => !!(manualNotesKey() || joinRecord().key) || location.host === DASHBOARD_HOST;
 
   // A note is shown unless it's waiting to be deleted on the server. Notes without `mine: false`
-  // are your own (everything written before shared notes was turned on).
-  const visibleNotes = pad => pad.notes.filter(n => n.pending !== 'delete');
+  // are your own (everything written before shared notes was turned on). Claude's saved answers are
+  // notes too, with kind 'answer' and the lines they answer, shown in their own section.
+  const isAnswer = n => n.kind === 'answer';
+  const visibleNotes = pad => pad.notes.filter(n => n.pending !== 'delete' && !isAnswer(n));
+  const visibleAnswers = pad => pad.notes.filter(n => n.pending !== 'delete' && isAnswer(n)).sort((a, b) => b.createdAt - a.createdAt);
   const loadNotes = id => GM_getValue(NOTES_PREFIX + id, null) || { id, notes: [], draft: '', updatedAt: 0 };
   const noteCount = id => visibleNotes(loadNotes(id)).length;
+  const newNoteId = () => `n_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+  // The newest answer covering a line, from anyone, with its verdict for that line if it has one
+  function lineAnswer(pad, line) {
+    for (const answer of visibleAnswers(pad)) {
+      const v = parseVerdicts(answer.text, answer.lines || [])[line];
+      if (v || (answer.lines || []).includes(line)) return { answer, verdict: v?.verdict, sentence: v?.sentence };
+    }
+    return null;
+  }
 
   function changeNotes(id, change) {
     const pad = loadNotes(id);
@@ -259,9 +271,25 @@
   // Each change is saved here first and marked `pending` until the server confirms it
   const addNote = (id, text) => changeNotes(id, pad => {
     const now = Date.now();
-    pad.notes.push({ id: `n_${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`, author: GM_getValue(AUTHOR_KEY, '') || 'Me', text, createdAt: now, updatedAt: now, pending: 'add' });
+    pad.notes.push({ id: newNoteId(), author: GM_getValue(AUTHOR_KEY, '') || 'Me', text, createdAt: now, updatedAt: now, pending: 'add' });
     pad.draft = '';
   });
+  // An answer is cut to what the server takes: 30,000 characters in a request under 64 KB. Saving the
+  // same answer twice (a second click on Save) keeps one copy.
+  const addAnswer = (id, lines, text, createdAt = Date.now()) => changeNotes(id, pad => {
+    let md = text.trim().slice(0, 30000);
+    while (new TextEncoder().encode(JSON.stringify(md)).length > 60000) md = md.slice(0, Math.floor(md.length * 0.9));
+    if (visibleAnswers(pad).some(a => a.text === md && String(a.lines) === String(lines))) return;
+    pad.notes.push({ id: newNoteId(), kind: 'answer', lines: [...lines], author: GM_getValue(AUTHOR_KEY, '') || 'Me', text: md, createdAt, updatedAt: Date.now(), pending: 'add' });
+  });
+  // Answers saved before they were shared sat in this computer's record of the dispute; share them now
+  function shareOldAnswers(id) {
+    const rec = loadRecord(id);
+    if (!rec.answers?.length) return;
+    for (const a of rec.answers) addAnswer(id, a.lines || [], a.text, a.savedAt);
+    rec.answers = [];
+    saveRecord(rec);
+  }
   const editNote = (id, noteId, text) => changeNotes(id, pad => {
     const note = pad.notes.find(n => n.id === noteId);
     if (note) Object.assign(note, { text, edited: true, updatedAt: Date.now(), pending: note.synced ? 'edit' : 'add' });
@@ -385,7 +413,7 @@
         try {
           if (note.pending === 'delete') await notesApi('DELETE', `${base}/${note.id}`);
           else if (note.pending === 'edit') await notesApi('PATCH', `${base}/${note.id}`, { text: note.text });
-          else await notesApi('POST', base, { id: note.id, text: note.text });
+          else await notesApi('POST', base, { id: note.id, text: note.text, ...(isAnswer(note) ? { kind: 'answer', lines: note.lines, createdAt: note.createdAt } : {}) });
           changeNotes(id, pad => {
             if (note.pending === 'delete') {
               pad.notes = pad.notes.filter(n => n.id !== note.id);
@@ -400,7 +428,7 @@
           changeNotes(id, pad => {
             const n = pad.notes.find(x => x.id === note.id);
             if (!n) return;
-            if (e.status === 409) n.id = `n_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; // id taken: retry under a new one
+            if (e.status === 409) n.id = newNoteId(); // id taken: retry under a new one
             else if (e.status === 404) pad.notes = pad.notes.filter(x => x.id !== note.id); // already gone on the server
             else Object.assign(n, { pending: null, rejected: e.message }); // refused for good, e.g. too long
           });
@@ -439,6 +467,209 @@
     }
     parts.push(text.slice(last));
     return parts;
+  }
+
+  /* ------------------------------------------------ Markdown: saving and showing */
+
+  // Claude's answers are saved as Markdown. On claude.ai the rendered reply is turned back into Markdown;
+  // in the panel Markdown is drawn with h(), so nothing in an answer can inject markup.
+  const SKIP_TAGS = /^(BUTTON|SVG|SCRIPT|STYLE|NOSCRIPT|TEXTAREA|INPUT|SELECT|IMG|PICTURE|VIDEO|AUDIO|CANVAS|IFRAME)$/;
+  const BLOCK_TAGS = /^(P|DIV|SECTION|ARTICLE|HEADER|FOOTER|MAIN|ASIDE|NAV|FIGURE|DETAILS|SUMMARY|H[1-6]|UL|OL|LI|PRE|BLOCKQUOTE|TABLE|THEAD|TBODY|TFOOT|TR|HR|DL|DT|DD)$/;
+
+  function htmlToMarkdown(root) {
+    const wrap = (mark, s) => {
+      const t = s.trim();
+      return t ? `${s.match(/^\s*/)[0]}${mark}${t}${mark}${s.match(/\s*$/)[0]}` : s;
+    };
+    const inline = n => {
+      if (n.nodeType === Node.TEXT_NODE) return n.nodeValue.replace(/\s+/g, ' ');
+      if (n.nodeType !== Node.ELEMENT_NODE || SKIP_TAGS.test(n.tagName.toUpperCase())) return '';
+      const kids = () => [...n.childNodes].map(inline).join('');
+      switch (n.tagName) {
+        case 'STRONG': case 'B': return wrap('**', kids());
+        case 'EM': case 'I': return wrap('*', kids());
+        case 'DEL': case 'S': return wrap('~~', kids());
+        case 'CODE': return n.textContent ? `\`${n.textContent}\`` : '';
+        case 'BR': return '\n';
+        case 'A': {
+          const text = kids().trim();
+          const href = n.getAttribute('href') || '';
+          if (!/^https?:\/\//i.test(href) || !text) return text;
+          return text === href ? href : `[${text}](${href})`;
+        }
+        default: return kids();
+      }
+    };
+    // A node's children as Markdown blocks; runs of inline content between blocks become paragraphs
+    const blocks = node => {
+      const out = [];
+      let run = '';
+      const end = () => {
+        const t = run.replace(/[ \t]*\n[ \t]*/g, '\n').trim();
+        if (t) out.push(t);
+        run = '';
+      };
+      for (const n of node.childNodes) {
+        if (n.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.test(n.tagName)) {
+          end();
+          const b = block(n);
+          if (b) out.push(b);
+        } else run += inline(n);
+      }
+      end();
+      return out;
+    };
+    const block = n => {
+      const tag = n.tagName;
+      if (/^H[1-6]$/.test(tag)) return `${'#'.repeat(+tag[1])} ${inline(n).trim()}`;
+      if (tag === 'HR') return '---';
+      if (tag === 'PRE') {
+        // claude.ai puts a language label and a copy button inside the block; only the code counts
+        const code = n.querySelector('code');
+        const lang = (code?.className.match(/language-([\w-]+)/) || [])[1] || '';
+        return `\`\`\`${lang}\n${(code || n).textContent.replace(/\n+$/, '')}\n\`\`\``;
+      }
+      if (tag === 'BLOCKQUOTE') return blocks(n).join('\n\n').split('\n').map(l => `> ${l}`.trimEnd()).join('\n');
+      if (tag === 'UL' || tag === 'OL') {
+        let i = Number(n.getAttribute('start')) || 1;
+        return [...n.children].filter(li => li.tagName === 'LI').map(li => {
+          const marker = tag === 'OL' ? `${i++}. ` : '- ';
+          return marker + blocks(li).join('\n').split('\n').map((l, k) => (k ? ' '.repeat(marker.length) + l : l)).join('\n');
+        }).join('\n');
+      }
+      if (tag === 'TABLE') {
+        const rows = [...n.querySelectorAll('tr')].map(tr => [...tr.children].map(c => inline(c).trim().replace(/\s*\n\s*/g, ' ').replace(/\|/g, '\\|')));
+        if (!rows.length) return '';
+        const width = Math.max(...rows.map(r => r.length));
+        const row = r => `| ${[...r, ...Array(width - r.length).fill('')].join(' | ')} |`;
+        return [row(rows[0]), `|${' --- |'.repeat(width)}`, ...rows.slice(1).map(row)].join('\n');
+      }
+      return blocks(n).join('\n\n');
+    };
+    return blocks(root).join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  // Pasting a selection copied from claude.ai brings its formatting as HTML; keep that as Markdown.
+  // Text from Claude's own copy button is Markdown already and goes in as it is.
+  function pasteAsMarkdown(e) {
+    const html = e.clipboardData?.getData('text/html');
+    const plain = e.clipboardData?.getData('text/plain') || '';
+    if (!html || /^\s*(#{1,6}\s|[-*]\s|\d+\.\s)|\*\*|\]\(https?:/m.test(plain)) return;
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    if (!doc.body.querySelector('h1,h2,h3,h4,h5,h6,strong,b,em,li,table,a,pre,blockquote')) return;
+    const md = htmlToMarkdown(doc.body);
+    if (!md) return;
+    e.preventDefault();
+    const box = e.currentTarget;
+    box.setRangeText(md, box.selectionStart, box.selectionEnd, 'end');
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  const MD_INLINE = /`([^`\n]+)`|\*\*(.+?)\*\*|__(.+?)__|~~(.+?)~~|(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])|(?<!\w)_(?!\s)(.+?)(?<!\s)_(?!\w)|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"]+)/g;
+  function mdInline(text) {
+    const out = [];
+    let last = 0;
+    for (const m of text.matchAll(MD_INLINE)) {
+      const [all, code, bold, bold2, strike, em, em2, linkText, linkUrl, bare] = m;
+      out.push(text.slice(last, m.index));
+      if (code != null) out.push(h('code', { text: code }));
+      else if (bold != null || bold2 != null) out.push(h('strong', {}, mdInline(bold ?? bold2)));
+      else if (strike != null) out.push(h('s', {}, mdInline(strike)));
+      else if (em != null || em2 != null) out.push(h('em', {}, mdInline(em ?? em2)));
+      else if (linkUrl) out.push(h('a', { href: linkUrl, target: '_blank', rel: 'noopener noreferrer' }, mdInline(linkText)));
+      else {
+        const url = bare.replace(/[).,;:!?\]'}*_]+$/, '');
+        out.push(h('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: url }), bare.slice(url.length));
+      }
+      last = m.index + all.length;
+    }
+    out.push(text.slice(last));
+    return out;
+  }
+  const mdLines = text => text.split('\n').flatMap((l, k) => (k ? [h('br'), ...mdInline(l)] : mdInline(l)));
+
+  // Nested lists from list items with their indentation. A switch between bullets and numbers starts a
+  // new list, so a bulleted list followed by a numbered one stays two lists.
+  function mdList(items) {
+    const root = { children: [] };
+    const stack = [{ depth: -1, node: root }];
+    for (const it of items) {
+      while (it.depth <= stack[stack.length - 1].depth) stack.pop();
+      const node = { it, children: [] };
+      stack[stack.length - 1].node.children.push(node);
+      stack.push({ depth: it.depth, node });
+    }
+    const draw = nodes => {
+      const runs = [];
+      for (const n of nodes) {
+        if (!runs.length || runs[runs.length - 1][0].it.ordered !== n.it.ordered) runs.push([]);
+        runs[runs.length - 1].push(n);
+      }
+      return runs.map(run => h(run[0].it.ordered ? 'ol' : 'ul', run[0].it.ordered && run[0].it.start !== 1 ? { start: String(run[0].it.start) } : {},
+        run.map(n => h('li', {}, mdLines(n.it.text), n.children.length > 0 && draw(n.children)))));
+    };
+    return draw(root.children);
+  }
+
+  // Headings, paragraphs, lists, quotes, code blocks, tables and rules; single line breaks are kept
+  function renderMarkdown(md) {
+    const lines = md.replace(/\r\n?/g, '\n').split('\n');
+    const LIST = /^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$/;
+    const RULE = /^\s*(-{3,}|\*{3,}|_{3,})\s*$/;
+    const isTableRule = l => l != null && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(l);
+    const cells = l => l.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'));
+    const startsBlock = (l, next) => /^\s*(#{1,6}\s|```|>)/.test(l) || RULE.test(l) || LIST.test(l) || (l.includes('|') && isTableRule(next));
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      let m;
+      if (!line.trim()) {
+        i++;
+      } else if (/^\s*```/.test(line)) {
+        const code = [];
+        for (i++; i < lines.length && !/^\s*```/.test(lines[i]); i++) code.push(lines[i]);
+        i++;
+        out.push(h('pre', {}, h('code', { text: code.join('\n') })));
+      } else if ((m = line.match(/^\s*(#{1,6})\s+(.*?)[\s#]*$/))) {
+        out.push(h(`h${Math.min(m[1].length + 2, 6)}`, {}, mdInline(m[2])));
+        i++;
+      } else if (RULE.test(line)) {
+        out.push(h('hr'));
+        i++;
+      } else if (/^\s*>/.test(line)) {
+        const quote = [];
+        for (; i < lines.length && /^\s*>/.test(lines[i]); i++) quote.push(lines[i].replace(/^\s*>\s?/, ''));
+        out.push(h('blockquote', {}, renderMarkdown(quote.join('\n'))));
+      } else if (line.includes('|') && isTableRule(lines[i + 1])) {
+        const head = cells(line);
+        const rows = [];
+        for (i += 2; i < lines.length && lines[i].includes('|') && lines[i].trim(); i++) rows.push(cells(lines[i]));
+        out.push(h('div', { class: 'table-wrap' }, h('table', {},
+          h('thead', {}, h('tr', {}, head.map(c => h('th', {}, mdInline(c))))),
+          h('tbody', {}, rows.map(r => h('tr', {}, head.map((_, k) => h('td', {}, mdInline(r[k] || '')))))))));
+      } else if (LIST.test(line)) {
+        const items = [];
+        while (i < lines.length) {
+          const l = lines[i];
+          if ((m = l.match(LIST))) {
+            items.push({ depth: m[1].replace(/\t/g, '    ').length, ordered: /\d/.test(m[2]), start: parseInt(m[2], 10) || 1, text: m[3] });
+            i++;
+          } else if (l.trim() && /^\s/.test(l) && items.length) {
+            items[items.length - 1].text += `\n${l.trim()}`; // the item's text goes on
+            i++;
+          } else if (!l.trim() && LIST.test(lines[i + 1] || '')) {
+            i++; // a blank line between items
+          } else break;
+        }
+        out.push(...mdList(items));
+      } else {
+        const para = [];
+        for (; i < lines.length && lines[i].trim() && !(para.length && startsBlock(lines[i], lines[i + 1])); i++) para.push(lines[i].trim());
+        out.push(h('p', {}, mdLines(para.join('\n'))));
+      }
+    }
+    return out;
   }
 
   // The part of a saved answer about one line (the whole answer if it has no "Line N" headings)
@@ -1212,7 +1443,29 @@
     .summary { margin: 0 0 8px; }
     .verdict { margin: 0 0 4px; font-size: 12px; font-style: italic; }
     .linkish { background: none; border: 0; padding: 0; color: var(--accent); font-size: 12px; text-decoration: underline; }
-    pre.saved { white-space: pre-wrap; max-height: 240px; overflow: auto; margin: 6px 0 0; padding: 8px; font: 12px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--soft); border-radius: 6px; }
+    .saved { margin: 6px 0 0; padding: 8px 10px; background: var(--soft); border-radius: 6px; }
+    .answers { display: grid; gap: 8px; margin-bottom: 8px; }
+    .answer-card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+    .answer-card.theirs { border-left: 3px solid var(--accent); }
+    .answer-card summary { cursor: pointer; font-size: 12px; }
+    .answer-card[open] summary { margin-bottom: 4px; }
+    .md { font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+    .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
+    .md h3, .md h4, .md h5, .md h6 { margin: 12px 0 4px; font-size: 13px; line-height: 1.35; }
+    .md h3 { font-size: 14px; }
+    .md p { margin: 0 0 8px; }
+    .md ul, .md ol { margin: 0 0 8px; padding-left: 20px; }
+    .md li { margin: 2px 0; }
+    .md li > ul, .md li > ol { margin: 2px 0 0; }
+    .md code { font: 11.5px ui-monospace, SFMono-Regular, Consolas, monospace; background: var(--bg); padding: 0 3px; border-radius: 3px; }
+    .md pre { margin: 0 0 8px; padding: 8px; background: var(--bg); border-radius: 6px; overflow-x: auto; }
+    .md pre code { padding: 0; white-space: pre; }
+    .md blockquote { margin: 0 0 8px; padding-left: 10px; border-left: 3px solid var(--line); color: var(--muted); }
+    .md .table-wrap { overflow-x: auto; margin: 0 0 8px; }
+    .md table { border-collapse: collapse; font-size: 12px; }
+    .md th, .md td { border: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; }
+    .md th { background: var(--bg); font-weight: 600; }
+    .md hr { border: 0; border-top: 1px solid var(--line); margin: 10px 0; }
     .note-list { list-style: none; padding: 0; margin: 0 0 8px; }
     .note { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin: 0 0 6px; }
     .note-text { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -1322,14 +1575,38 @@
     // While the panel is open, coworkers' notes are picked up every 15 seconds and when you come back to the tab
     const NOTES_POLL_MS = 15000;
     let pollTimer = null;
+    // The panel is only redrawn when the notes or answers changed, so reading or selecting text in an open
+    // answer isn't interrupted every 15 seconds. The first sync also re-picks the lines to tick, since
+    // coworkers' answers may have just arrived.
     function syncNow() {
       if (!state) return Promise.resolve();
       const id = state.data.disputeId;
+      const before = JSON.stringify(loadNotes(id).notes);
       return syncNotes(id).then(() => {
-        if (state && state.data.disputeId === id) render();
+        if (state && state.data.disputeId === id) {
+          const pad = loadNotes(id);
+          const first = !state.synced;
+          state.synced = true;
+          if (first && !state.selectionTouched) state.selected = unresearchedLines(state.data);
+          if (first || JSON.stringify(pad.notes) !== before) render();
+          else showNotesState(pad);
+        }
         updateLaunchLabel();
         if (!settings.open) refreshNotesKeyNote();
       });
+    }
+
+    function showNotesState(pad) {
+      const shared = sharedNotesOn();
+      const waiting = pad.notes.filter(n => n.pending).length;
+      notesState.className = `hint${shared && pad.syncError ? ' warn' : ''}`;
+      notesState.textContent = !shared
+        ? 'Saved on this computer only.'
+        : pad.syncError
+          ? `${pad.syncError} Saved here; it will sync when it can${waiting ? ` (${waiting} waiting)` : ''}.`
+          : pad.syncedAt
+            ? `Shared with your team · checked ${new Date(pad.syncedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}${waiting ? ` · ${waiting} waiting to sync` : ''}`
+            : 'Shared with your team · checking…';
     }
     function startPolling() {
       stopPolling();
@@ -1369,9 +1646,11 @@
       syncNow();
     }
 
+    // Lines nobody has an answer for, and that this computer hasn't sent to Claude
     function unresearchedLines(data) {
       const rec = loadRecord(data.disputeId);
-      return new Set(data.items.filter(i => i.inDispute && !rec.lines[i.line]?.sentAt && !rec.lines[i.line]?.answeredAt).map(i => i.line));
+      const pad = loadNotes(data.disputeId);
+      return new Set(data.items.filter(i => i.inDispute && !rec.lines[i.line]?.sentAt && !lineAnswer(pad, i.line)).map(i => i.line));
     }
 
     // Claude's answer may have been saved from the claude.ai tab while this one was in the background
@@ -1468,12 +1747,13 @@
       }
       const saved = GM_getValue(SITE_PREFIX + data.org.toLowerCase(), '');
       const guessed = guessWebsite(data.emailDomain);
-      state = { path, data, website: saved || guessed, guessed: !saved && !!guessed, site: null, siteError: '', checking: false, matches: {}, checked: {}, facts: {}, factsPromise: null, selected: new Set(), answerOpen: false, showAnswer: {} };
+      state = { path, data, website: saved || guessed, guessed: !saved && !!guessed, site: null, siteError: '', checking: false, matches: {}, checked: {}, facts: {}, factsPromise: null, selected: new Set(), answerOpen: false, showAnswer: {}, openAnswers: {} };
       // Every document is attached by default; untick any you don't want sent
       for (const doc of [...data.items.flatMap(i => i.docs), ...data.orderDocs]) state.checked[doc.name] = true;
-      // Lines not yet sent to Claude start ticked; lines already sent or answered start unticked
+      shareOldAnswers(data.disputeId);
+      // Lines not yet sent to Claude or answered start ticked (checked again once coworkers' answers arrive)
       state.selected = unresearchedLines(data);
-      answerInput = h('textarea', { class: 'answer', rows: 6, placeholder: "Paste Claude's whole answer here", 'aria-label': "Claude's answer" });
+      answerInput = h('textarea', { class: 'answer', rows: 6, placeholder: "Paste Claude's whole answer here (formatting is kept as Markdown)", 'aria-label': "Claude's answer", onpaste: pasteAsMarkdown });
       // The unsent note is saved as you type, so closing the panel or the tab doesn't lose it
       noteInput = h('textarea', {
         class: 'note-input', rows: 2, placeholder: 'Add a note or paste a link…', 'aria-label': 'New note',
@@ -1557,30 +1837,39 @@
           ].filter(Boolean).join(' · ') });
 
       const rec = loadRecord(d.disputeId);
+      const pad = loadNotes(d.disputeId);
+      const shared = sharedNotesOn();
+      const noteLink = (text, onclick) => h('button', { class: 'linkish', type: 'button', text, onclick });
       const inDispute = d.items.filter(i => i.inDispute);
       const claimCount = inDispute.reduce((n, i) => n + claimsOf(i).length, 0);
-      const doneCount = inDispute.filter(i => rec.lines[i.line]?.answeredAt).length;
+      const doneCount = inDispute.filter(i => lineAnswer(pad, i.line)).length;
       const picked = inDispute.filter(i => s.selected.has(i.line));
       const pickedClaims = picked.reduce((n, i) => n + claimsOf(i).length, 0);
 
-      const toggleLine = (line, on) => { if (on) s.selected.add(line); else s.selected.delete(line); render(); };
+      const toggleLine = (line, on) => {
+        if (on) s.selected.add(line);
+        else s.selected.delete(line);
+        s.selectionTouched = true;
+        render();
+      };
 
+      // Under a line: the verdict sentence from the newest answer, and that line's part of the answer
       const savedAnswer = item => {
-        const l = rec.lines[item.line];
-        const answer = [...(rec.answers || [])].reverse().find(a => a.lines.includes(item.line) && answerPart(a.text, item.line));
-        if (!l?.answeredAt || !answer) return null;
+        const la = lineAnswer(pad, item.line);
+        const part = la && answerPart(la.answer.text, item.line);
+        if (!la || (!la.sentence && !part)) return null;
         const open = !!s.showAnswer[item.line];
         return h('div', { class: 'sub-block' },
-          l.verdictSentence && h('p', { class: 'verdict', text: l.verdictSentence }),
-          h('button', { class: 'linkish', type: 'button', text: open ? 'Hide saved answer' : 'Show saved answer', onclick: () => { s.showAnswer[item.line] = !open; render(); } }),
-          open && h('pre', { class: 'saved', text: answerPart(answer.text, item.line) }));
+          la.sentence && h('p', { class: 'verdict', text: la.sentence }),
+          part && noteLink(open ? 'Hide answer' : 'Show answer', () => { s.showAnswer[item.line] = !open; render(); }),
+          open && part && h('div', { class: 'md saved' }, renderMarkdown(part)));
       };
 
       // One card per line with claims: the whole card is the tick box, and a ticked card is outlined and
       // tinted, so it's plain which lines go to Claude. Lines without claims aren't listed.
       const lineCard = item => {
         const on = s.selected.has(item.line);
-        const { text, kind } = lineStatus(rec.lines[item.line]);
+        const { text, kind } = lineStatus(rec.lines[item.line], lineAnswer(pad, item.line));
         const fields = [...new Set(claimsOf(item).map(c => c.field))];
         return h('div', {},
           h('label', { class: `line${on ? ' on' : ''}` },
@@ -1623,23 +1912,46 @@
         s.answerOpen = false;
         s.selected = unresearchedLines(d);
         const found = Object.entries(verdicts).map(([line, v]) => `line ${line}: ${v.verdict}`).join(', ');
-        setStatus(found ? `Answer saved (${found}).` : "Answer saved, but it has no verdict sentence (\"The merchant's claim is …\").", found ? 'ok' : 'warn');
-        render();
+        setStatus(found ? `Answer saved for everyone on this dispute (${found}).` : "Answer saved for everyone on this dispute, but it has no verdict sentence (\"The merchant's claim is …\").", found ? 'ok' : 'warn');
+        notesChanged();
+      };
+
+      // Every saved answer, newest first, folded; open one to read it formatted or copy its Markdown
+      const answers = visibleAnswers(pad);
+      const answerCard = a => {
+        const verdicts = [...new Set(Object.values(parseVerdicts(a.text, a.lines || [])).map(v => capitalized(v.verdict)))];
+        const confirming = s.confirmDelete === a.id;
+        const summary = [
+          a.lines?.length ? `Line${a.lines.length > 1 ? 's' : ''} ${a.lines.join(', ')}` : 'Answer',
+          verdicts.length ? verdicts.join(' / ') : 'no verdict',
+          a.author,
+          shortDate(a.createdAt),
+          shared && a.pending && 'waiting to sync',
+          a.rejected && `not shared: ${a.rejected}`,
+        ].filter(Boolean).join(' · ');
+        return h('details', { class: `answer-card${a.mine === false ? ' theirs' : ''}`, open: !!s.openAnswers[a.id], ontoggle: e => { s.openAnswers[a.id] = e.currentTarget.open; } },
+          h('summary', { text: summary }),
+          h('div', { class: 'md saved' }, renderMarkdown(a.text)),
+          h('div', { class: 'note-meta' },
+            noteLink('Copy Markdown', () => { GM_setClipboard(a.text, 'text'); setStatus('Answer copied as Markdown.', 'ok'); }),
+            a.mine !== false && (confirming
+              ? [h('span', { text: 'Delete this answer for everyone?' }),
+                noteLink('Delete', () => { deleteNote(d.disputeId, a.id); s.confirmDelete = null; notesChanged(); }),
+                noteLink('Keep', () => { s.confirmDelete = null; render(); })]
+              : noteLink('Delete', () => { s.confirmDelete = a.id; render(); }))));
       };
       const answerSection = inDispute.length > 0 && h('div', { class: 'section' },
-        h('p', { class: 'label', text: "Claude's answer" }),
+        h('p', { class: 'label', text: answers.length ? `Claude's answers (${answers.length})` : "Claude's answers" }),
+        answers.length > 0 && h('div', { class: 'answers' }, answers.map(answerCard)),
         s.answerOpen
           ? h('div', {},
               answerInput,
               h('div', { class: 'row', style: 'margin-top:6px' },
                 h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: saveAnswer }),
                 h('button', { class: 'secondary', type: 'button', text: 'Cancel', onclick: () => { s.answerOpen = false; render(); } })))
-          : h('button', { class: 'secondary', type: 'button', text: "Paste Claude's answer", title: 'Records the verdict on each line. On claude.ai, Save answer to dispute does the same.', onclick: () => { s.answerOpen = true; render(); answerInput.focus(); } }));
+          : h('button', { class: 'secondary', type: 'button', text: "Paste Claude's answer", title: 'Saved as Markdown and shared with everyone on this dispute. On claude.ai, Save answer to dispute does the same.', onclick: () => { s.answerOpen = true; render(); answerInput.focus(); } }));
 
-      const pad = loadNotes(d.disputeId);
       const shown = visibleNotes(pad);
-      const shared = sharedNotesOn();
-      const noteLink = (text, onclick) => h('button', { class: 'linkish', type: 'button', text, onclick });
       const noteItem = n => {
         const editing = s.editingNote === n.id;
         const confirming = s.confirmDelete === n.id;
@@ -1670,15 +1982,7 @@
             h('span', { text: [n.author, shortDate(n.createdAt), ...flags].join(' · ') }),
             ...actions));
       };
-      const waiting = shown.filter(n => n.pending).length;
-      notesState.className = `hint${shared && pad.syncError ? ' warn' : ''}`;
-      notesState.textContent = !shared
-        ? 'Saved on this computer only.'
-        : pad.syncError
-          ? `${pad.syncError} Saved here; it will sync when it can${waiting ? ` (${waiting} waiting)` : ''}.`
-          : pad.syncedAt
-            ? `Shared with your team · checked ${new Date(pad.syncedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}${waiting ? ` · ${waiting} waiting to sync` : ''}`
-            : 'Shared with your team · checking…';
+      showNotesState(pad);
       // Redraws happen while lookups finish; if you're typing in a box that gets moved (the website box,
       // a note being edited), put focus and the cursor back where they were
       const active = root.activeElement;
@@ -1873,7 +2177,8 @@
         .filter(x => x.text.length > 40 && !x.text.includes('## How to research'));
       if (found.length) {
         const last = found[found.length - 1];
-        return { text: last.text, streaming: !!last.el.closest('[data-is-streaming="true"]') };
+        // Kept as Markdown so headings, bold, lists, links and tables survive
+        return { text: htmlToMarkdown(last.el) || last.text, streaming: !!last.el.closest('[data-is-streaming="true"]') };
       }
     }
     return null;
@@ -1884,13 +2189,18 @@
     return [bannerButton('Save answer to dispute', () => saveAnswerFromPage(handoff, banner, copyAgain), true), copyAgain];
   }
 
-  function storeAnswer(handoff, banner, text, copyAgain) {
+  // Saves the answer with the dispute's notes and sends it to the notes server straight away, so
+  // coworkers see it; if that can't happen now, the dashboard sends it the next time the dispute is open
+  async function storeAnswer(handoff, banner, text, copyAgain) {
     const verdicts = recordAnswer(handoff.disputeId, handoff.lines || [], text);
     const found = Object.entries(verdicts).map(([line, v]) => `line ${line}: ${v.verdict}`).join(', ');
-    banner.set(found
-      ? `Saved to ${handoff.disputeId} (${found}). The dispute page shows it next time you look.`
-      : `Saved to ${handoff.disputeId}, but the answer has no verdict sentence ("The merchant's claim is …").`,
-    found ? 'ok' : 'warn', saveButtons(handoff, banner, copyAgain));
+    const what = found ? `(${found})` : '(no verdict sentence found: "The merchant\'s claim is …")';
+    banner.set(`Saved to ${handoff.disputeId} ${what}. Sharing it with your team…`, found ? 'ok' : 'warn', saveButtons(handoff, banner, copyAgain));
+    const sync = await syncNotes(handoff.disputeId);
+    banner.set(sync.ok
+      ? `Saved to ${handoff.disputeId} ${what} and shared with your team.`
+      : `Saved to ${handoff.disputeId} ${what} on this computer. It will be shared the next time you open the dispute${sync.error ? ` (${sync.error.replace(/\.$/, '')})` : ''}.`,
+    found && sync.ok ? 'ok' : 'warn', saveButtons(handoff, banner, copyAgain));
   }
 
   function saveAnswerFromPage(handoff, banner, copyAgain) {
@@ -1903,7 +2213,7 @@
       storeAnswer(handoff, banner, found.text, copyAgain);
       return;
     }
-    const box = h('textarea', { class: 'paste', rows: 5, placeholder: "Paste Claude's whole answer here", 'aria-label': "Claude's answer" });
+    const box = h('textarea', { class: 'paste', rows: 5, placeholder: "Paste Claude's whole answer here", 'aria-label': "Claude's answer", onpaste: pasteAsMarkdown });
     banner.set("Couldn't read Claude's answer from the page. Copy it with the copy button under the answer, then paste it here:", 'warn', [
       box,
       bannerButton('Save', () => { if (box.value.trim()) storeAnswer(handoff, banner, box.value.trim(), copyAgain); }, true),

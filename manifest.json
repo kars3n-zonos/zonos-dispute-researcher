@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Zonos Dispute Researcher",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Adds a Research merchant panel to Zonos duty dispute pages and hands the research to Claude on claude.ai.",
   "homepage_url": "https://github.com/kars3n-zonos/zonos-dispute-researcher",
   "icons": {

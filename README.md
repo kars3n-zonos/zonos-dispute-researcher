@@ -42,7 +42,7 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 
 ## Use
 
-- The panel only shows what the dispute page doesn't: your notes, a card for each line to tick, the merchant website, the documents to attach, and the Claude buttons. Everything else (claims, HTS facts, product numbers, matches on the merchant's site) still goes into the prompt.
+- The panel only shows what the dispute page doesn't: your notes, a card for each line to tick, the merchant website, the documents to attach, Claude's saved answers, and the Claude buttons. Everything else (claims, HTS facts, product numbers, matches on the merchant's site) still goes into the prompt.
 - **Open in Claude** opens claude.ai with the prompt and files filled in. Check it, then press Enter.
 - **Copy prompt** copies the prompt if you'd rather paste it yourself.
 - For Claude to run its own HTS lookups, add the entry-assistant skill in claude.ai and allow its code sandbox to reach `entry.kars3n.com`.
@@ -61,14 +61,16 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 ### Disputes with several lines
 
 - Each line with claims gets a card showing what's claimed (HS code, Value…) and whether it's been researched. Click a card to tick it; ticked cards are outlined in orange. Only ticked lines, plus the order-level documents, go into the prompt. Claude answers in one block per line, each ending with its own verdict sentence.
-- Lines not researched yet start ticked; lines already sent to Claude or answered start unticked.
+- Lines not researched yet start ticked; lines you've already sent to Claude, or that anyone has saved an answer for, start unticked.
 - With more than 3 claims across several lines, the panel suggests splitting them over a few chats, because Claude digs deeper with fewer at a time.
 
-### What it remembers
+### Claude's answers
 
-- Each line shows its status: **Not researched yet**, **Sent to Claude** (with the time), or the saved verdict (**Substantiated**, **Somewhat substantiated** or **Not substantiated**) with the verdict sentence and the saved answer.
 - To save Claude's answer, click **Save answer to dispute** in the banner on claude.ai once Claude has finished. If it can't read the answer from the page, it asks you to paste it. You can also use **Paste Claude's answer** in the panel.
-- This is stored in Tampermonkey on your computer, per dispute, and cleared after 120 days without changes. It isn't shared with coworkers.
+- Answers are saved as Markdown, so headings, bold, lists, links and tables are kept. Pasting works with either Claude's copy button or a selection copied from the chat.
+- Saved answers are shared with everyone, like notes. They're listed under **Claude's answers** in the panel, newest first, with who saved them and when. Open one to read it formatted, or click **Copy Markdown** to copy it, for example into a decision note. Only the person who saved an answer can delete it.
+- Each line shows its status: **Not researched yet**, **Sent to Claude** (with the time, from your computer), or the verdict from the newest saved answer (**Substantiated**, **Somewhat substantiated** or **Not substantiated**). A coworker's verdict shows their name. Under the line are the verdict sentence and **Show answer**, which shows that line's part of the answer.
+- Answers saved before answers were shared are uploaded the first time you open that dispute, with their original date.
 
 ## Troubleshooting
 
@@ -80,5 +82,6 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 
 - It reads the dispute page only. It sends product details, the merchant's reasons and the files you tick to claude.ai. It leaves out customer names, emails, tracking numbers, broker notes and claim decisions.
 - Every document on the ticked lines and the order, including invoices and receipts, is attached by default. Open **Documents to attach** to untick any you don't want sent.
+- Notes and saved Claude answers are kept on the notes server (notes.kars3n.com). Everyone who uses the script can read them.
 - To join shared notes, the script sends the notes server (notes.kars3n.com) your dashboard sign-in token. It does this once, and again about once a month to renew. The token comes from the dashboard's login and lasts 60 seconds. The server checks it and keeps only your name, your zonos.com email and an id, never the token itself. You then get your own notes key, which lasts 30 days and renews while you use the dashboard.
 - The Entry Assistant token is stored in Tampermonkey on your computer, never in this script.
