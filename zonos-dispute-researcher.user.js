@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.8.0
+// @version      0.9.0
 // @description  Adds a "Research merchant" panel to duty dispute pages, checks the merchant's site, and hands the research to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -44,9 +44,11 @@
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
 
+  // As a Chrome extension, extension/gm-shim.js sets __ZDR_READY while it loads saved values; Tampermonkey has none
   function onReady(fn) {
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn, { once: true });
-    else fn();
+    const start = () => Promise.resolve(globalThis.__ZDR_READY).then(fn);
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+    else start();
   }
 
   async function waitFor(check, { timeout = 15000, interval = 250 } = {}) {

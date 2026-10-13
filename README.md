@@ -1,6 +1,6 @@
 # Zonos Dispute Researcher
 
-A Tampermonkey userscript for the Zonos brokerage dashboard. On a duty dispute page it adds a **Research merchant** button. The button gathers the dispute's details, checks the merchant's website, looks up the HTS codes in the Entry Assistant API, and opens claude.ai with a research prompt ready to send.
+A Tampermonkey userscript, also packaged as a Chrome extension, for the Zonos brokerage dashboard. On a duty dispute page it adds a **Research merchant** button. The button gathers the dispute's details, checks the merchant's website, looks up the HTS codes in the Entry Assistant API, and opens claude.ai with a research prompt ready to send.
 
 It never clicks or changes anything on the dashboard, and it never sends a message on claude.ai. You review the prompt and press Enter.
 
@@ -17,7 +17,22 @@ Updates install automatically. Tampermonkey checks this repo about once a day. T
 
 If you installed by pasting the script into Tampermonkey, paste this version once. From then on it updates itself.
 
-For the maintainer: Tampermonkey only installs an update when `@version` in the script header goes up, so raise it with every change you push to `main`.
+For the maintainer: Tampermonkey only installs an update when `@version` in the script header goes up, so raise it with every change you push to `main`. Raise `version` in `manifest.json` to match.
+
+## Chrome extension (alternative to Tampermonkey)
+
+This repo is also a Chrome extension. It runs the same script file, so it works the same way. Use either the extension or the Tampermonkey script, not both, or you'll get two buttons.
+
+1. On this page, click **Code → Download ZIP** and unzip it.
+2. Go to `chrome://extensions` and turn on **Developer mode** (top right).
+3. Click **Load unpacked** and choose the unzipped folder (the one containing `manifest.json`).
+4. Pin it: click the puzzle-piece icon in Chrome's toolbar, then the pin next to **Zonos Dispute Researcher**. On a dispute page, the **Research merchant** button appears as usual; the toolbar icon opens the panel too.
+
+The extension keeps its own settings, so paste the Entry Assistant token under **Settings** again.
+
+**Updates:** an extension loaded this way doesn't update itself. Download the new ZIP, replace the folder, and click the reload arrow on the extension's card in `chrome://extensions`. Automatic updates would need the extension published on the Chrome Web Store, for example as a private listing for zonos.com.
+
+**Why it asks for access to all websites:** it checks whichever merchant site you enter, and those can be anywhere. It only fetches pages for the checks you start, and it never sends your cookies.
 
 ## Set up
 
