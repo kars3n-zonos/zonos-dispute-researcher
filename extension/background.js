@@ -22,13 +22,13 @@ chrome.action.onClicked.addListener(tab => {
   chrome.tabs.sendMessage(tab.id, { type: 'zdr:action' }).catch(() => chrome.tabs.create({ url: DISPUTES_URL }));
 });
 
-async function doFetch({ url, method = 'GET', headers = {}, timeout = 0, responseType }) {
+async function doFetch({ url, method = 'GET', headers = {}, body, timeout = 0, responseType }) {
   if (!/^https?:\/\//i.test(url || '')) return { ok: false, error: 'Only web addresses can be fetched' };
   const controller = new AbortController();
   const timer = timeout ? setTimeout(() => controller.abort(), timeout) : null;
   try {
     // Never send the user's cookies to merchant sites or anywhere else
-    const r = await fetch(url, { method, headers, credentials: 'omit', redirect: 'follow', signal: controller.signal });
+    const r = await fetch(url, { method, headers, body, credentials: 'omit', redirect: 'follow', signal: controller.signal });
     const responseHeaders = [...r.headers].map(([k, v]) => `${k}: ${v}`).join('\r\n');
     const base = { ok: true, status: r.status, finalUrl: r.url, responseHeaders };
     if (responseType === 'blob') {

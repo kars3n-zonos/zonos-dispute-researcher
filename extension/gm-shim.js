@@ -45,8 +45,8 @@
 
   // Same shape as Tampermonkey's: content scripts can't make cross-site requests, so the service worker does
   globalThis.GM_xmlhttpRequest = details => {
-    const { url, method = 'GET', headers = {}, timeout = 0, responseType, onload, onerror, ontimeout } = details;
-    chrome.runtime.sendMessage({ type: 'zdr:fetch', url, method, headers, timeout, responseType })
+    const { url, method = 'GET', headers = {}, data, timeout = 0, responseType, onload, onerror, ontimeout } = details;
+    chrome.runtime.sendMessage({ type: 'zdr:fetch', url, method, headers, body: data, timeout, responseType })
       .then(res => {
         if (!res || !res.ok) return res && res.timedOut ? ontimeout?.() : onerror?.(res);
         const response = res.base64 != null ? base64ToBlob(res.base64, res.contentType) : res.responseText;

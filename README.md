@@ -53,7 +53,8 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 - **Add note** (or Ctrl+Enter) saves it with your name and the time. Set your name under **Settings**. Links are clickable, and you can edit or delete any note.
 - What you're typing is kept as a draft, even if you close the panel or the tab.
 - The launch button shows how many notes a dispute has, for example "Research merchant · 2 notes".
-- For now, notes are saved only in your own Tampermonkey.
+- **Shared notes:** paste your notes key under **Settings** (ask the repo owner for one), and your notes are shared with everyone who has a key. Coworkers' notes appear within about 15 seconds while the panel is open, marked with a colored bar. Only the person who wrote a note can edit or delete it.
+- Notes are saved on your computer first, so nothing is lost if the notes server can't be reached; they sync when it's back. Without a key, notes stay in your own Tampermonkey.
 
 ### Disputes with several lines
 

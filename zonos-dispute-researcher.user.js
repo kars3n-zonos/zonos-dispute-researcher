@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.11.0
+// @version      0.12.0
 // @description  Adds a "Research merchant" panel to duty dispute pages, checks the merchant's site, and hands the research to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -22,6 +22,7 @@
 // @grant        window.onurlchange
 // @connect      prod-zonos-brokerage.s3.us-east-2.amazonaws.com
 // @connect      entry.kars3n.com
+// @connect      notes.kars3n.com
 // @connect      *
 // ==/UserScript==
 
@@ -228,9 +229,16 @@
   // and times, so a shared server can hold the same notes later.
   const NOTES_PREFIX = 'zdr:notes:';
   const AUTHOR_KEY = 'zdr:author';
+  // Shared notes live on the notes server; without a key, notes stay on this computer only
+  const NOTES_API = 'https://notes.kars3n.com/api/v1';
+  const NOTES_KEY = 'zdr:notesKey';
+  const sharedNotesOn = () => !!GM_getValue(NOTES_KEY, '');
 
+  // A note is shown unless it's waiting to be deleted on the server. Notes without `mine: false`
+  // are your own (everything written before shared notes was turned on).
+  const visibleNotes = pad => pad.notes.filter(n => n.pending !== 'delete');
   const loadNotes = id => GM_getValue(NOTES_PREFIX + id, null) || { id, notes: [], draft: '', updatedAt: 0 };
-  const noteCount = id => (GM_getValue(NOTES_PREFIX + id, null)?.notes || []).length;
+  const noteCount = id => visibleNotes(loadNotes(id)).length;
 
   function changeNotes(id, change) {
     const pad = loadNotes(id);
@@ -239,17 +247,102 @@
     GM_setValue(NOTES_PREFIX + id, pad);
   }
 
+  // Each change is saved here first and marked `pending` until the server confirms it
   const addNote = (id, text) => changeNotes(id, pad => {
     const now = Date.now();
-    pad.notes.push({ id: `n_${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`, author: GM_getValue(AUTHOR_KEY, '') || 'Me', text, createdAt: now, updatedAt: now });
+    pad.notes.push({ id: `n_${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`, author: GM_getValue(AUTHOR_KEY, '') || 'Me', text, createdAt: now, updatedAt: now, pending: 'add' });
     pad.draft = '';
   });
   const editNote = (id, noteId, text) => changeNotes(id, pad => {
     const note = pad.notes.find(n => n.id === noteId);
-    if (note) Object.assign(note, { text, edited: true, updatedAt: Date.now() });
+    if (note) Object.assign(note, { text, edited: true, updatedAt: Date.now(), pending: note.synced ? 'edit' : 'add' });
   });
-  const deleteNote = (id, noteId) => changeNotes(id, pad => { pad.notes = pad.notes.filter(n => n.id !== noteId); });
+  const deleteNote = (id, noteId) => changeNotes(id, pad => {
+    const note = pad.notes.find(n => n.id === noteId);
+    if (note?.synced) note.pending = 'delete';
+    else pad.notes = pad.notes.filter(n => n.id !== noteId);
+  });
   const saveDraft = (id, text) => changeNotes(id, pad => { pad.draft = text; });
+
+  async function notesApi(method, path, body) {
+    const key = GM_getValue(NOTES_KEY, '');
+    if (!key) throw apiError('no-token', 'No shared notes key is saved.');
+    let r;
+    try {
+      r = await gmRequest({
+        method, url: `${NOTES_API}${path}`, timeout: 15000,
+        headers: { Accept: 'application/json', Authorization: `Bearer ${key}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        data: body ? JSON.stringify(body) : undefined,
+      });
+    } catch (e) {
+      throw apiError('unreachable', /too long/.test(e.message) ? 'The notes server took too long to respond.' : "Couldn't reach the notes server.");
+    }
+    let json = null;
+    try { json = JSON.parse(r.responseText); } catch { /* handled by status below */ }
+    if (r.status === 401) throw apiError('bad-token', 'The notes server rejected your key. Check it under Settings.');
+    if (r.status < 200 || r.status >= 300) throw Object.assign(apiError('server', json?.error || `The notes server answered ${r.status}.`), { status: r.status });
+    return json;
+  }
+
+  // Sends this computer's pending changes, then takes the server's list as the truth, keeping
+  // anything still pending on top. Stops at the first network or key problem and tries again later.
+  const syncing = new Map();
+  function syncNotes(id) {
+    if (!sharedNotesOn()) return Promise.resolve({ shared: false });
+    if (!syncing.has(id)) syncing.set(id, runSync(id).finally(() => syncing.delete(id)));
+    return syncing.get(id);
+  }
+
+  async function runSync(id) {
+    const base = `/disputes/${encodeURIComponent(id)}/notes`;
+    try {
+      const toSend = loadNotes(id).notes.filter(n => n.pending || (!n.synced && n.mine !== false && !n.rejected));
+      for (const note of toSend) {
+        try {
+          if (note.pending === 'delete') await notesApi('DELETE', `${base}/${note.id}`);
+          else if (note.pending === 'edit') await notesApi('PATCH', `${base}/${note.id}`, { text: note.text });
+          else await notesApi('POST', base, { id: note.id, text: note.text });
+          changeNotes(id, pad => {
+            if (note.pending === 'delete') {
+              pad.notes = pad.notes.filter(n => n.id !== note.id);
+              return;
+            }
+            // If it was edited again while this request was out, the newer text still has to go up
+            const n = pad.notes.find(x => x.id === note.id);
+            if (n) Object.assign(n, { synced: true, pending: n.text === note.text ? null : 'edit' });
+          });
+        } catch (e) {
+          if (e.kind !== 'server' || e.status >= 500 || e.status === 429) throw e; // temporary: try again later
+          changeNotes(id, pad => {
+            const n = pad.notes.find(x => x.id === note.id);
+            if (!n) return;
+            if (e.status === 409) n.id = `n_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; // id taken: retry under a new one
+            else if (e.status === 404) pad.notes = pad.notes.filter(x => x.id !== note.id); // already gone on the server
+            else Object.assign(n, { pending: null, rejected: e.message }); // refused for good, e.g. too long
+          });
+        }
+      }
+      const { notes: server } = await notesApi('GET', base);
+      changeNotes(id, pad => {
+        const waiting = pad.notes.filter(n => n.pending);
+        const onServer = new Set(server.map(n => n.id));
+        pad.notes = [
+          ...server.map(n => {
+            const local = waiting.find(w => w.id === n.id);
+            return local ? { ...n, text: local.text, pending: local.pending, synced: true } : { ...n, synced: true };
+          }),
+          ...waiting.filter(w => !onServer.has(w.id) && w.pending !== 'delete'),
+          ...pad.notes.filter(n => n.rejected && !onServer.has(n.id)),
+        ].sort((a, b) => a.createdAt - b.createdAt);
+        pad.syncedAt = Date.now();
+        pad.syncError = '';
+      });
+      return { shared: true, ok: true };
+    } catch (e) {
+      changeNotes(id, pad => { pad.syncError = e.message; });
+      return { shared: true, ok: false, error: e.message };
+    }
+  }
 
   // Note text with its links made clickable, built from text and link nodes, never HTML
   function linkified(text) {
@@ -1046,6 +1139,7 @@
     .note-list { list-style: none; padding: 0; margin: 0 0 8px; }
     .note { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin: 0 0 6px; }
     .note-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .note.theirs { border-left: 3px solid var(--accent); }
     .note-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 4px; font-size: 11px; color: var(--muted); }
     .note-meta .linkish { font-size: 11px; }
     textarea.note-input { width: 100%; min-height: 56px; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; resize: vertical; }
@@ -1072,9 +1166,37 @@
       type: 'text', placeholder: 'Your name, shown on your notes', 'aria-label': 'Your name, shown on your notes',
       value: GM_getValue(AUTHOR_KEY, ''), onchange: e => GM_setValue(AUTHOR_KEY, clean(e.target.value)),
     });
+    const notesKeyInput = h('input', { type: 'password', placeholder: 'Paste your shared notes key', 'aria-label': 'Shared notes key', autocomplete: 'off' });
+    const notesKeyNote = h('p', { class: 'hint' });
+    const setNotesKeyNote = (text, kind = '') => { notesKeyNote.textContent = text; notesKeyNote.className = `hint ${kind}`; };
+    const refreshNotesKeyNote = () => setNotesKeyNote(sharedNotesOn()
+      ? 'Notes key saved. Your notes are shared with everyone who has a key.'
+      : 'No notes key: notes stay on this computer. Ask the repo owner for a key to share them.');
+    async function testNotesKey() {
+      setNotesKeyNote('Testing…');
+      try {
+        const me = await notesApi('GET', '/me');
+        setNotesKeyNote(`Connected to shared notes as ${me.name}.`, 'ok');
+      } catch (e) {
+        setNotesKeyNote(e.message, 'err');
+      }
+    }
+    function saveNotesKey() {
+      const value = cleanToken(notesKeyInput.value);
+      if (value) GM_setValue(NOTES_KEY, value);
+      else GM_deleteValue(NOTES_KEY);
+      notesKeyInput.value = '';
+      refreshNotesKeyNote();
+      if (value) testNotesKey().then(() => state && syncNow());
+    }
     const settings = h('details', { class: 'settings' },
       h('summary', { text: 'Settings' }),
       h('div', { class: 'row', style: 'margin-top:6px' }, authorInput),
+      h('div', { class: 'row', style: 'margin-top:6px' },
+        notesKeyInput,
+        h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => saveNotesKey() }),
+        h('button', { class: 'secondary', type: 'button', text: 'Test', onclick: () => testNotesKey() })),
+      notesKeyNote,
       h('div', { class: 'row', style: 'margin-top:6px' },
         tokenInput,
         h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => saveToken() }),
@@ -1102,7 +1224,33 @@
     // never loses focus while lookups finish in the background; everything else redraws inside `rest`
     const notesLabel = h('p', { class: 'label', text: 'Notes' });
     const notesList = h('ul', { class: 'note-list', hidden: true });
+    const notesState = h('span', { class: 'hint', style: 'margin:0' });
     const rest = h('div');
+
+    // While the panel is open, coworkers' notes are picked up every 15 seconds and when you come back to the tab
+    const NOTES_POLL_MS = 15000;
+    let pollTimer = null;
+    function syncNow() {
+      if (!state) return Promise.resolve();
+      const id = state.data.disputeId;
+      return syncNotes(id).then(() => {
+        if (state && state.data.disputeId === id) render();
+        updateLaunchLabel();
+      });
+    }
+    function startPolling() {
+      stopPolling();
+      pollTimer = setInterval(() => {
+        if (state && !panel.hidden && document.visibilityState === 'visible') syncNow();
+      }, NOTES_POLL_MS);
+    }
+    function stopPolling() {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && state && !panel.hidden) syncNow();
+    });
 
     // The launch button shows how many notes this dispute has, so they're hard to miss
     function updateLaunchLabel() {
@@ -1117,9 +1265,15 @@
       clearTimeout(draftTimer);
       addNote(state.data.disputeId, text);
       noteInput.value = '';
+      notesChanged();
+      noteInput.focus();
+    }
+
+    // Show the change at once, then send it to the shared notes server in the background
+    function notesChanged() {
       updateLaunchLabel();
       render();
-      noteInput.focus();
+      syncNow();
     }
 
     function unresearchedLines(data) {
@@ -1142,6 +1296,7 @@
       else setTokenNote('No token saved, so the HTS lookups are off. Paste the ENTRY_API_TOKEN value from your entry-assistant skill.', 'warn');
     }
     refreshTokenNote();
+    refreshNotesKeyNote();
 
     async function testConnection() {
       setTokenNote('Testing…');
@@ -1204,7 +1359,10 @@
       attach();
       launch.hidden = true;
       panel.hidden = false;
-      if (state && state.path === location.pathname) return;
+      if (state && state.path === location.pathname) {
+        reopenSync();
+        return;
+      }
       const path = location.pathname;
       setStatus('');
       body.replaceChildren(h('p', { class: 'muted', text: 'Reading the dispute…' }));
@@ -1235,8 +1393,10 @@
           notesLabel, notesList, noteInput,
           h('div', { class: 'row', style: 'margin-top:6px;align-items:center' },
             h('button', { class: 'secondary', type: 'button', text: 'Add note', onclick: () => submitNote() }),
-            h('span', { class: 'hint', style: 'margin:0', text: 'Ctrl+Enter adds it. Saved on this computer.' }))),
+            notesState)),
         rest);
+      startPolling();
+      syncNow();
       siteInput = h('input', {
         type: 'text', value: state.website, placeholder: 'https://merchant-site.com', 'aria-label': 'Merchant website',
         oninput: e => { state.website = e.target.value; },
@@ -1250,8 +1410,15 @@
 
     function close() {
       panel.hidden = true;
+      stopPolling();
       updateLaunchLabel();
       launch.hidden = false;
+    }
+
+    // Reopening an already-loaded panel picks up coworkers' notes straight away
+    function reopenSync() {
+      if (state && !pollTimer) startPolling();
+      syncNow();
     }
 
     async function checkSite() {
@@ -1425,39 +1592,57 @@
         h('p', { class: 'hint', text: 'Saving it records the verdict on each line, so this dispute shows what has been researched. On claude.ai, Save answer to dispute does the same.' }));
 
       const pad = loadNotes(d.disputeId);
+      const shown = visibleNotes(pad);
+      const shared = sharedNotesOn();
       const noteLink = (text, onclick) => h('button', { class: 'linkish', type: 'button', text, onclick });
       const noteItem = n => {
         const editing = s.editingNote === n.id;
         const confirming = s.confirmDelete === n.id;
-        const actions = editing
-          ? [noteLink('Save', () => { const t = editInput.value.trim(); if (t) editNote(d.disputeId, n.id, t); s.editingNote = null; render(); }),
-            noteLink('Cancel', () => { s.editingNote = null; render(); })]
-          : confirming
-            ? [h('span', { text: 'Delete this note?' }),
-              noteLink('Delete', () => { deleteNote(d.disputeId, n.id); s.confirmDelete = null; updateLaunchLabel(); render(); }),
-              noteLink('Keep', () => { s.confirmDelete = null; render(); })]
-            : [noteLink('Edit', () => {
-                s.editingNote = n.id;
-                editInput = h('textarea', { class: 'note-input', rows: 3, value: n.text, 'aria-label': 'Edit note' });
-                render();
-                editInput.focus();
-              }),
-              noteLink('Delete', () => { s.confirmDelete = n.id; render(); })];
-        return h('li', { class: 'note' },
+        // Coworkers' notes can be read but not changed; only the author can edit or delete
+        const actions = n.mine === false ? []
+          : editing
+            ? [noteLink('Save', () => { const t = editInput.value.trim(); if (t) editNote(d.disputeId, n.id, t); s.editingNote = null; notesChanged(); }),
+              noteLink('Cancel', () => { s.editingNote = null; render(); })]
+            : confirming
+              ? [h('span', { text: 'Delete this note?' }),
+                noteLink('Delete', () => { deleteNote(d.disputeId, n.id); s.confirmDelete = null; notesChanged(); }),
+                noteLink('Keep', () => { s.confirmDelete = null; render(); })]
+              : [noteLink('Edit', () => {
+                  s.editingNote = n.id;
+                  editInput = h('textarea', { class: 'note-input', rows: 3, value: n.text, 'aria-label': 'Edit note' });
+                  render();
+                  editInput.focus();
+                }),
+                noteLink('Delete', () => { s.confirmDelete = n.id; render(); })];
+        const flags = [
+          n.edited && 'edited',
+          shared && n.pending && 'waiting to sync',
+          n.rejected && `not shared: ${n.rejected}`,
+        ].filter(Boolean);
+        return h('li', { class: `note${n.mine === false ? ' theirs' : ''}` },
           editing ? editInput : h('div', { class: 'note-text' }, linkified(n.text)),
           h('div', { class: 'note-meta' },
-            h('span', { text: `${n.author} · ${shortDate(n.createdAt)}${n.edited ? ' · edited' : ''}` }),
+            h('span', { text: [n.author, shortDate(n.createdAt), ...flags].join(' · ') }),
             ...actions));
       };
+      const waiting = shown.filter(n => n.pending).length;
+      notesState.className = `hint${shared && pad.syncError ? ' warn' : ''}`;
+      notesState.textContent = !shared
+        ? 'Saved on this computer only. Add a notes key under Settings to share with your team.'
+        : pad.syncError
+          ? `${pad.syncError} Saved here; it will sync when it can${waiting ? ` (${waiting} waiting)` : ''}.`
+          : pad.syncedAt
+            ? `Shared with your team · checked ${new Date(pad.syncedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}${waiting ? ` · ${waiting} waiting to sync` : ''}`
+            : 'Shared with your team · checking…';
       // Redraws happen while lookups finish; if you're typing in a box that gets moved (the website box,
       // a note being edited), put focus and the cursor back where they were
       const active = root.activeElement;
       const caret = active && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null;
       const scroll = body.scrollTop;
 
-      notesLabel.textContent = pad.notes.length ? `Notes (${pad.notes.length})` : 'Notes';
-      notesList.replaceChildren(...pad.notes.map(noteItem));
-      notesList.hidden = pad.notes.length === 0;
+      notesLabel.textContent = shown.length ? `Notes (${shown.length})` : 'Notes';
+      notesList.replaceChildren(...shown.map(noteItem));
+      notesList.hidden = shown.length === 0;
 
       rest.replaceChildren(...[
         h('div', { class: 'section' },
@@ -1565,8 +1750,8 @@
 
     return {
       show() { attach(); updateLaunchLabel(); if (panel.hidden) launch.hidden = false; },
-      hide() { launch.hidden = true; panel.hidden = true; },
-      reset() { state = null; panel.hidden = true; setStatus(''); },
+      hide() { stopPolling(); launch.hidden = true; panel.hidden = true; },
+      reset() { stopPolling(); state = null; panel.hidden = true; setStatus(''); },
       keepAttached() { if (!host.isConnected && (!launch.hidden || !panel.hidden)) attach(); },
       open,
     };
