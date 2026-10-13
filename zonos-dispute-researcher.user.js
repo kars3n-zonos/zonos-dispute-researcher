@@ -1,8 +1,12 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.7.1
+// @version      0.8.0
 // @description  Adds a "Research merchant" panel to duty dispute pages, checks the merchant's site, and hands the research to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
+// @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
+// @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
+// @updateURL    https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js
+// @downloadURL  https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js
 // @match        https://brokerage.dashboard.zonos.com/*
 // @match        https://claude.ai/*
 // @run-at       document-start

@@ -8,7 +8,16 @@ It never clicks or changes anything on the dashboard, and it never sends a messa
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) in Chrome.
 2. Go to `chrome://extensions`, open Tampermonkey's **Details**, and turn on **Allow User Scripts**. On older Chrome versions, turn on **Developer mode** at the top right of `chrome://extensions` instead.
-3. Open the Tampermonkey dashboard, click **+**, replace the template with the contents of [`zonos-dispute-researcher.user.js`](zonos-dispute-researcher.user.js), and press Ctrl+S.
+3. Open the install link and click **Install** on the page Tampermonkey shows:
+   **https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js**
+
+## Updates
+
+Updates install automatically. Tampermonkey checks this repo about once a day. To get an update right away, click the Tampermonkey icon, then **Check for userscript updates**.
+
+If you installed by pasting the script into Tampermonkey, paste this version once. From then on it updates itself.
+
+For the maintainer: Tampermonkey only installs an update when `@version` in the script header goes up, so raise it with every change you push to `main`.
 
 ## Set up
 
