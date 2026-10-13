@@ -76,12 +76,13 @@ Every answer uses the same template, one block per line, so answers are quick to
 
 - **Dispute:** what the merchant wants changed, from what to what.
 - **At a glance:**
-  - Code it should be (HS code disputes only), Description it should be, Prices found (low and high, with links, against the declared value), and Marketed use.
+  - Code it should be (HS code disputes only), Description it should be (what it is, what it does and what it's made of), Prices found (low and high, with links, against the declared value), and Marketed use.
   - Made of and Origin, with the evidence for each.
   - Section 232 for 232 disputes: the metal, how much of the item it is, where it was melted or smelted, and the Chapter 99 heading.
   - Value, weight or quantity checks for those claims.
-  - Discrepancies between what was found and what the merchant says, and Missing info.
+  - Discrepancies between what was found and what the merchant says.
 - **More details:** a line per claim, the item found, every search Claude ran and what it found, what the photos show, the closest CBP rulings (CROSS), the Entry Assistant lookups, and a check mark for each research step.
+- **Info still needed:** what's missing, online and from the merchant, to get the most accurate HS code. That means the facts the code wording turns on, such as a motor's type and wattage, a medicine's active ingredient, fiber content or the metal. Each one says which codes it decides between and what would show it, for example a spec sheet or a photo of the label.
 - **Verdict:** "The merchant's claim is substantiated / somewhat substantiated / not substantiated because …", with the proof in the sentence itself: what shows it, where it comes from, and which rule it meets or fails. Then the evidence for and against.
 
 ### Claude's answers

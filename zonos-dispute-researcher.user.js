@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.16.0
+// @version      0.17.0
 // @description  Adds a "Notes and Research" panel to duty dispute pages: shared notes and saved Claude answers for each dispute, plus merchant research handed to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1386,6 +1386,7 @@
       valueStep,
       productClaim && "Find the manufacturer's own page for the item, plus spec sheets or datasheets.",
       productClaim && 'Answer every "What to find" point.',
+      productClaim && "Work out what decides the HS code. Read the wording of the current code, the merchant's code and any code the evidence points to, down to the subheading and statistical suffix, plus the section and chapter notes. List the facts each one turns on (type, function, materials and their shares, power or size limits, ingredients, who or what it's for) and look for evidence of each. Whatever you can't find goes under Info still needed.",
       (productClaim || metalMatters) && "Find what it's made of. If it's metal, say which metal (steel, stainless steel, aluminum, copper or brass, zinc alloy) and roughly how much of its weight is metal, using the images, listings and spec sheets.",
       productClaim && 'Look for country-of-origin evidence: "Made in" marks in the images or on listings; where the manufacturer is based and where it has factories; the same product sold by overseas sellers on AliExpress, Alibaba, 1688, DHgate, Temu or Amazon. A barcode prefix only shows where the barcode was registered, not where the item was made.',
       hasChapter99 && "Using the Chapter 99 headings above, work out which ones apply. For Section 232 headings that comes down to the metal, the share of the weight that is metal, what the item is used for (for example motorcycle or other vehicle parts), and where it's made.",
@@ -1414,7 +1415,8 @@
       '- Copy the headings and bold labels exactly, in the same order. Replace each <…> with what you found and drop the angle brackets.',
       "- Keep every line, even when the answer is \"Not found\". Don't add, rename or reorder sections, and write nothing before the first heading or after the last line.",
       '- One short line per bullet, sub-bullets for lists. No paragraphs, no greeting, no recap of the dispute.',
-      "- Put HTS and Chapter 99 codes in backticks. Link a source for every fact. If you can't find something, say so under Missing info instead of guessing.",
+      "- Put HTS and Chapter 99 codes in backticks. Link a source for every fact. If you can't find something, say so under Info still needed instead of guessing.",
+      "- Under Info still needed, list only what's missing to get the most accurate HS code: facts the HTS wording turns on (in the heading, subheading, statistical suffix or a section or chapter note) that neither your research nor the merchant's documents show. Some examples: a motor's power source (electric, hydraulic, pneumatic), type (AC or DC, universal, rotary or linear) and output in watts; a pump's kind (centrifugal, rotary, reciprocating); a medicine's active ingredient (such as ibuprofen) and whether it's put up in measured doses for retail sale; a garment's fiber content and whether it's knit or woven; an article's metal and whether it's a part or a finished good. Those are only examples: work out the deciding facts for whatever this item is. Give one bullet per missing fact, saying which codes it decides between and exactly which document, photo or spec would show it. If nothing is missing, write a single bullet: \"Nothing: the research settles it\".",
       '- Under Searches run, list every Required search plus any others you ran, each with what it found and the best link. A search that found nothing still goes in, marked "nothing relevant". If a fact comes only from this prompt rather than your research, say so.',
       "- Under Discrepancies, give one sub-bullet for each place what you found contradicts what the merchant says, with its source. For example: their code covers microphones up to 10 mm across, but this one is 60 mm.",
       "- The verdict must carry its proof. Don't just say what the item \"clearly\" is: say what shows it (which photo, document or listing, with its link) and which rule it meets or fails (the HTS heading or subheading text, the origin rule, the Section 232 heading). One or two sentences on one line, starting exactly with \"The merchant's claim is\".",
@@ -1447,7 +1449,7 @@
       '',
       '#### At a glance',
       k.hs && `- **Code it should be:** \`<code>\` — <what that code covers, in a few words> (merchant wants \`${theirCode || '<their code>'}\`)`,
-      '- **Description it should be:** <a plain, accurate customs description of the item>',
+      `- **Description it should be:** <a brief customs description: what it is, what it does, and what it's made of, with each material's share if found; e.g. "Brushed DC electric motor, 12 V, for power tools; steel housing and shaft, copper windings, plastic end cap">`,
       `- **Prices found:** low <price> ([<site>](<link>)) · high <price> ([<site>](<link>)) · declared ${declared}`,
       '- **Marketed use:** <what listings say it is for and what it fits> ([<site>](<link>))',
       (k.product || metal) && '- **Made of:** <the materials; for metal, which metal and about how much of the weight>',
@@ -1463,7 +1465,6 @@
       k.quantity && '- **Quantity check:** <quantity per the invoice, order or listing> vs the claimed quantity',
       '- **Discrepancies:**',
       '  - <each place the evidence contradicts the merchant, with its source; or "None found">',
-      "- **Missing info:** <what you couldn't find that would settle it, such as internal components, metal content or dimensions; or \"Nothing important\">",
       '',
       '#### More details',
       ...fields.map(f => `- **${f} claim:** <supported | partly supported | not supported> — <why, with a link>`),
@@ -1475,6 +1476,10 @@
       "- **API checks:** <what you looked up with the entry-assistant skill, or why you couldn't>",
       platformUnknown && "- **Platform:** <what the merchant's site runs on>",
       `- **Steps checked:** <each of the ${stepCount} How to research steps by number for this line: ✓ done, or ✗ and why it couldn't be done>`,
+      '',
+      // What's still missing for the most accurate code, so it's clear what to ask the merchant for
+      '#### Info still needed',
+      '- **<the missing fact>:** <which codes it decides between> — <what would show it, such as a spec sheet, a photo of the label or nameplate, an ingredient list or a mill certificate>',
       '',
       '#### Verdict',
       "**The merchant's claim is <substantiated | somewhat substantiated | not substantiated>** because <the proof: what the evidence shows, where it comes from, and the rule it meets or fails>.",
