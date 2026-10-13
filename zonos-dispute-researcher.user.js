@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.10.0
+// @version      0.11.0
 // @description  Adds a "Research merchant" panel to duty dispute pages, checks the merchant's site, and hands the research to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -160,9 +160,10 @@
     GM_setValue(DISPUTE_PREFIX + rec.id, rec);
   }
 
+  // Research records and notes both go after 120 days without changes
   function purgeOldRecords() {
     for (const key of GM_listValues()) {
-      if (!key.startsWith(DISPUTE_PREFIX)) continue;
+      if (!key.startsWith(DISPUTE_PREFIX) && !key.startsWith('zdr:notes:')) continue;
       const rec = GM_getValue(key, null);
       if (!rec || Date.now() - (rec.updatedAt || 0) > DISPUTE_TTL_MS) GM_deleteValue(key);
     }
@@ -219,6 +220,48 @@
     if (l?.answeredAt) return { text: `Answer saved ${shortDate(l.answeredAt)}, no verdict found`, kind: '' };
     if (l?.sentAt) return { text: `Sent to Claude ${shortDate(l.sentAt)}`, kind: '' };
     return { text: 'Not researched yet', kind: '' };
+  }
+
+  /* -------------------------------------------------------- notes: scratch pad */
+
+  // Notes per dispute, kept in Tampermonkey storage on this computer. Each note has its own id, author
+  // and times, so a shared server can hold the same notes later.
+  const NOTES_PREFIX = 'zdr:notes:';
+  const AUTHOR_KEY = 'zdr:author';
+
+  const loadNotes = id => GM_getValue(NOTES_PREFIX + id, null) || { id, notes: [], draft: '', updatedAt: 0 };
+  const noteCount = id => (GM_getValue(NOTES_PREFIX + id, null)?.notes || []).length;
+
+  function changeNotes(id, change) {
+    const pad = loadNotes(id);
+    change(pad);
+    pad.updatedAt = Date.now();
+    GM_setValue(NOTES_PREFIX + id, pad);
+  }
+
+  const addNote = (id, text) => changeNotes(id, pad => {
+    const now = Date.now();
+    pad.notes.push({ id: `n_${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`, author: GM_getValue(AUTHOR_KEY, '') || 'Me', text, createdAt: now, updatedAt: now });
+    pad.draft = '';
+  });
+  const editNote = (id, noteId, text) => changeNotes(id, pad => {
+    const note = pad.notes.find(n => n.id === noteId);
+    if (note) Object.assign(note, { text, edited: true, updatedAt: Date.now() });
+  });
+  const deleteNote = (id, noteId) => changeNotes(id, pad => { pad.notes = pad.notes.filter(n => n.id !== noteId); });
+  const saveDraft = (id, text) => changeNotes(id, pad => { pad.draft = text; });
+
+  // Note text with its links made clickable, built from text and link nodes, never HTML
+  function linkified(text) {
+    const parts = [];
+    let last = 0;
+    for (const m of text.matchAll(/https?:\/\/[^\s<>"]+/g)) {
+      const url = m[0].replace(/[).,;:!?\]'}]+$/, '');
+      parts.push(text.slice(last, m.index), h('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: url }));
+      last = m.index + url.length;
+    }
+    parts.push(text.slice(last));
+    return parts;
   }
 
   // The part of a saved answer about one line (the whole answer if it has no "Line N" headings)
@@ -1000,6 +1043,12 @@
     .verdict { margin: 0 0 4px; font-size: 12px; font-style: italic; }
     .linkish { background: none; border: 0; padding: 0; color: var(--accent); font-size: 12px; text-decoration: underline; }
     pre.saved { white-space: pre-wrap; max-height: 240px; overflow: auto; margin: 6px 0 0; padding: 8px; font: 12px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--soft); border-radius: 6px; }
+    .note-list { list-style: none; padding: 0; margin: 0 0 8px; }
+    .note { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin: 0 0 6px; }
+    .note-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .note-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 4px; font-size: 11px; color: var(--muted); }
+    .note-meta .linkish { font-size: 11px; }
+    textarea.note-input { width: 100%; min-height: 56px; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; resize: vertical; }
     textarea.answer { width: 100%; min-height: 110px; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; resize: vertical; }
     .settings { margin-top: 8px; font-size: 12px; }
     .settings summary { cursor: pointer; color: var(--muted); }
@@ -1019,8 +1068,13 @@
     const launch = h('button', { class: 'launch', type: 'button', text: 'Research merchant', hidden: true, onclick: () => open() });
     const tokenInput = h('input', { type: 'password', placeholder: 'Paste your Entry Assistant token', 'aria-label': 'Entry Assistant token', autocomplete: 'off' });
     const tokenNote = h('p', { class: 'hint' });
+    const authorInput = h('input', {
+      type: 'text', placeholder: 'Your name, shown on your notes', 'aria-label': 'Your name, shown on your notes',
+      value: GM_getValue(AUTHOR_KEY, ''), onchange: e => GM_setValue(AUTHOR_KEY, clean(e.target.value)),
+    });
     const settings = h('details', { class: 'settings' },
       h('summary', { text: 'Settings' }),
+      h('div', { class: 'row', style: 'margin-top:6px' }, authorInput),
       h('div', { class: 'row', style: 'margin-top:6px' },
         tokenInput,
         h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => saveToken() }),
@@ -1041,6 +1095,32 @@
     let state = null;
     let siteInput = null;
     let answerInput = null;
+    let noteInput = null;
+    let editInput = null;
+    let draftTimer = null;
+    // The notes block is built once per dispute and updated in place, so the note box is never moved and
+    // never loses focus while lookups finish in the background; everything else redraws inside `rest`
+    const notesLabel = h('p', { class: 'label', text: 'Notes' });
+    const notesList = h('ul', { class: 'note-list', hidden: true });
+    const rest = h('div');
+
+    // The launch button shows how many notes this dispute has, so they're hard to miss
+    function updateLaunchLabel() {
+      const id = location.pathname.split('/').filter(Boolean).pop();
+      const n = DISPUTE_PATH.test(location.pathname) ? noteCount(id) : 0;
+      launch.textContent = n ? `Research merchant · ${n} ${n === 1 ? 'note' : 'notes'}` : 'Research merchant';
+    }
+
+    function submitNote() {
+      const text = noteInput.value.trim();
+      if (!text || !state) return;
+      clearTimeout(draftTimer);
+      addNote(state.data.disputeId, text);
+      noteInput.value = '';
+      updateLaunchLabel();
+      render();
+      noteInput.focus();
+    }
 
     function unresearchedLines(data) {
       const rec = loadRecord(data.disputeId);
@@ -1143,6 +1223,20 @@
       // Lines not yet sent to Claude start ticked; lines already sent or answered start unticked
       state.selected = unresearchedLines(data);
       answerInput = h('textarea', { class: 'answer', rows: 6, placeholder: "Paste Claude's whole answer here", 'aria-label': "Claude's answer" });
+      // The unsent note is saved as you type, so closing the panel or the tab doesn't lose it
+      noteInput = h('textarea', {
+        class: 'note-input', rows: 2, placeholder: 'Add a note or paste a link…', 'aria-label': 'New note',
+        value: loadNotes(data.disputeId).draft || '',
+        oninput: () => { clearTimeout(draftTimer); draftTimer = setTimeout(() => saveDraft(data.disputeId, noteInput.value), 400); },
+        onkeydown: e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitNote(); } },
+      });
+      body.replaceChildren(
+        h('div', { class: 'section' },
+          notesLabel, notesList, noteInput,
+          h('div', { class: 'row', style: 'margin-top:6px;align-items:center' },
+            h('button', { class: 'secondary', type: 'button', text: 'Add note', onclick: () => submitNote() }),
+            h('span', { class: 'hint', style: 'margin:0', text: 'Ctrl+Enter adds it. Saved on this computer.' }))),
+        rest);
       siteInput = h('input', {
         type: 'text', value: state.website, placeholder: 'https://merchant-site.com', 'aria-label': 'Merchant website',
         oninput: e => { state.website = e.target.value; },
@@ -1156,6 +1250,7 @@
 
     function close() {
       panel.hidden = true;
+      updateLaunchLabel();
       launch.hidden = false;
     }
 
@@ -1329,7 +1424,42 @@
           : h('button', { class: 'secondary', type: 'button', text: "Paste Claude's answer", onclick: () => { s.answerOpen = true; render(); answerInput.focus(); } }),
         h('p', { class: 'hint', text: 'Saving it records the verdict on each line, so this dispute shows what has been researched. On claude.ai, Save answer to dispute does the same.' }));
 
-      body.replaceChildren(...[
+      const pad = loadNotes(d.disputeId);
+      const noteLink = (text, onclick) => h('button', { class: 'linkish', type: 'button', text, onclick });
+      const noteItem = n => {
+        const editing = s.editingNote === n.id;
+        const confirming = s.confirmDelete === n.id;
+        const actions = editing
+          ? [noteLink('Save', () => { const t = editInput.value.trim(); if (t) editNote(d.disputeId, n.id, t); s.editingNote = null; render(); }),
+            noteLink('Cancel', () => { s.editingNote = null; render(); })]
+          : confirming
+            ? [h('span', { text: 'Delete this note?' }),
+              noteLink('Delete', () => { deleteNote(d.disputeId, n.id); s.confirmDelete = null; updateLaunchLabel(); render(); }),
+              noteLink('Keep', () => { s.confirmDelete = null; render(); })]
+            : [noteLink('Edit', () => {
+                s.editingNote = n.id;
+                editInput = h('textarea', { class: 'note-input', rows: 3, value: n.text, 'aria-label': 'Edit note' });
+                render();
+                editInput.focus();
+              }),
+              noteLink('Delete', () => { s.confirmDelete = n.id; render(); })];
+        return h('li', { class: 'note' },
+          editing ? editInput : h('div', { class: 'note-text' }, linkified(n.text)),
+          h('div', { class: 'note-meta' },
+            h('span', { text: `${n.author} · ${shortDate(n.createdAt)}${n.edited ? ' · edited' : ''}` }),
+            ...actions));
+      };
+      // Redraws happen while lookups finish; if you're typing in a box that gets moved (the website box,
+      // a note being edited), put focus and the cursor back where they were
+      const active = root.activeElement;
+      const caret = active && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null;
+      const scroll = body.scrollTop;
+
+      notesLabel.textContent = pad.notes.length ? `Notes (${pad.notes.length})` : 'Notes';
+      notesList.replaceChildren(...pad.notes.map(noteItem));
+      notesList.hidden = pad.notes.length === 0;
+
+      rest.replaceChildren(...[
         h('div', { class: 'section' },
           h('p', { class: 'label', text: 'Merchant' }),
           h('div', { text: d.org || 'Unknown merchant' }),
@@ -1348,6 +1478,12 @@
           h('div', { class: 'ids' }, ids.map(x => h('span', { class: 'chip', title: `From ${x.from}`, text: x.id })))),
         d.orderDocs.length > 0 && h('div', { class: 'section' }, h('p', { class: 'label', text: 'Order documents' }), docList(d.orderDocs)),
       ].filter(Boolean));
+
+      body.scrollTop = scroll;
+      if (active && active.isConnected && root.activeElement !== active) {
+        active.focus({ preventScroll: true });
+        if (caret) active.setSelectionRange(...caret);
+      }
     }
 
     // Re-read the page right before building the prompt, so claims and download links are current,
@@ -1428,7 +1564,7 @@
     }
 
     return {
-      show() { attach(); if (panel.hidden) launch.hidden = false; },
+      show() { attach(); updateLaunchLabel(); if (panel.hidden) launch.hidden = false; },
       hide() { launch.hidden = true; panel.hidden = true; },
       reset() { state = null; panel.hidden = true; setStatus(''); },
       keepAttached() { if (!host.isConnected && (!launch.hidden || !panel.hidden)) attach(); },
