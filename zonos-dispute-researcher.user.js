@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.9.0
+// @version      0.9.1
 // @description  Adds a "Research merchant" panel to duty dispute pages, checks the merchant's site, and hands the research to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1004,7 +1004,8 @@
       const saved = GM_getValue(SITE_PREFIX + data.org.toLowerCase(), '');
       const guessed = guessWebsite(data.emailDomain);
       state = { path, data, website: saved || guessed, guessed: !saved && !!guessed, site: null, siteError: '', checking: false, matches: {}, checked: {}, facts: {}, factsPromise: null };
-      for (const doc of [...data.items.flatMap(i => i.docs), ...data.orderDocs]) state.checked[doc.name] = isImage(doc.name);
+      // Every document is attached by default; untick any you don't want sent
+      for (const doc of [...data.items.flatMap(i => i.docs), ...data.orderDocs]) state.checked[doc.name] = true;
       siteInput = h('input', {
         type: 'text', value: state.website, placeholder: 'https://merchant-site.com', 'aria-label': 'Merchant website',
         oninput: e => { state.website = e.target.value; },
@@ -1074,8 +1075,7 @@
         h('p', { class: 'label', text: 'Attach to Claude' }),
         docs.map(doc => h('label', { class: 'doc' },
           h('input', { type: 'checkbox', checked: !!s.checked[doc.name], onchange: e => { s.checked[doc.name] = e.target.checked; render(); } }),
-          h('span', { text: doc.name }),
-          !isImage(doc.name) && h('span', { class: 'muted', text: '(may contain customer details)' }))));
+          h('span', { text: doc.name }))));
 
       const matchList = line => {
         const found = s.matches[line];

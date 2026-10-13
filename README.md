@@ -56,5 +56,5 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 ## Privacy
 
 - It reads the dispute page only. It sends product details, the merchant's reasons and the files you tick to claude.ai. It leaves out customer names, emails, tracking numbers, broker notes and claim decisions.
-- PDFs such as invoices and receipts aren't attached unless you tick them.
+- Every document on the dispute, including invoices and receipts, is ticked to attach by default. Untick any you don't want sent.
 - The Entry Assistant token is stored in Tampermonkey on your computer, never in this script.
