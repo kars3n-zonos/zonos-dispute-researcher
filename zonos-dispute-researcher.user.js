@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.15.0
+// @version      0.15.1
 // @description  Adds a "Notes and Research" panel to duty dispute pages: shared notes and saved Claude answers for each dispute, plus merchant research handed to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -38,16 +38,6 @@
   const HANDOFF_PREFIX = 'zdr:handoff:';
   const SITE_PREFIX = 'zdr:site:';
   const HANDOFF_TTL_MS = 30 * 60 * 1000;
-  // Open in Claude tries the Claude desktop app first: its claude:// link opens a new chat with the prompt
-  // filled in (cut at about 14,000 characters), but it can't attach files and this script doesn't run there.
-  // If the app doesn't open, claude.ai opens in the browser, and the app isn't tried again for a day (or for
-  // 30 days if it has never opened here, which usually means it isn't installed).
-  const OPEN_IN_KEY = 'zdr:openIn'; // 'app' (the default) or 'browser'
-  const APP_SEEN_KEY = 'zdr:appSeen';
-  const APP_MISSING_KEY = 'zdr:appMissing';
-  const appRetryMs = () => (GM_getValue(APP_SEEN_KEY, 0) ? 1 : 30) * 24 * 60 * 60 * 1000;
-  const APP_PROMPT_MAX = 13500;
-  const openInApp = () => GM_getValue(OPEN_IN_KEY, 'app') === 'app';
   const MAX_FILE_BYTES = 15 * 1024 * 1024;
 
   /* ---------------------------------------------------------------- helpers */
@@ -1481,7 +1471,6 @@
     .section { margin-bottom: 18px; }
     .label { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
     .row { display: flex; gap: 6px; }
-    select { flex: 1; min-width: 0; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
     input[type="text"], input[type="password"] { flex: 1; min-width: 0; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
     .primary { background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 6px; padding: 8px 12px; font-weight: 600; }
     .secondary { background: transparent; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; }
@@ -1560,20 +1549,7 @@
     const body = h('div', { class: 'body' });
     const status = h('div', { class: 'status', role: 'status' });
     const openBtn = h('button', { class: 'primary', type: 'button', text: 'Open in Claude', onclick: () => run(handoff) });
-    // Shown while the app comes first, for when the documents should be attached automatically
-    const browserBtn = h('button', { class: 'secondary', type: 'button', text: 'Open in browser', title: 'Opens claude.ai with the prompt and the documents attached', hidden: !openInApp(), onclick: () => run(() => openInBrowser()) });
     const copyBtn = h('button', { class: 'secondary', type: 'button', text: 'Copy prompt', onclick: () => run(copyPrompt) });
-    const openInSelect = h('select', {
-      'aria-label': 'Where Open in Claude goes',
-      onchange: () => {
-        GM_setValue(OPEN_IN_KEY, openInSelect.value);
-        GM_deleteValue(APP_MISSING_KEY);
-        browserBtn.hidden = !openInApp();
-      },
-    },
-    h('option', { value: 'app', text: 'Open in Claude: the Claude app first, then the browser' }),
-    h('option', { value: 'browser', text: 'Open in Claude: the browser (attaches the documents)' }));
-    openInSelect.value = openInApp() ? 'app' : 'browser';
     const launch = h('button', { class: 'launch', type: 'button', text: 'Notes and Research', hidden: true, onclick: () => open() });
     const tokenInput = h('input', { type: 'password', placeholder: 'Paste your Entry Assistant token', 'aria-label': 'Entry Assistant token', autocomplete: 'off' });
     const tokenNote = h('p', { class: 'hint' });
@@ -1622,7 +1598,6 @@
     }
     const settings = h('details', { class: 'settings' },
       h('summary', { text: 'Settings' }),
-      h('div', { class: 'row', style: 'margin-top:6px' }, openInSelect),
       h('div', { class: 'row', style: 'margin-top:6px' }, authorInput),
       h('div', { class: 'row', style: 'margin-top:6px' },
         notesKeyInput,
@@ -1640,7 +1615,7 @@
         h('button', { class: 'icon', type: 'button', 'aria-label': 'Close panel', text: '×', onclick: () => close() })),
       body,
       h('footer', {},
-        h('div', { class: 'actions' }, openBtn, browserBtn, copyBtn),
+        h('div', { class: 'actions' }, openBtn, copyBtn),
         status,
         h('p', { class: 'fine', text: "Only reads this page; it never clicks or changes anything on the dashboard. Claude won't send anything until you press Enter there." }),
         settings));
@@ -2120,13 +2095,13 @@
 
     async function run(action) {
       if (!state) return;
-      openBtn.disabled = browserBtn.disabled = copyBtn.disabled = true;
+      openBtn.disabled = copyBtn.disabled = true;
       try {
         await action();
       } catch (e) {
         setStatus(e.message, 'err');
       } finally {
-        openBtn.disabled = browserBtn.disabled = copyBtn.disabled = false;
+        openBtn.disabled = copyBtn.disabled = false;
       }
     }
 
@@ -2157,63 +2132,7 @@
       return { name: doc.name, type, dataUrl: await blobToDataUrl(blob) };
     }
 
-    // The app first, unless the browser is chosen in Settings or the app didn't open in the last day
     async function handoff() {
-      if (!openInApp() || Date.now() - GM_getValue(APP_MISSING_KEY, 0) < appRetryMs()) return openInBrowser();
-      if (await openInClaudeApp()) return;
-      const when = GM_getValue(APP_SEEN_KEY, 0) ? 'tomorrow' : 'for 30 days';
-      GM_setValue(APP_MISSING_KEY, Date.now());
-      return openInBrowser(`The Claude app didn't open, so this used the browser; it won't try the app again ${when} (change that under Settings). `);
-    }
-
-    // True once this window loses focus after the link, which is what happens when the app comes up. Chrome
-    // may first ask whether to open Claude, so the wait leaves time to answer.
-    function launchApp(url) {
-      return new Promise(resolve => {
-        let timer = null;
-        const finish = opened => {
-          clearTimeout(timer);
-          window.removeEventListener('blur', onBlur);
-          document.removeEventListener('visibilitychange', onHide);
-          resolve(opened);
-        };
-        const onBlur = () => finish(true);
-        const onHide = () => { if (document.visibilityState === 'hidden') finish(true); };
-        window.addEventListener('blur', onBlur);
-        document.addEventListener('visibilitychange', onHide);
-        timer = setTimeout(() => finish(false), 8000);
-        location.href = url;
-      });
-    }
-
-    async function openInClaudeApp() {
-      // Chrome only lets a page open an app within a few seconds of a click, so don't wait long for lookups
-      if (state.factsPromise) {
-        setStatus('Waiting for the HTS lookups…');
-        await Promise.race([state.factsPromise, sleep(2500)]);
-      }
-      const d = freshData();
-      const names = selectedDocs(d).map(doc => doc.name);
-      const prompt = buildPrompt(d, state, names);
-      GM_setClipboard(prompt, 'text');
-      const prefill = prompt.length <= APP_PROMPT_MAX && encodeURIComponent(prompt).length <= 24000;
-      setStatus('Opening the Claude app… If Chrome asks, click Open Claude (tick "Always allow" so it stops asking). Without the app, the browser opens in a few seconds.');
-      if (!await launchApp(`claude://claude.ai/new${prefill ? `?q=${encodeURIComponent(prompt)}` : ''}`)) return false;
-      GM_setValue(APP_SEEN_KEY, Date.now());
-      markSent(d.disputeId, d.items);
-      render();
-      setStatus([
-        prefill
-          ? 'Opened the Claude app with the prompt filled in (it is on your clipboard too). Press Enter there to send.'
-          : "Opened the Claude app. The prompt is too long to fill in there, so it's on your clipboard: paste it, then press Enter.",
-        names.length && `The app can't take files from here: drag in ${names.join(', ')}, or use Open in browser to have them attached.`,
-        "To save the answer, copy it with Claude's copy button and use Paste Claude's answer.",
-        lookupWarning().trim(),
-      ].filter(Boolean).join(' '), lookupWarning() ? 'warn' : 'ok');
-      return true;
-    }
-
-    async function openInBrowser(note = '') {
       purgeOldHandoffs();
       await waitForFacts();
       const d = freshData();
@@ -2236,8 +2155,8 @@
       render();
       GM_openInTab(`https://claude.ai/new#zdr=${id}`, { active: true, insert: true, setParent: true });
       const warning = lookupWarning();
-      if (skipped.length) setStatus(`${note}Opened Claude, but couldn't attach: ${skipped.join('; ')}.${warning}`, 'warn');
-      else setStatus(`${note}Opened Claude in a new tab. Check the message there, then press Enter to send.${warning}`, note || warning ? 'warn' : 'ok');
+      if (skipped.length) setStatus(`Opened Claude, but couldn't attach: ${skipped.join('; ')}.${warning}`, 'warn');
+      else setStatus(`Opened Claude in a new tab. Check the message there, then press Enter to send.${warning}`, warning ? 'warn' : 'ok');
     }
 
     return {

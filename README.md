@@ -43,11 +43,7 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 ## Use
 
 - The panel only shows what the dispute page doesn't: your notes, a card for each line to tick, the merchant website, the documents to attach, Claude's saved answers, and the Claude buttons. Everything else (claims, HTS facts, product numbers, matches on the merchant's site) still goes into the prompt.
-- **Open in Claude** opens the Claude desktop app with the prompt filled in, and copies it to your clipboard too. The first time, Chrome asks whether to open Claude: tick **Always allow** so it stops asking. Check the prompt, then press Enter.
-  - The app can't take files from the dashboard. Drag the documents in yourself, or use **Open in browser**, which opens claude.ai with the prompt and the documents attached.
-  - A long prompt (several lines at once) doesn't fit in the app's link, so the app opens empty. Paste the prompt from your clipboard.
-  - To save Claude's answer from the app, copy it with Claude's copy button and use **Paste Claude's answer** in the panel. The **Save answer to dispute** button only exists on claude.ai in the browser.
-  - If the app doesn't open within a few seconds, for example because it isn't installed, claude.ai opens in the browser instead. The app isn't tried again for a day, or for 30 days if it has never opened. Under **Settings** you can make the browser the default.
+- **Open in Claude** opens claude.ai with the prompt and files filled in. Check it, then press Enter.
 - **Copy prompt** copies the prompt if you'd rather paste it yourself.
 - For Claude to run its own HTS lookups, add the entry-assistant skill in claude.ai and allow its code sandbox to reach `entry.kars3n.com`.
 
