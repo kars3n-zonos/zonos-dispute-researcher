@@ -47,6 +47,18 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 - **Copy prompt** copies the prompt if you'd rather paste it yourself.
 - For Claude to run its own HTS lookups, add the entry-assistant skill in claude.ai and allow its code sandbox to reach `entry.kars3n.com`.
 
+### Disputes with several lines
+
+- Each line has a tick box. Only ticked lines, plus the order-level documents, go into the prompt. Claude answers in one block per line, each ending with its own verdict sentence.
+- Lines not researched yet start ticked; lines already sent to Claude or answered start unticked.
+- With more than 3 claims across several lines, the panel suggests splitting them over a few chats, because Claude digs deeper with fewer at a time.
+
+### What it remembers
+
+- Each line shows its status: **Not researched yet**, **Sent to Claude** (with the time), or the saved verdict (**Substantiated**, **Somewhat substantiated** or **Not substantiated**) with the verdict sentence and the saved answer.
+- To save Claude's answer, click **Save answer to dispute** in the banner on claude.ai once Claude has finished. If it can't read the answer from the page, it asks you to paste it. You can also use **Paste Claude's answer** in the panel.
+- This is stored in Tampermonkey on your computer, per dispute, and cleared after 120 days without changes. It isn't shared with coworkers.
+
 ## Troubleshooting
 
 - **No button.** On a dispute page the Tampermonkey icon should show a number. No number: check **Allow User Scripts** and that the script is switched on in the dashboard. A number but no button: click the Tampermonkey icon, then **Open research panel**.

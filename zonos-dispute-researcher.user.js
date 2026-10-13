@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.9.1
+// @version      0.10.0
 // @description  Adds a "Research merchant" panel to duty dispute pages, checks the merchant's site, and hands the research to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -145,6 +145,90 @@
     }
   }
 
+  /* ------------------------------------------- memory: what's been researched */
+
+  // One record per dispute: when each line went to Claude, and the verdict from Claude's saved answer.
+  // Shared by the dashboard and claude.ai, since Tampermonkey storage is the same on both.
+  const DISPUTE_PREFIX = 'zdr:dispute:';
+  const DISPUTE_TTL_MS = 120 * 24 * 60 * 60 * 1000;
+  const MAX_SAVED_ANSWERS = 6;
+
+  const loadRecord = id => GM_getValue(DISPUTE_PREFIX + id, null) || { id, lines: {}, answers: [], updatedAt: 0 };
+
+  function saveRecord(rec) {
+    rec.updatedAt = Date.now();
+    GM_setValue(DISPUTE_PREFIX + rec.id, rec);
+  }
+
+  function purgeOldRecords() {
+    for (const key of GM_listValues()) {
+      if (!key.startsWith(DISPUTE_PREFIX)) continue;
+      const rec = GM_getValue(key, null);
+      if (!rec || Date.now() - (rec.updatedAt || 0) > DISPUTE_TTL_MS) GM_deleteValue(key);
+    }
+  }
+
+  function markSent(id, items) {
+    const rec = loadRecord(id);
+    for (const item of items) {
+      rec.lines[item.line] = { ...rec.lines[item.line], title: item.title, claims: claimsOf(item).map(c => c.field), sentAt: Date.now() };
+    }
+    saveRecord(rec);
+  }
+
+  // The lookahead skips the prompt's own template sentence ("substantiated / somewhat substantiated / …")
+  const VERDICT_RE = /the merchant['’]s claim is (not substantiated|somewhat substantiated|substantiated)\b(?!\s*\/)[^\n]*/i;
+
+  // Splits Claude's answer at its "Line N" headings and pulls out each line's verdict sentence.
+  // An answer without headings covers every line it was asked about.
+  function parseVerdicts(text, lines) {
+    const found = {};
+    const marks = [...text.matchAll(/^[ \t]*#{0,4}[ \t]*\**[ \t]*Line\s+(\d+)\b/gim)];
+    marks.forEach((m, i) => {
+      const part = text.slice(m.index, i + 1 < marks.length ? marks[i + 1].index : undefined);
+      const v = part.match(VERDICT_RE);
+      if (v) found[+m[1]] = { verdict: v[1].toLowerCase(), sentence: clean(v[0]) };
+    });
+    if (!Object.keys(found).length) {
+      const v = text.match(VERDICT_RE);
+      if (v) for (const line of lines) found[line] = { verdict: v[1].toLowerCase(), sentence: clean(v[0]) };
+    }
+    return found;
+  }
+
+  function recordAnswer(id, lines, text) {
+    const rec = loadRecord(id);
+    const verdicts = parseVerdicts(text, lines);
+    const now = Date.now();
+    for (const line of new Set([...lines, ...Object.keys(verdicts).map(Number)])) {
+      const v = verdicts[line];
+      rec.lines[line] = { ...rec.lines[line], answeredAt: now, ...(v ? { verdict: v.verdict, verdictSentence: v.sentence } : {}) };
+    }
+    rec.answers = [...(rec.answers || []), { savedAt: now, lines, text: text.slice(0, 20000) }].slice(-MAX_SAVED_ANSWERS);
+    saveRecord(rec);
+    return verdicts;
+  }
+
+  const shortDate = ts => new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+  function lineStatus(l) {
+    if (l?.verdict) {
+      const kind = l.verdict === 'substantiated' ? 'v-yes' : l.verdict === 'somewhat substantiated' ? 'v-some' : 'v-no';
+      return { text: `${l.verdict[0].toUpperCase()}${l.verdict.slice(1)} · ${shortDate(l.answeredAt)}`, kind };
+    }
+    if (l?.answeredAt) return { text: `Answer saved ${shortDate(l.answeredAt)}, no verdict found`, kind: '' };
+    if (l?.sentAt) return { text: `Sent to Claude ${shortDate(l.sentAt)}`, kind: '' };
+    return { text: 'Not researched yet', kind: '' };
+  }
+
+  // The part of a saved answer about one line (the whole answer if it has no "Line N" headings)
+  function answerPart(text, line) {
+    const marks = [...text.matchAll(/^[ \t]*#{0,4}[ \t]*\**[ \t]*Line\s+(\d+)\b/gim)];
+    const i = marks.findIndex(m => +m[1] === line);
+    if (i < 0) return marks.length ? '' : text;
+    return text.slice(marks[i].index, i + 1 < marks.length ? marks[i + 1].index : undefined).trim();
+  }
+
   /* ------------------------------------------- dashboard: read the dispute */
 
   const LINE_RE = /^Line\s+(\d+)\s+[—–-]\s+(.+)$/;
@@ -179,28 +263,37 @@
     }).filter(f => f.label);
   }
 
-  // Each claim starts with a span naming a field from the table, then a status, then the merchant's reason.
-  // Broker notes and "Decided by" lines are skipped: they're internal and name staff.
+  // Labels beside the line title that are statuses, not claim names
+  const STATUS_CHIP = /^(\d+\s+decisions?\s+pending|no changes claimed|all decided)$/i;
+  const STATUS_TEXT = /\b(denied|accepted|pending|needs review|under review|changes requested)\b/i;
+
+  // Each claim card is a label (HS code, Weight, Tariff line…), then a status, then the merchant's reason.
+  // Labels come from the table rows plus the claim labels beside the line title, since some claims
+  // (Weight, Quantity, Tariff line) have no row of their own. Broker notes and "Decided by" lines are
+  // skipped: they're internal and name staff.
   function parseClaims(box, labels) {
     const header = findLeaf(box, /^claims\s*&\s*broker decision$/i);
     if (!header) return [];
     const known = new Set(labels.map(l => l.toLowerCase()));
     const claims = [];
-    for (const el of leaves(header.parentElement)) {
-      if (el === header || el.closest('button')) continue;
+    const cardLeaves = leaves(header.parentElement).filter(el => el !== header && !el.closest('button'));
+    cardLeaves.forEach((el, i) => {
       const text = clean(el.textContent);
-      if (el.tagName === 'SPAN' && known.has(text.toLowerCase())) {
+      const next = cardLeaves[i + 1];
+      const startsCard = el.tagName === 'SPAN'
+        && (known.has(text.toLowerCase()) || (next && next.tagName !== 'P' && STATUS_TEXT.test(clean(next.textContent))));
+      if (startsCard) {
         claims.push({ field: text, status: '', reason: '' });
-        continue;
+        return;
       }
       const claim = claims[claims.length - 1];
-      if (!claim) continue;
+      if (!claim) return;
       if (el.tagName === 'P') {
         if (!claim.reason && !/^(decided by|note:)/i.test(text)) claim.reason = text;
       } else if (!claim.status) {
         claim.status = text;
       }
-    }
+    });
     return claims;
   }
 
@@ -221,13 +314,14 @@
       boxes.push(box);
       const fields = parseFields(box);
       const trigger = header.closest('button');
+      const chips = trigger ? leaves(trigger).filter(e => e !== header).map(e => clean(e.textContent)).filter(t => !STATUS_CHIP.test(t)) : [];
       return {
         line: +line,
         title,
         inDispute: fields.length > 0,
         note: trigger ? clean(trigger.textContent).replace(clean(header.textContent), '').trim() : '',
         fields,
-        claims: parseClaims(box, fields.map(f => f.label)),
+        claims: parseClaims(box, [...fields.map(f => f.label), ...chips]),
         docs: docLinks.filter(a => box.contains(a)).map(docOf),
       };
     });
@@ -603,13 +697,18 @@
 
   /* ------------------------------------------------- dashboard: the prompt */
 
+  // Claims about what the product is, which call for the full product hunt
+  const PRODUCT_CLAIM = /hs code|description|origin|tariff|exempt/i;
+
   // What counts as evidence for each kind of claim
   const CLAIM_CHECKS = [
     [/hs code/i, "Does the product, as the evidence shows it, fit the merchant's code better than the current one? Use the HTS facts, notes and rulings here plus your own HTS knowledge (GRI, section and chapter notes)."],
     [/description/i, 'Does the claimed description match what the product actually is and how it is marketed (listing titles, categories, what it fits)?'],
     [/origin/i, 'Is there proof of where it was made: "Made in" marks in the images, where the manufacturer makes it, listings? The merchant saying so is not proof.'],
     [/value/i, 'Does the claimed value match the price actually paid, per the invoice, receipt or listing? Complaints about duties or fees are not a reason to change the declared value.'],
-    [/qty|quantity|weight/i, 'Does it match the invoice, listing or shipping documents?'],
+    [/tariff|exempt|exclusion|chapter 99|301|232/i, 'Does the item really qualify for the exemption or tariff provision the merchant names? Check it against the Chapter 99 headings and the "ways it may pay less" exclusions above, the HS code, the origin, and what the item actually is. The merchant saying so is not proof.'],
+    [/weight/i, 'Does the claimed weight match the invoice, listing or shipping documents? If only the unit changed (for example kilograms to ounces), say which unit fits the real item.'],
+    [/qty|quantity/i, 'Does the claimed quantity match the invoice, order or listing, for example a pack size?'],
   ];
   const CHAPTER_99_CHECK = "The merchant's code is a Chapter 99 provision, which adds a duty on top of a regular code rather than replacing it. Work out what the merchant actually means (for example, steel rather than aluminum) and whether the evidence supports that.";
 
@@ -698,7 +797,7 @@
     const hasImages = attachedNames.some(isImage);
     const claims = items.flatMap(item => claimsOf(item).map(c => ({ ...c, line: item.line })));
     const about = re => claims.some(c => re.test(c.field));
-    const productClaim = about(/hs code|description|origin/i);
+    const productClaim = about(PRODUCT_CLAIM);
 
     L.push("I'm a customs broker reviewing a duty dispute. For each claim below, find out whether there's real evidence for it. Research thoroughly, then reply briefly.");
 
@@ -774,6 +873,7 @@
       (allFacts.length ? ' The HTS facts above come from the current HTS release, so trust them over memory.' : '');
 
     const steps = [
+      items.length > 1 && `There are ${items.length} lines. Research each one on its own, since they may be different products, and keep each line's findings to its own block in the reply.`,
       hasImages && IMAGE_STEP,
       siteStep,
       'Search the web for each product number in quotes, one at a time, including any you found in the images. Then search the brand and model, then a plain description of the item. Try variations: with and without dashes or spaces, and partial numbers. Don\'t stop at the first result.',
@@ -795,34 +895,46 @@
     L.push('', "If a page won't open, say which one and try another route: the site's search, its sitemap, or a web search limited to the site (site: plus the domain and the product number).");
     L.push('Use as many searches as it takes. A thorough answer matters more than a fast one.');
 
-    // Short scannable lines first, the supporting detail after, and a one-sentence verdict last
-    const lineNote = c => (items.length > 1 ? ` (line ${c.line})` : '');
-    L.push(
-      '', '## Reply',
-      'Be brief: short bullet lines, no paragraphs, no greeting, no recap of the dispute. Use exactly this layout:',
-      '',
+    // One reply block per line: short scannable lines first, the supporting detail after, and a one-sentence
+    // verdict last. The "### Line N" headings let the script save each line's verdict from the answer.
+    L.push('', '## Reply',
+      items.length > 1
+        ? `Be brief: short bullet lines, no paragraphs, no greeting, no recap of the dispute. Give one block per line, in this order, each under its own heading exactly as written:`
+        : 'Be brief: short bullet lines, no paragraphs, no greeting, no recap of the dispute. Use exactly this layout:');
+    for (const item of items) L.push('', ...replyBlock(item, s, { multi: items.length > 1, hasImages, platformUnknown }));
+    L.push('', "Link a source for every fact. If you can't find something, put it under Missing info instead of guessing.");
+    return L.filter(line => line !== false).join('\n');
+  }
+
+  function replyBlock(item, s, { multi, hasImages, platformUnknown }) {
+    const itemClaims = claimsOf(item);
+    const about = re => itemClaims.some(c => re.test(c.field));
+    const facts = s.facts?.[item.line]?.data;
+    const chapter99 = !!facts && [...facts.codes, ...facts.origins].some(c => c.chapter99?.length);
+    const metal = (!!facts && facts.codes.some(c => /232|steel|aluminum|copper/i.test(c.extra || '')))
+      || isChapter99(hsCodeIn(item.fields.find(f => /^hs code$/i.test(f.label))?.claimed));
+    const declared = item.fields.find(f => /^declared value$/i.test(f.label))?.current;
+    return [
+      multi && `### Line ${item.line}: ${item.title}`,
       about(/hs code/i) && '- **Code it should be:** the HTS code the evidence supports, and why in a few words',
       '- **Description it should be:** a plain, accurate customs description of the item',
-      `- **Prices found:** the lowest and highest price for this item, each with its source and link, against the declared value${declared.length === 1 ? ` (${declared[0]})` : ''}${about(/value/i) ? ' and what the invoice or receipt shows' : ''}`,
+      `- **Prices found:** the lowest and highest price for this item, each with its source and link, against the declared value${declared ? ` (${declared})` : ''}${about(/value/i) ? ' and what the invoice or receipt shows' : ''}`,
       '- **Marketed use:** what listings say it is for and what it fits',
       "- **Discrepancies:** one short sub-bullet for each place the search results contradict the merchant. For example: the merchant's code covers microphones no more than 10 mm across, but this one is 60 mm. Write \"None found\" if there are none.",
-      (productClaim || metalMatters) && '- **Made of:** the materials; for metal, which metal and roughly its share of the weight',
-      hasChapter99 && '- **Chapter 99:** which headings apply and why, in a few words',
-      (about(/origin/i) || hasChapter99) && "- **Origin:** where it's made, and the evidence",
+      (about(PRODUCT_CLAIM) || metal) && '- **Made of:** the materials; for metal, which metal and roughly its share of the weight',
+      chapter99 && '- **Chapter 99:** which headings apply and why, in a few words',
+      (about(/origin/i) || chapter99) && "- **Origin:** where it's made, and the evidence",
       "- **Missing info:** what you couldn't find that would settle it, such as internal components, metal content or dimensions. Write \"Nothing important\" if you found it all.",
       '',
       '**More details**',
-      ...claims.map(c => `- ${c.field} claim${lineNote(c)}: supported, not supported or unclear, and why, with a link`),
+      ...itemClaims.map(c => `- ${c.field} claim: supported, not supported or unclear, and why, with a link`),
       "- Item found: name, brand, model or part number, and the merchant's listing link",
       hasImages && '- Read from images: only the text or numbers that matter',
       platformUnknown && "- Platform: what the merchant's site runs on",
       "- API checks: what you looked up with the entry-assistant skill, or why you couldn't",
       '',
-      'Finish with exactly one sentence on its own line, choosing one of the three: "The merchant\'s claim is substantiated / somewhat substantiated / not substantiated because …"',
-      '',
-      "Link a source for every fact. If you can't find something, put it under Missing info instead of guessing.",
-    );
-    return L.filter(line => line !== false).join('\n');
+      `${multi ? "End this line's block" : 'Finish'} with exactly one sentence on its own line, choosing one of the three: "The merchant's claim is substantiated / somewhat substantiated / not substantiated because …"`,
+    ];
   }
 
   /* ------------------------------------------------- dashboard: the panel */
@@ -876,6 +988,19 @@
     .status { min-height: 18px; margin-top: 8px; font-size: 12px; color: var(--muted); }
     .fine { margin: 6px 0 0; font-size: 11px; color: var(--muted); }
     .fact { font-size: 12px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .item-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+    .item-head .item-title { margin: 0; }
+    .pick { display: flex; align-items: baseline; gap: 6px; cursor: pointer; }
+    .item.off { opacity: .6; }
+    .chip.state { margin-left: 0; white-space: nowrap; }
+    .chip.v-yes { color: var(--ok); border-color: currentColor; }
+    .chip.v-some { color: var(--warn); border-color: currentColor; }
+    .chip.v-no { color: var(--err); border-color: currentColor; }
+    .summary { margin: 0 0 8px; }
+    .verdict { margin: 0 0 4px; font-size: 12px; font-style: italic; }
+    .linkish { background: none; border: 0; padding: 0; color: var(--accent); font-size: 12px; text-decoration: underline; }
+    pre.saved { white-space: pre-wrap; max-height: 240px; overflow: auto; margin: 6px 0 0; padding: 8px; font: 12px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--soft); border-radius: 6px; }
+    textarea.answer { width: 100%; min-height: 110px; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; resize: vertical; }
     .settings { margin-top: 8px; font-size: 12px; }
     .settings summary { cursor: pointer; color: var(--muted); }
   `;
@@ -915,6 +1040,15 @@
 
     let state = null;
     let siteInput = null;
+    let answerInput = null;
+
+    function unresearchedLines(data) {
+      const rec = loadRecord(data.disputeId);
+      return new Set(data.items.filter(i => i.inDispute && !rec.lines[i.line]?.sentAt && !rec.lines[i.line]?.answeredAt).map(i => i.line));
+    }
+
+    // Claude's answer may have been saved from the claude.ai tab while this one was in the background
+    window.addEventListener('focus', () => { if (state && !panel.hidden) render(); });
 
     const setStatus = (text, kind = '') => { status.textContent = text; status.className = `status ${kind}`; };
 
@@ -1003,9 +1137,12 @@
       }
       const saved = GM_getValue(SITE_PREFIX + data.org.toLowerCase(), '');
       const guessed = guessWebsite(data.emailDomain);
-      state = { path, data, website: saved || guessed, guessed: !saved && !!guessed, site: null, siteError: '', checking: false, matches: {}, checked: {}, facts: {}, factsPromise: null };
+      state = { path, data, website: saved || guessed, guessed: !saved && !!guessed, site: null, siteError: '', checking: false, matches: {}, checked: {}, facts: {}, factsPromise: null, selected: new Set(), answerOpen: false, showAnswer: {} };
       // Every document is attached by default; untick any you don't want sent
       for (const doc of [...data.items.flatMap(i => i.docs), ...data.orderDocs]) state.checked[doc.name] = true;
+      // Lines not yet sent to Claude start ticked; lines already sent or answered start unticked
+      state.selected = unresearchedLines(data);
+      answerInput = h('textarea', { class: 'answer', rows: 6, placeholder: "Paste Claude's whole answer here", 'aria-label': "Claude's answer" });
       siteInput = h('input', {
         type: 'text', value: state.website, placeholder: 'https://merchant-site.com', 'aria-label': 'Merchant website',
         oninput: e => { state.website = e.target.value; },
@@ -1118,9 +1255,34 @@
         && allDocs.some(doc => !isImage(doc.name) && !s.checked[doc.name])
         && h('p', { class: 'hint warn', text: 'Value claim: tick the invoice or receipt so Claude can check the price paid.' });
 
+      const rec = loadRecord(d.disputeId);
+      const inDispute = d.items.filter(i => i.inDispute);
+      const claimCount = inDispute.reduce((n, i) => n + claimsOf(i).length, 0);
+      const doneCount = inDispute.filter(i => rec.lines[i.line]?.answeredAt).length;
+      const picked = inDispute.filter(i => s.selected.has(i.line));
+      const pickedClaims = picked.reduce((n, i) => n + claimsOf(i).length, 0);
+
+      const toggleLine = (line, on) => { if (on) s.selected.add(line); else s.selected.delete(line); render(); };
+
+      const savedAnswer = item => {
+        const l = rec.lines[item.line];
+        const answer = [...(rec.answers || [])].reverse().find(a => a.lines.includes(item.line) && answerPart(a.text, item.line));
+        if (!l?.answeredAt || !answer) return null;
+        const open = !!s.showAnswer[item.line];
+        return h('div', { class: 'sub-block' },
+          l.verdictSentence && h('p', { class: 'verdict', text: l.verdictSentence }),
+          h('button', { class: 'linkish', type: 'button', text: open ? 'Hide saved answer' : 'Show saved answer', onclick: () => { s.showAnswer[item.line] = !open; render(); } }),
+          open && h('pre', { class: 'saved', text: answerPart(answer.text, item.line) }));
+      };
+
       const items = d.items.map(item => (item.inDispute
-        ? h('div', { class: 'item' },
-            h('div', { class: 'item-title', text: `Line ${item.line}: ${item.title}` }),
+        ? h('div', { class: `item${s.selected.has(item.line) ? '' : ' off'}` },
+            h('div', { class: 'item-head' },
+              h('label', { class: 'pick' },
+                h('input', { type: 'checkbox', checked: s.selected.has(item.line), 'aria-label': `Research line ${item.line}`, onchange: e => toggleLine(item.line, e.target.checked) }),
+                h('span', { class: 'item-title', text: `Line ${item.line}: ${item.title}` })),
+              (({ text, kind }) => h('span', { class: `chip state ${kind}`, text }))(lineStatus(rec.lines[item.line]))),
+            savedAnswer(item),
             h('table', {},
               h('thead', {}, h('tr', {}, ['Field', 'Current', 'Claimed'].map(t => h('th', { text: t })))),
               h('tbody', {}, item.fields.map(f => h('tr', {},
@@ -1134,9 +1296,38 @@
                 c.status && h('span', { class: 'chip', text: c.status }),
                 h('div', { class: 'reason', title: 'Click to show all', text: c.reason || 'No reason given', onclick: e => e.currentTarget.classList.toggle('open') }))))),
             factsBlock(item.line),
-            docList(item.docs),
+            s.selected.has(item.line) && docList(item.docs),
             matchList(item.line))
         : h('div', { class: 'item quiet', text: `Line ${item.line}: ${item.title}${item.note ? ` · ${item.note}` : ''}` })));
+
+      // Many claims in one chat get shallower research, so suggest splitting big batches
+      const batchHint = picked.length > 1 && pickedClaims > 3
+        && h('p', { class: 'hint warn', text: `${pickedClaims} claims on ${picked.length} lines in one chat. Claude digs deeper with fewer at a time: untick some lines and research them next.` });
+      const noneHint = inDispute.length > 0 && !picked.length
+        && h('p', { class: 'hint', text: doneCount === inDispute.length ? 'Every line has a saved answer. Tick a line to research it again.' : 'Tick the lines you want researched.' });
+
+      const saveAnswer = () => {
+        const text = answerInput.value.trim();
+        if (!text) return;
+        const lines = picked.length ? picked.map(i => i.line) : inDispute.map(i => i.line);
+        const verdicts = recordAnswer(d.disputeId, lines, text);
+        answerInput.value = '';
+        s.answerOpen = false;
+        s.selected = unresearchedLines(d);
+        const found = Object.entries(verdicts).map(([line, v]) => `line ${line}: ${v.verdict}`).join(', ');
+        setStatus(found ? `Answer saved (${found}).` : "Answer saved, but it has no verdict sentence (\"The merchant's claim is …\").", found ? 'ok' : 'warn');
+        render();
+      };
+      const answerSection = inDispute.length > 0 && h('div', { class: 'section' },
+        h('p', { class: 'label', text: "Claude's answer" }),
+        s.answerOpen
+          ? h('div', {},
+              answerInput,
+              h('div', { class: 'row', style: 'margin-top:6px' },
+                h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: saveAnswer }),
+                h('button', { class: 'secondary', type: 'button', text: 'Cancel', onclick: () => { s.answerOpen = false; render(); } })))
+          : h('button', { class: 'secondary', type: 'button', text: "Paste Claude's answer", onclick: () => { s.answerOpen = true; render(); answerInput.focus(); } }),
+        h('p', { class: 'hint', text: 'Saving it records the verdict on each line, so this dispute shows what has been researched. On claude.ai, Save answer to dispute does the same.' }));
 
       body.replaceChildren(...[
         h('div', { class: 'section' },
@@ -1147,7 +1338,11 @@
             h('button', { class: 'secondary', type: 'button', text: 'Check site', disabled: s.checking, onclick: () => checkSite() })),
           s.guessed && h('p', { class: 'hint', text: "Guessed from the merchant's email domain. Change it if it's wrong." }),
           siteInfo),
-        h('div', { class: 'section' }, h('p', { class: 'label', text: 'Items' }), valueHint, items),
+        h('div', { class: 'section' },
+          h('p', { class: 'label', text: 'Items' }),
+          inDispute.length > 0 && h('p', { class: 'hint summary', text: `${claimCount} ${claimCount === 1 ? 'claim' : 'claims'} on ${inDispute.length} ${inDispute.length === 1 ? 'line' : 'lines'} · ${doneCount} of ${inDispute.length} researched` }),
+          batchHint, noneHint, valueHint, items),
+        answerSection,
         ids.length > 0 && h('div', { class: 'section' },
           h('p', { class: 'label', text: 'Product numbers found' }),
           h('div', { class: 'ids' }, ids.map(x => h('span', { class: 'chip', title: `From ${x.from}`, text: x.id })))),
@@ -1155,10 +1350,14 @@
       ].filter(Boolean));
     }
 
-    // Re-read the page right before building the prompt, so claims and download links are current
+    // Re-read the page right before building the prompt, so claims and download links are current,
+    // then keep only the ticked lines (plus order-level documents)
     function freshData() {
-      const d = extractDispute();
-      return d && d.disputeId === state.data.disputeId && d.items.length ? d : state.data;
+      const page = extractDispute();
+      const d = page && page.disputeId === state.data.disputeId && page.items.length ? page : state.data;
+      const items = d.items.filter(i => i.inDispute && state.selected.has(i.line));
+      if (!items.length) throw new Error('Tick at least one line to research.');
+      return { ...d, items };
     }
     const selectedDocs = d => [...d.items.flatMap(i => i.docs), ...d.orderDocs].filter(doc => state.checked[doc.name]);
 
@@ -1186,6 +1385,8 @@
       const d = freshData();
       const names = selectedDocs(d).map(doc => doc.name);
       GM_setClipboard(buildPrompt(d, state, names), 'text');
+      markSent(d.disputeId, d.items);
+      render();
       const warning = lookupWarning();
       setStatus((names.length ? `Prompt copied. Paste it into Claude and attach ${names.join(', ')}.` : 'Prompt copied. Paste it into Claude.') + warning, warning ? 'warn' : 'ok');
     }
@@ -1216,7 +1417,10 @@
       }
       const prompt = buildPrompt(d, state, files.map(f => f.name));
       const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-      GM_setValue(HANDOFF_PREFIX + id, { id, createdAt: Date.now(), disputeId: d.disputeId, prompt, files });
+      const lines = d.items.map(i => i.line);
+      GM_setValue(HANDOFF_PREFIX + id, { id, createdAt: Date.now(), disputeId: d.disputeId, lines, prompt, files });
+      markSent(d.disputeId, d.items);
+      render();
       GM_openInTab(`https://claude.ai/new#zdr=${id}`, { active: true, insert: true, setParent: true });
       const warning = lookupWarning();
       if (skipped.length) setStatus(`Opened Claude, but couldn't attach: ${skipped.join('; ')}.${warning}`, 'warn');
@@ -1236,6 +1440,7 @@
     // Shows in DevTools (F12 > Console), so it's easy to confirm the script is running at all
     console.info(`[Dispute Researcher] v${typeof GM_info !== 'undefined' ? GM_info.script.version : '?'} running on ${location.pathname}`);
     purgeOldHandoffs();
+    purgeOldRecords();
     let ui = null;
     let lastPath = null;
     // A way in from the Tampermonkey toolbar menu, in case the button doesn't show
@@ -1266,7 +1471,8 @@
     :host { all: initial; }
     .banner { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 2147483000; width: min(640px, calc(100vw - 32px)); display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; padding: 12px 14px; border-radius: 10px; background: #1c1917; color: #f5f5f4; border: 1px solid #44403c; box-shadow: 0 10px 30px rgba(0,0,0,.35); font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
     .msg { grid-column: 1; } .msg.ok { color: #bbf7d0; } .msg.warn { color: #fde68a; }
-    .actions { grid-column: 1; display: flex; gap: 8px; } .actions:empty { display: none; }
+    .actions { grid-column: 1; display: flex; flex-wrap: wrap; gap: 8px; } .actions:empty { display: none; }
+    textarea.paste { flex-basis: 100%; min-height: 90px; font: inherit; color: #f5f5f4; background: #292524; border: 1px solid #57534e; border-radius: 6px; padding: 6px 8px; resize: vertical; }
     button { font: inherit; cursor: pointer; border-radius: 6px; padding: 5px 10px; border: 1px solid #57534e; background: transparent; color: inherit; }
     button.primary { background: #f59e0b; border-color: #f59e0b; color: #111; font-weight: 600; }
     .close { grid-column: 2; grid-row: 1 / span 2; align-self: start; border: 0; font-size: 18px; line-height: 1; padding: 2px 6px; color: #a8a29e; }
@@ -1276,6 +1482,8 @@
   function createBanner() {
     const host = h('div', { id: 'zdr-banner' });
     const root = host.attachShadow({ mode: 'open' });
+    // Keep claude.ai's keyboard shortcuts from firing while typing in the paste box
+    for (const type of ['keydown', 'keyup', 'keypress']) host.addEventListener(type, e => e.stopPropagation());
     const msg = h('div', { class: 'msg' });
     const actions = h('div', { class: 'actions' });
     root.append(h('style', { text: BANNER_CSS }), h('div', { class: 'banner', role: 'status' },
@@ -1288,6 +1496,55 @@
   }
 
   const bannerButton = (text, onclick, primary) => h('button', { type: 'button', class: primary ? 'primary' : '', text, onclick });
+
+  // Claude's latest reply on the page. claude.ai's markup changes, so several markers are tried,
+  // and anything that is our own prompt is skipped.
+  const ANSWER_SELECTORS = ['[data-is-streaming]', '.font-claude-response', '.font-claude-message', '[data-testid="assistant-message"]'];
+  function latestAnswer() {
+    for (const sel of ANSWER_SELECTORS) {
+      const found = [...document.querySelectorAll(sel)]
+        .map(el => ({ el, text: (el.innerText || '').trim() }))
+        .filter(x => x.text.length > 40 && !x.text.includes('## How to research'));
+      if (found.length) {
+        const last = found[found.length - 1];
+        return { text: last.text, streaming: !!last.el.closest('[data-is-streaming="true"]') };
+      }
+    }
+    return null;
+  }
+
+  // Saves Claude's answer into the dispute's record, so the dashboard shows each line's verdict
+  function saveButtons(handoff, banner, copyAgain) {
+    return [bannerButton('Save answer to dispute', () => saveAnswerFromPage(handoff, banner, copyAgain), true), copyAgain];
+  }
+
+  function storeAnswer(handoff, banner, text, copyAgain) {
+    const verdicts = recordAnswer(handoff.disputeId, handoff.lines || [], text);
+    const found = Object.entries(verdicts).map(([line, v]) => `line ${line}: ${v.verdict}`).join(', ');
+    banner.set(found
+      ? `Saved to ${handoff.disputeId} (${found}). The dispute page shows it next time you look.`
+      : `Saved to ${handoff.disputeId}, but the answer has no verdict sentence ("The merchant's claim is …").`,
+    found ? 'ok' : 'warn', saveButtons(handoff, banner, copyAgain));
+  }
+
+  function saveAnswerFromPage(handoff, banner, copyAgain) {
+    const found = latestAnswer();
+    if (found?.streaming) {
+      banner.set("Claude is still writing. Click Save answer to dispute again when it's finished.", 'warn', saveButtons(handoff, banner, copyAgain));
+      return;
+    }
+    if (found && VERDICT_RE.test(found.text)) {
+      storeAnswer(handoff, banner, found.text, copyAgain);
+      return;
+    }
+    const box = h('textarea', { class: 'paste', rows: 5, placeholder: "Paste Claude's whole answer here", 'aria-label': "Claude's answer" });
+    banner.set("Couldn't read Claude's answer from the page. Copy it with the copy button under the answer, then paste it here:", 'warn', [
+      box,
+      bannerButton('Save', () => { if (box.value.trim()) storeAnswer(handoff, banner, box.value.trim(), copyAgain); }, true),
+      copyAgain,
+    ]);
+    box.focus();
+  }
 
   const COMPOSER_SELECTORS = ['div.ProseMirror[contenteditable="true"]', '[contenteditable="true"][aria-label]', '[contenteditable="true"]', 'textarea'];
   function findComposer() {
@@ -1378,7 +1635,8 @@
     const lead = typed
       ? 'The research prompt is in the message box.'
       : "Couldn't type into the message box, so the prompt is on your clipboard. Click the box and press Ctrl+V (skip this if it already shows as pasted text).";
-    banner.set(`${lead}${filesNote} Nothing has been sent: review it, then press Enter.`, typed ? 'ok' : 'warn', [copyAgain]);
+    banner.set(`${lead}${filesNote} Nothing has been sent: review it, then press Enter. When Claude has answered, click Save answer to dispute.`, typed ? 'ok' : 'warn',
+      handoff.disputeId ? saveButtons(handoff, banner, copyAgain) : [copyAgain]);
   }
 
   function initClaude() {
