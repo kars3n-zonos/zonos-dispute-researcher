@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.14.1
+// @version      0.15.0
 // @description  Adds a "Notes and Research" panel to duty dispute pages: shared notes and saved Claude answers for each dispute, plus merchant research handed to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -38,6 +38,16 @@
   const HANDOFF_PREFIX = 'zdr:handoff:';
   const SITE_PREFIX = 'zdr:site:';
   const HANDOFF_TTL_MS = 30 * 60 * 1000;
+  // Open in Claude tries the Claude desktop app first: its claude:// link opens a new chat with the prompt
+  // filled in (cut at about 14,000 characters), but it can't attach files and this script doesn't run there.
+  // If the app doesn't open, claude.ai opens in the browser, and the app isn't tried again for a day (or for
+  // 30 days if it has never opened here, which usually means it isn't installed).
+  const OPEN_IN_KEY = 'zdr:openIn'; // 'app' (the default) or 'browser'
+  const APP_SEEN_KEY = 'zdr:appSeen';
+  const APP_MISSING_KEY = 'zdr:appMissing';
+  const appRetryMs = () => (GM_getValue(APP_SEEN_KEY, 0) ? 1 : 30) * 24 * 60 * 60 * 1000;
+  const APP_PROMPT_MAX = 13500;
+  const openInApp = () => GM_getValue(OPEN_IN_KEY, 'app') === 'app';
   const MAX_FILE_BYTES = 15 * 1024 * 1024;
 
   /* ---------------------------------------------------------------- helpers */
@@ -1149,28 +1159,55 @@
   /* ------------------------------------------------- dashboard: the prompt */
 
   // Claims about what the product is, which call for the full product hunt
-  const PRODUCT_CLAIM = /hs code|description|origin|tariff|exempt/i;
+  const PRODUCT_CLAIM = /hs code|description|origin|country|tariff|exempt|exclusion|chapter 99|232|301/i;
 
   // What counts as evidence for each kind of claim
   const CLAIM_CHECKS = [
     [/hs code/i, "Does the product, as the evidence shows it, fit the merchant's code better than the current one? Use the HTS facts, notes and rulings here plus your own HTS knowledge (GRI, section and chapter notes)."],
     [/description/i, 'Does the claimed description match what the product actually is and how it is marketed (listing titles, categories, what it fits)?'],
-    [/origin/i, 'Is there proof of where it was made: "Made in" marks in the images, where the manufacturer makes it, listings? The merchant saying so is not proof.'],
+    [/origin|country/i, 'Is there proof of where it was made: "Made in" marks in the images, where the manufacturer makes it, listings, and the documents (commercial invoice, certificate of origin)? Origin is where the item was made or last substantially transformed, not where it shipped from or where the seller is based. The merchant saying so is not proof.'],
     [/value/i, 'Does the claimed value match the price actually paid, per the invoice, receipt or listing? Complaints about duties or fees are not a reason to change the declared value.'],
     [/tariff|exempt|exclusion|chapter 99|301|232/i, 'Does the item really qualify for the exemption or tariff provision the merchant names? Check it against the Chapter 99 headings and the "ways it may pay less" exclusions above, the HS code, the origin, and what the item actually is. The merchant saying so is not proof.'],
     [/weight/i, 'Does the claimed weight match the invoice, listing or shipping documents? If only the unit changed (for example kilograms to ounces), say which unit fits the real item.'],
     [/qty|quantity/i, 'Does the claimed quantity match the invoice, order or listing, for example a pack size?'],
   ];
   const CHAPTER_99_CHECK = "The merchant's code is a Chapter 99 provision, which adds a duty on top of a regular code rather than replacing it. Work out what the merchant actually means (for example, steel rather than aluminum) and whether the evidence supports that.";
+  const SECTION_232_CHECK = "Does Section 232 really not apply, or apply only the way the merchant says? That turns on whether the item is a steel, aluminum or copper article or derivative covered for its HTS code, how much of it is that metal, and where the metal was melted and poured (steel) or smelted and cast (aluminum). Look for documents that prove it: a mill certificate, a manufacturer's statement, or an invoice that breaks out the metal's value. The merchant saying so is not proof.";
 
   function checkFor(field, item) {
     const hs = item.fields.find(f => /^hs code$/i.test(f.label));
     if (/hs code/i.test(field) && isChapter99(hsCodeIn(hs?.claimed))) return CHAPTER_99_CHECK;
+    if (/tariff|exempt|exclusion|chapter 99|232/i.test(field) && disputeKinds(item).s232) return SECTION_232_CHECK;
     return (CLAIM_CHECKS.find(([re]) => re.test(field)) || [null, 'What evidence supports or contradicts it?'])[1];
   }
 
   // Claims as the merchant filed them, or the changed fields when the page shows no claim text
   const claimsOf = item => (item.claims.length ? item.claims : item.fields.filter(f => f.claimed).map(f => ({ field: f.label, reason: '' })));
+
+  // What a line's dispute is about, so the reply template asks for the right things. A tariff claim is
+  // treated as Section 232 when it or its reason mentions 232 or a metal, or the lookups show 232 duties.
+  function disputeKinds(item, facts) {
+    const claims = claimsOf(item);
+    const has = re => claims.some(c => re.test(c.field));
+    const says = re => claims.some(c => re.test(`${c.field} ${c.reason || ''}`));
+    const claimed99 = isChapter99(hsCodeIn(item.fields.find(f => /^hs code$/i.test(f.label))?.claimed));
+    const tariff = claimed99 || has(/tariff|exempt|exclusion|chapter 99|232|301/i);
+    const metalDuty = !!facts && facts.codes.some(c => /232|steel|alumin|copper/i.test(c.extra || ''));
+    const s232 = tariff && (has(/232/i) || says(/232|steel|alumin|copper|metal/i) || metalDuty);
+    const kinds = {
+      hs: has(/hs code/i) && !claimed99,
+      description: has(/description/i),
+      origin: has(/origin|country/i),
+      s232,
+      tariff: tariff && !s232,
+      value: has(/value/i),
+      weight: has(/weight/i),
+      quantity: has(/qty|quantity/i),
+    };
+    // Claims about what the item is, where it's from or which duties apply get the full product research
+    kinds.product = kinds.hs || kinds.description || kinds.origin || kinds.s232 || kinds.tariff;
+    return kinds;
+  }
 
   const CHAPTER_GUIDES = [
     [1, 5, 'animal products', ['Species', 'Fresh, chilled, frozen, dried or otherwise processed']],
@@ -1236,9 +1273,9 @@
   const MINOR_FIELDS = /^(qty|quantity)/i;
 
   // Claude on claude.ai can only reach the API through the entry-assistant skill (it holds its own token)
-  const SKILL_STEP = "Use the entry-assistant skill (it calls the Entry Assistant API) to check anything else relevant: look up any other code the evidence points to, such as the right code for how the item is actually marketed, and compare it with the current code; search CBP rulings for this kind of product; read the section, chapter and Chapter 99 notes named above; and check the duties and Chapter 99 headings for the origin you actually find. If you don't have the skill or it can't reach the API, say so in one line and carry on.";
+  const SKILL_STEP = "Use the entry-assistant skill (it calls the Entry Assistant API) for anything else relevant: look up any other code the evidence points to (such as the code for how the item is actually marketed) and compare it with the current one; read the section, chapter and Chapter 99 notes named above; and check the duties and Chapter 99 headings for the origin you actually find. If you can't use the skill, say so under API checks and carry on.";
 
-  const IMAGE_STEP ='Start with the attached images, before any searching. Look at each one closely and zoom in on small print. Write down every piece of text or marking you can read: brand names and logos; model, part, SKU and serial numbers; barcodes (UPC/EAN); "Made in" or "Product of" marks; material, fiber and care tags; stamped, cast or engraved marks on metal or plastic; certification marks and IDs (CE, UL, FCC ID, RoHS); and anything printed on packaging or shipping labels. Say what each image shows. If something is too blurry to read with confidence, say so instead of guessing.';
+  const IMAGE_STEP = 'Start with the attached images, before searching. Zoom in on small print and note every marking you can read: brands and logos; model, part, SKU and serial numbers; barcodes (UPC/EAN); "Made in" or "Product of" marks; material, fiber and care tags; stamped, cast or engraved marks; certification marks and IDs (CE, UL, FCC ID); packaging and shipping labels. Say what each image shows; if something is too blurry to read, say so instead of guessing.';
 
   function buildPrompt(d, s, attachedNames) {
     const L = [];
@@ -1248,9 +1285,11 @@
     const hasImages = attachedNames.some(isImage);
     const claims = items.flatMap(item => claimsOf(item).map(c => ({ ...c, line: item.line })));
     const about = re => claims.some(c => re.test(c.field));
-    const productClaim = about(PRODUCT_CLAIM);
+    const kinds = items.map(i => disputeKinds(i, s.facts?.[i.line]?.data));
+    const any232 = kinds.some(k => k.s232);
+    const productClaim = about(PRODUCT_CLAIM) || any232;
 
-    L.push("I'm a customs broker reviewing a duty dispute. For each claim below, find out whether there's real evidence for it. Research thoroughly, then reply briefly.");
+    L.push("I'm a customs broker reviewing a duty dispute. For each claim below, find out whether there's real evidence for it. Research thoroughly, then reply briefly in the exact template at the end.");
 
     L.push('', '## Merchant', `- Name: ${d.org || 'unknown'}`);
     const website = normalizeUrl(s.website);
@@ -1309,7 +1348,7 @@
 
     const sitemap = website && `${new URL(s.site?.finalUrl || website).origin}/sitemap.xml`;
     const siteStep = website
-      ? `Search the merchant's website for the item. Open the search links above, then search the site again for any new numbers or names you found in the images. Open the matching product page and read all of it: description, specs, materials, price, any "Made in" text and reviews. Then look around the site: the item's category, other products from the same brand, and the About, FAQ and Shipping pages, which often say where products are made or shipped from. If the site's search doesn't work, use its sitemap (${sitemap}) or a web search limited to the site.`
+      ? `Search the merchant's site: open the search links above, then search again for any numbers or names from the images. Read all of the matching product page (description, specs, materials, price, "Made in" text, reviews), then the item's category, the brand's other products, and the About, FAQ and Shipping pages, which often say where products are made or shipped from. If the site's search doesn't work, use its sitemap (${sitemap}) or a web search limited to the site.`
       : "Find the merchant's website from their name, then search it for the item: product numbers first, then the product name. Open the matching product page and read all of it, then look around the site: the item's category, other products from the same brand, and the About, FAQ and Shipping pages.";
 
     const allFacts = Object.values(s.facts || {}).filter(f => f.data).map(f => f.data);
@@ -1336,6 +1375,8 @@
       (productClaim || metalMatters) && "Find what it's made of. If it's metal, say which metal (steel, stainless steel, aluminum, copper or brass, zinc alloy) and roughly how much of its weight is metal, using the images, listings and spec sheets.",
       productClaim && 'Look for country-of-origin evidence: "Made in" marks in the images or on listings; where the manufacturer is based and where it has factories; the same product sold by overseas sellers on AliExpress, Alibaba, 1688, DHgate, Temu or Amazon. A barcode prefix only shows where the barcode was registered, not where the item was made.',
       hasChapter99 && "Using the Chapter 99 headings above, work out which ones apply. For Section 232 headings that comes down to the metal, the share of the weight that is metal, what the item is used for (for example motorcycle or other vehicle parts), and where it's made.",
+      any232 && "For the Section 232 claim: is the item a steel, aluminum or copper article or derivative covered for its HTS code (the Chapter 99 headings above, or what the entry-assistant skill finds)? Estimate its metal content by weight, and by value if the documents show it, and find where the metal was melted and poured (steel) or smelted and cast (aluminum), from mill certificates, the manufacturer or the attached documents. The merchant's word that it isn't steel, or that the metal content is small, isn't proof without such a document.",
+      productClaim && 'Find CBP rulings (CROSS) on this kind of product, with the entry-assistant skill or at rulings.cbp.gov, and note the two or three closest: the ruling number, what it covers, and how this item compares.',
       about(/qty|quantity|weight/i) && 'For a quantity or weight claim, compare it with the invoice, the listing or the shipping documents.',
       platformUnknown && "Name the e-commerce platform the merchant's site runs on (Shopify, WooCommerce and so on).",
       "Compare what you found with what the merchant says: their description, their reasons, and the exact wording of any code they want (size limits, materials, use). Note every mismatch for the Discrepancies line.",
@@ -1346,45 +1387,76 @@
     L.push('', "If a page won't open, say which one and try another route: the site's search, its sitemap, or a web search limited to the site (site: plus the domain and the product number).");
     L.push('Use as many searches as it takes. A thorough answer matters more than a fast one.');
 
-    // One reply block per line: short scannable lines first, the supporting detail after, and a one-sentence
-    // verdict last. The "### Line N" headings let the script save each line's verdict from the answer.
+    // The reply is a fill-in template, built per line from what that line's dispute is about, so every answer
+    // has the same sections in the same order. The "### Line N" headings let the script save each line's
+    // verdict, and the verdict line has to carry its own proof.
     L.push('', '## Reply',
-      items.length > 1
-        ? `Be brief: short bullet lines, no paragraphs, no greeting, no recap of the dispute. Give one block per line, in this order, each under its own heading exactly as written:`
-        : 'Be brief: short bullet lines, no paragraphs, no greeting, no recap of the dispute. Use exactly this layout:');
-    for (const item of items) L.push('', ...replyBlock(item, s, { multi: items.length > 1, hasImages, platformUnknown }));
-    L.push('', "Link a source for every fact. If you can't find something, put it under Missing info instead of guessing.");
+      `Fill in this template${items.length > 1 ? ', one block per line, in this order' : ''}. Keep it consistent:`,
+      '- Copy the headings and bold labels exactly, in the same order. Replace each <…> with what you found and drop the angle brackets.',
+      "- Keep every line, even when the answer is \"Not found\". Don't add, rename or reorder sections, and write nothing before the first heading or after the last line.",
+      '- One short line per bullet, sub-bullets for lists. No paragraphs, no greeting, no recap of the dispute.',
+      "- Put HTS and Chapter 99 codes in backticks. Link a source for every fact. If you can't find something, say so under Missing info instead of guessing.",
+      "- Under Discrepancies, give one sub-bullet for each place what you found contradicts what the merchant says, with its source. For example: their code covers microphones up to 10 mm across, but this one is 60 mm.",
+      "- The verdict must carry its proof. Don't just say what the item \"clearly\" is: say what shows it (which photo, document or listing, with its link) and which rule it meets or fails (the HTS heading or subheading text, the origin rule, the Section 232 heading). One or two sentences on one line, starting exactly with \"The merchant's claim is\".",
+      `  An example of the level of proof wanted (not of the content): "The merchant's claim is somewhat substantiated because the item is a finished microphone, not a part: the merchant's own listing ([link]) sells it as a complete USB condenser mic and photo 2 shows it assembled with its cable, so heading 8518 is right but their subheading (parts of microphones) is not; it belongs with complete microphones in 8518.10."`);
+    items.forEach((item, i) => L.push('', ...replyBlock(item, s, { hasImages, platformUnknown: platformUnknown && i === 0 })));
     return L.filter(line => line !== false).join('\n');
   }
 
-  function replyBlock(item, s, { multi, hasImages, platformUnknown }) {
-    const itemClaims = claimsOf(item);
-    const about = re => itemClaims.some(c => re.test(c.field));
+  // "HS code (8714.10.0000 → 8716.90.5060) · Description (Brake lever → Farm equipment lever)"
+  function disputeLine(item, k) {
+    const short = v => { const t = clean(v); return t.length > 60 ? `${t.slice(0, 57)}…` : t; };
+    const asks = [...new Set(claimsOf(item).map(c => c.field))].map(field => {
+      const f = item.fields.find(x => x.label.toLowerCase() === field.toLowerCase());
+      return f?.claimed ? `${field} (${short(f.current) || 'blank'} → ${short(f.claimed)})` : field;
+    });
+    const named232 = asks.some(a => /232/.test(a));
+    return `**Dispute:** ${asks.join(' · ') || 'see the claims above'}${k.s232 && !named232 ? ' · Section 232' : ''}`;
+  }
+
+  function replyBlock(item, s, { hasImages, platformUnknown }) {
     const facts = s.facts?.[item.line]?.data;
-    const chapter99 = !!facts && [...facts.codes, ...facts.origins].some(c => c.chapter99?.length);
-    const metal = (!!facts && facts.codes.some(c => /232|steel|aluminum|copper/i.test(c.extra || '')))
-      || isChapter99(hsCodeIn(item.fields.find(f => /^hs code$/i.test(f.label))?.claimed));
-    const declared = item.fields.find(f => /^declared value$/i.test(f.label))?.current;
+    const k = disputeKinds(item, facts);
+    const metal = k.s232 || (!!facts && facts.codes.some(c => /232|steel|aluminum|copper/i.test(c.extra || '')));
+    const declared = item.fields.find(f => /^declared value$/i.test(f.label))?.current || '<declared value>';
+    const theirCode = hsCodeIn(item.fields.find(f => /^hs code$/i.test(f.label))?.claimed);
+    const fields = [...new Set(claimsOf(item).map(c => c.field))];
     return [
-      multi && `### Line ${item.line}: ${item.title}`,
-      about(/hs code/i) && '- **Code it should be:** the HTS code the evidence supports, and why in a few words',
-      '- **Description it should be:** a plain, accurate customs description of the item',
-      `- **Prices found:** the lowest and highest price for this item, each with its source and link, against the declared value${declared ? ` (${declared})` : ''}${about(/value/i) ? ' and what the invoice or receipt shows' : ''}`,
-      '- **Marketed use:** what listings say it is for and what it fits',
-      "- **Discrepancies:** one short sub-bullet for each place the search results contradict the merchant. For example: the merchant's code covers microphones no more than 10 mm across, but this one is 60 mm. Write \"None found\" if there are none.",
-      (about(PRODUCT_CLAIM) || metal) && '- **Made of:** the materials; for metal, which metal and roughly its share of the weight',
-      chapter99 && '- **Chapter 99:** which headings apply and why, in a few words',
-      (about(/origin/i) || chapter99) && "- **Origin:** where it's made, and the evidence",
-      "- **Missing info:** what you couldn't find that would settle it, such as internal components, metal content or dimensions. Write \"Nothing important\" if you found it all.",
+      `### Line ${item.line}: ${item.title}`,
+      disputeLine(item, k),
       '',
-      '**More details**',
-      ...itemClaims.map(c => `- ${c.field} claim: supported, not supported or unclear, and why, with a link`),
-      "- Item found: name, brand, model or part number, and the merchant's listing link",
-      hasImages && '- Read from images: only the text or numbers that matter',
-      platformUnknown && "- Platform: what the merchant's site runs on",
-      "- API checks: what you looked up with the entry-assistant skill, or why you couldn't",
+      '#### At a glance',
+      k.hs && `- **Code it should be:** \`<code>\` — <what that code covers, in a few words> (merchant wants \`${theirCode || '<their code>'}\`)`,
+      '- **Description it should be:** <a plain, accurate customs description of the item>',
+      `- **Prices found:** low <price> ([<site>](<link>)) · high <price> ([<site>](<link>)) · declared ${declared}`,
+      '- **Marketed use:** <what listings say it is for and what it fits> ([<site>](<link>))',
+      (k.product || metal) && '- **Made of:** <the materials; for metal, which metal and about how much of the weight>',
+      (k.product || metal) && '- **Origin:** <country> — <the evidence, such as "Made in China" on the label in photo 2; or "not found">',
+      k.s232 && '- **Section 232:** <applies | does not apply | can\'t tell> — <why, in a few words>',
+      k.s232 && '  - Metal: <steel | aluminum | copper | none>, about <share> of the weight<, and its value if the documents show it>',
+      k.s232 && '  - Melted and poured / smelted and cast in: <country; or "not found">',
+      k.s232 && "  - Heading: `<Chapter 99 heading>` — <why it fits or doesn't>",
+      k.s232 && "  - Merchant's 232 claim: <what they say> — <supported or not, and by which document>",
+      k.tariff && "- **Tariff provision:** <applies | does not apply | can't tell> — <the Chapter 99 heading or exclusion they name, and whether the item meets its terms>",
+      k.value && `- **Value check:** price paid <amount> per <the invoice | receipt | listing> vs declared ${declared}`,
+      k.weight && '- **Weight check:** <weight per the invoice, listing or shipping documents> vs the claimed weight',
+      k.quantity && '- **Quantity check:** <quantity per the invoice, order or listing> vs the claimed quantity',
+      '- **Discrepancies:**',
+      '  - <each place the evidence contradicts the merchant, with its source; or "None found">',
+      "- **Missing info:** <what you couldn't find that would settle it, such as internal components, metal content or dimensions; or \"Nothing important\">",
       '',
-      `${multi ? "End this line's block" : 'Finish'} with exactly one sentence on its own line, choosing one of the three: "The merchant's claim is substantiated / somewhat substantiated / not substantiated because …"`,
+      '#### More details',
+      ...fields.map(f => `- **${f} claim:** <supported | partly supported | not supported> — <why, with a link>`),
+      "- **Item found:** <name, brand, model or part number> — [merchant's listing](<link>)",
+      hasImages && '- **Read from images:** <only the text and numbers that matter, and which photo>',
+      k.product && '- **Rulings (CROSS):** <the closest CBP rulings: number, what they cover, and how this item compares; or "none close">',
+      "- **API checks:** <what you looked up with the entry-assistant skill, or why you couldn't>",
+      platformUnknown && "- **Platform:** <what the merchant's site runs on>",
+      '',
+      '#### Verdict',
+      "**The merchant's claim is <substantiated | somewhat substantiated | not substantiated>** because <the proof: what the evidence shows, where it comes from, and the rule it meets or fails>.",
+      '- **Supports the claim:** <evidence, with its source; or "Nothing found">',
+      '- **Against the claim:** <evidence, with its source; or "Nothing found">',
     ];
   }
 
@@ -1409,6 +1481,7 @@
     .section { margin-bottom: 18px; }
     .label { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
     .row { display: flex; gap: 6px; }
+    select { flex: 1; min-width: 0; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
     input[type="text"], input[type="password"] { flex: 1; min-width: 0; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
     .primary { background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 6px; padding: 8px 12px; font-weight: 600; }
     .secondary { background: transparent; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; }
@@ -1487,7 +1560,20 @@
     const body = h('div', { class: 'body' });
     const status = h('div', { class: 'status', role: 'status' });
     const openBtn = h('button', { class: 'primary', type: 'button', text: 'Open in Claude', onclick: () => run(handoff) });
+    // Shown while the app comes first, for when the documents should be attached automatically
+    const browserBtn = h('button', { class: 'secondary', type: 'button', text: 'Open in browser', title: 'Opens claude.ai with the prompt and the documents attached', hidden: !openInApp(), onclick: () => run(() => openInBrowser()) });
     const copyBtn = h('button', { class: 'secondary', type: 'button', text: 'Copy prompt', onclick: () => run(copyPrompt) });
+    const openInSelect = h('select', {
+      'aria-label': 'Where Open in Claude goes',
+      onchange: () => {
+        GM_setValue(OPEN_IN_KEY, openInSelect.value);
+        GM_deleteValue(APP_MISSING_KEY);
+        browserBtn.hidden = !openInApp();
+      },
+    },
+    h('option', { value: 'app', text: 'Open in Claude: the Claude app first, then the browser' }),
+    h('option', { value: 'browser', text: 'Open in Claude: the browser (attaches the documents)' }));
+    openInSelect.value = openInApp() ? 'app' : 'browser';
     const launch = h('button', { class: 'launch', type: 'button', text: 'Notes and Research', hidden: true, onclick: () => open() });
     const tokenInput = h('input', { type: 'password', placeholder: 'Paste your Entry Assistant token', 'aria-label': 'Entry Assistant token', autocomplete: 'off' });
     const tokenNote = h('p', { class: 'hint' });
@@ -1536,6 +1622,7 @@
     }
     const settings = h('details', { class: 'settings' },
       h('summary', { text: 'Settings' }),
+      h('div', { class: 'row', style: 'margin-top:6px' }, openInSelect),
       h('div', { class: 'row', style: 'margin-top:6px' }, authorInput),
       h('div', { class: 'row', style: 'margin-top:6px' },
         notesKeyInput,
@@ -1553,7 +1640,7 @@
         h('button', { class: 'icon', type: 'button', 'aria-label': 'Close panel', text: '×', onclick: () => close() })),
       body,
       h('footer', {},
-        h('div', { class: 'actions' }, openBtn, copyBtn),
+        h('div', { class: 'actions' }, openBtn, browserBtn, copyBtn),
         status,
         h('p', { class: 'fine', text: "Only reads this page; it never clicks or changes anything on the dashboard. Claude won't send anything until you press Enter there." }),
         settings));
@@ -2033,13 +2120,13 @@
 
     async function run(action) {
       if (!state) return;
-      openBtn.disabled = copyBtn.disabled = true;
+      openBtn.disabled = browserBtn.disabled = copyBtn.disabled = true;
       try {
         await action();
       } catch (e) {
         setStatus(e.message, 'err');
       } finally {
-        openBtn.disabled = copyBtn.disabled = false;
+        openBtn.disabled = browserBtn.disabled = copyBtn.disabled = false;
       }
     }
 
@@ -2070,7 +2157,63 @@
       return { name: doc.name, type, dataUrl: await blobToDataUrl(blob) };
     }
 
+    // The app first, unless the browser is chosen in Settings or the app didn't open in the last day
     async function handoff() {
+      if (!openInApp() || Date.now() - GM_getValue(APP_MISSING_KEY, 0) < appRetryMs()) return openInBrowser();
+      if (await openInClaudeApp()) return;
+      const when = GM_getValue(APP_SEEN_KEY, 0) ? 'tomorrow' : 'for 30 days';
+      GM_setValue(APP_MISSING_KEY, Date.now());
+      return openInBrowser(`The Claude app didn't open, so this used the browser; it won't try the app again ${when} (change that under Settings). `);
+    }
+
+    // True once this window loses focus after the link, which is what happens when the app comes up. Chrome
+    // may first ask whether to open Claude, so the wait leaves time to answer.
+    function launchApp(url) {
+      return new Promise(resolve => {
+        let timer = null;
+        const finish = opened => {
+          clearTimeout(timer);
+          window.removeEventListener('blur', onBlur);
+          document.removeEventListener('visibilitychange', onHide);
+          resolve(opened);
+        };
+        const onBlur = () => finish(true);
+        const onHide = () => { if (document.visibilityState === 'hidden') finish(true); };
+        window.addEventListener('blur', onBlur);
+        document.addEventListener('visibilitychange', onHide);
+        timer = setTimeout(() => finish(false), 8000);
+        location.href = url;
+      });
+    }
+
+    async function openInClaudeApp() {
+      // Chrome only lets a page open an app within a few seconds of a click, so don't wait long for lookups
+      if (state.factsPromise) {
+        setStatus('Waiting for the HTS lookups…');
+        await Promise.race([state.factsPromise, sleep(2500)]);
+      }
+      const d = freshData();
+      const names = selectedDocs(d).map(doc => doc.name);
+      const prompt = buildPrompt(d, state, names);
+      GM_setClipboard(prompt, 'text');
+      const prefill = prompt.length <= APP_PROMPT_MAX && encodeURIComponent(prompt).length <= 24000;
+      setStatus('Opening the Claude app… If Chrome asks, click Open Claude (tick "Always allow" so it stops asking). Without the app, the browser opens in a few seconds.');
+      if (!await launchApp(`claude://claude.ai/new${prefill ? `?q=${encodeURIComponent(prompt)}` : ''}`)) return false;
+      GM_setValue(APP_SEEN_KEY, Date.now());
+      markSent(d.disputeId, d.items);
+      render();
+      setStatus([
+        prefill
+          ? 'Opened the Claude app with the prompt filled in (it is on your clipboard too). Press Enter there to send.'
+          : "Opened the Claude app. The prompt is too long to fill in there, so it's on your clipboard: paste it, then press Enter.",
+        names.length && `The app can't take files from here: drag in ${names.join(', ')}, or use Open in browser to have them attached.`,
+        "To save the answer, copy it with Claude's copy button and use Paste Claude's answer.",
+        lookupWarning().trim(),
+      ].filter(Boolean).join(' '), lookupWarning() ? 'warn' : 'ok');
+      return true;
+    }
+
+    async function openInBrowser(note = '') {
       purgeOldHandoffs();
       await waitForFacts();
       const d = freshData();
@@ -2093,8 +2236,8 @@
       render();
       GM_openInTab(`https://claude.ai/new#zdr=${id}`, { active: true, insert: true, setParent: true });
       const warning = lookupWarning();
-      if (skipped.length) setStatus(`Opened Claude, but couldn't attach: ${skipped.join('; ')}.${warning}`, 'warn');
-      else setStatus(`Opened Claude in a new tab. Check the message there, then press Enter to send.${warning}`, warning ? 'warn' : 'ok');
+      if (skipped.length) setStatus(`${note}Opened Claude, but couldn't attach: ${skipped.join('; ')}.${warning}`, 'warn');
+      else setStatus(`${note}Opened Claude in a new tab. Check the message there, then press Enter to send.${warning}`, note || warning ? 'warn' : 'ok');
     }
 
     return {

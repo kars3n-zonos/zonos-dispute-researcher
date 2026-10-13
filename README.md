@@ -43,7 +43,11 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 ## Use
 
 - The panel only shows what the dispute page doesn't: your notes, a card for each line to tick, the merchant website, the documents to attach, Claude's saved answers, and the Claude buttons. Everything else (claims, HTS facts, product numbers, matches on the merchant's site) still goes into the prompt.
-- **Open in Claude** opens claude.ai with the prompt and files filled in. Check it, then press Enter.
+- **Open in Claude** opens the Claude desktop app with the prompt filled in, and copies it to your clipboard too. The first time, Chrome asks whether to open Claude: tick **Always allow** so it stops asking. Check the prompt, then press Enter.
+  - The app can't take files from the dashboard. Drag the documents in yourself, or use **Open in browser**, which opens claude.ai with the prompt and the documents attached.
+  - A long prompt (several lines at once) doesn't fit in the app's link, so the app opens empty. Paste the prompt from your clipboard.
+  - To save Claude's answer from the app, copy it with Claude's copy button and use **Paste Claude's answer** in the panel. The **Save answer to dispute** button only exists on claude.ai in the browser.
+  - If the app doesn't open within a few seconds, for example because it isn't installed, claude.ai opens in the browser instead. The app isn't tried again for a day, or for 30 days if it has never opened. Under **Settings** you can make the browser the default.
 - **Copy prompt** copies the prompt if you'd rather paste it yourself.
 - For Claude to run its own HTS lookups, add the entry-assistant skill in claude.ai and allow its code sandbox to reach `entry.kars3n.com`.
 
@@ -63,6 +67,20 @@ The extension keeps its own settings, so paste the Entry Assistant token under *
 - Each line with claims gets a card showing what's claimed (HS code, Value…) and whether it's been researched. Click a card to tick it; ticked cards are outlined in orange. Only ticked lines, plus the order-level documents, go into the prompt. Claude answers in one block per line, each ending with its own verdict sentence.
 - Lines not researched yet start ticked; lines you've already sent to Claude, or that anyone has saved an answer for, start unticked.
 - With more than 3 claims across several lines, the panel suggests splitting them over a few chats, because Claude digs deeper with fewer at a time.
+
+### What Claude's answer looks like
+
+Every answer uses the same template, one block per line, so answers are quick to scan and compare:
+
+- **Dispute:** what the merchant wants changed, from what to what.
+- **At a glance:**
+  - Code it should be (HS code disputes only), Description it should be, Prices found (low and high, with links, against the declared value), and Marketed use.
+  - Made of and Origin, with the evidence for each.
+  - Section 232 for 232 disputes: the metal, how much of the item it is, where it was melted or smelted, and the Chapter 99 heading.
+  - Value, weight or quantity checks for those claims.
+  - Discrepancies between what was found and what the merchant says, and Missing info.
+- **More details:** a line per claim, the item found, what the photos show, the closest CBP rulings (CROSS), and the Entry Assistant lookups.
+- **Verdict:** "The merchant's claim is substantiated / somewhat substantiated / not substantiated because …", with the proof in the sentence itself: what shows it, where it comes from, and which rule it meets or fails. Then the evidence for and against.
 
 ### Claude's answers
 
