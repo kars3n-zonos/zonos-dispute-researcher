@@ -17,6 +17,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return false;
 });
 
+// A short how-to the first time the extension is installed (not on updates)
+chrome.runtime.onInstalled.addListener(({ reason }) => {
+  if (reason === 'install') chrome.tabs.create({ url: chrome.runtime.getURL('extension/welcome.html') });
+});
+
 // On a dashboard tab the button opens the panel; anywhere else it opens the dispute list
 chrome.action.onClicked.addListener(tab => {
   chrome.tabs.sendMessage(tab.id, { type: 'zdr:action' }).catch(() => chrome.tabs.create({ url: DISPUTES_URL }));

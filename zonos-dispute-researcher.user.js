@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.19.0
+// @version      0.20.0
 // @description  Adds a "Notes and Research" panel to duty dispute pages: shared notes and saved Claude answers for each dispute, plus merchant research handed to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -2423,6 +2423,12 @@
   }
 
   onReady(() => {
+    // With the Chrome extension installed as well, the extension runs and this Tampermonkey copy steps aside,
+    // so there's never a second panel
+    if (!globalThis.__ZDR_EXTENSION && document.documentElement.hasAttribute('data-zdr-extension')) {
+      console.info('[Dispute Researcher] The Chrome extension is installed, so this Tampermonkey copy is off. You can remove it from Tampermonkey.');
+      return;
+    }
     if (location.host === DASHBOARD_HOST) initDashboard();
     else if (location.host === 'claude.ai') initClaude();
   });

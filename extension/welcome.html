@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dispute Researcher installed</title>
+<style>
+  :root { --bg: #ffffff; --fg: #18181b; --muted: #71717a; --line: #e4e4e7; --soft: #f4f4f5; --accent: #b45309; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0c0c0d; --fg: #f4f4f5; --muted: #a1a1aa; --line: #27272a; --soft: #18181b; --accent: #f59e0b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 48px 16px 64px; }
+  .mark { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .mark img { width: 40px; height: 40px; }
+  h1 { font-size: 24px; line-height: 1.25; margin: 0; }
+  .lead { color: var(--muted); margin: 4px 0 28px; }
+  ol { padding: 0; margin: 0 0 28px; list-style: none; counter-reset: step; }
+  li { counter-increment: step; position: relative; padding: 0 0 18px 44px; }
+  li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: var(--bg); font-weight: 700; display: grid; place-items: center; font-size: 14px; }
+  li strong { display: block; }
+  a { color: var(--accent); }
+  .note { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; font-size: 14px; margin: 0 0 12px; }
+  kbd { font: 13px ui-monospace, SFMono-Regular, Consolas, monospace; background: var(--soft); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="mark"><img src="icons/icon128.png" alt=""><h1>Dispute Researcher is installed</h1></div>
+  <p class="lead">Shared notes, saved Claude answers and merchant research on every duty dispute.</p>
+  <ol>
+    <li><strong>Open a duty dispute</strong> on the <a href="https://brokerage.dashboard.zonos.com/duty-disputes">brokerage dashboard</a>.</li>
+    <li><strong>Click Notes and Research</strong> in the bottom-right corner. Shared notes turn on by themselves through your dashboard sign-in.</li>
+    <li><strong>Add the Entry Assistant token once</strong> for HTS lookups: open <strong>Settings</strong> at the bottom of the panel, paste the token (ask whoever shared this extension with you), then click <strong>Save</strong> and <strong>Test</strong>.</li>
+    <li><strong>Optional: pin it.</strong> Click the puzzle-piece icon in Chrome's toolbar, then the pin next to Zonos Dispute Researcher. Its toolbar button opens the panel too.</li>
+  </ol>
+  <p class="note">Using the Tampermonkey version as well? It switches itself off now that the extension is here, so you won't get two panels. You can remove it from Tampermonkey whenever you like.</p>
+  <p class="note">Open in Claude opens claude.ai in a new tab with the prompt and the documents filled in. Nothing is sent until you press <kbd>Enter</kbd> there.</p>
+</main>
+</body>
+</html>

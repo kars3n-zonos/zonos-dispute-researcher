@@ -1,44 +1,47 @@
 # Zonos Dispute Researcher
 
-A Tampermonkey userscript, also packaged as a Chrome extension, for the Zonos brokerage dashboard. On a duty dispute page it adds a **Notes and Research** button. The panel it opens holds the dispute's shared notes and saved Claude answers. It also gathers the dispute's details, checks the merchant's website, looks up the HTS codes in the Entry Assistant API, and opens claude.ai with a research prompt ready to send.
+A Chrome extension, also available as a Tampermonkey script, for the Zonos brokerage dashboard. On a duty dispute page it adds a **Notes and Research** button. The panel it opens holds the dispute's shared notes and saved Claude answers. It also gathers the dispute's details, checks the merchant's website, looks up the HTS codes in the Entry Assistant API, and opens claude.ai with a research prompt ready to send.
 
 It never clicks or changes anything on the dashboard, and it never sends a message on claude.ai. You review the prompt and press Enter.
 
 ## Install
+
+### Chrome extension (recommended)
+
+**From the Chrome Web Store:** open the listing link you were sent and click **Add to Chrome**. That's it. It updates itself after that. To publish the listing, see [store/README.md](store/README.md).
+
+**Until it's on the store,** install it directly. This takes about a minute:
+
+1. Download **[zonos-dispute-researcher-extension.zip](https://github.com/kars3n-zonos/zonos-dispute-researcher/releases/latest/download/zonos-dispute-researcher-extension.zip)** and unzip it.
+2. Open `chrome://extensions` and turn on **Developer mode** (top right).
+3. Click **Load unpacked** and choose the unzipped folder.
+
+A welcome page opens with the next steps. An extension installed this way doesn't update itself: when there's a new version, download the ZIP again, replace the folder, and click the reload arrow on the extension's card in `chrome://extensions`.
+
+### Tampermonkey script (alternative)
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) in Chrome.
 2. Go to `chrome://extensions`, open Tampermonkey's **Details**, and turn on **Allow User Scripts**. On older Chrome versions, turn on **Developer mode** at the top right of `chrome://extensions` instead.
 3. Open the install link and click **Install** on the page Tampermonkey shows:
    **https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js**
 
-## Updates
+It updates itself: Tampermonkey checks this repo about once a day. To update right away, click the Tampermonkey icon, then **Check for userscript updates**.
 
-Updates install automatically. Tampermonkey checks this repo about once a day. To get an update right away, click the Tampermonkey icon, then **Check for userscript updates**.
+### Both installed?
 
-If you installed by pasting the script into Tampermonkey, paste this version once. From then on it updates itself.
+That's fine. When the extension is installed, the Tampermonkey copy switches itself off, so there's only ever one panel. The two keep separate settings, so the extension needs the Entry Assistant token pasted once. Shared notes join by themselves in both.
 
-For the maintainer: Tampermonkey only installs an update when `@version` in the script header goes up, so raise it with every change you push to `main`. Raise `version` in `manifest.json` to match.
+### For the maintainer
 
-## Chrome extension (alternative to Tampermonkey)
-
-This repo is also a Chrome extension. It runs the same script file, so it works the same way. Use either the extension or the Tampermonkey script, not both, or you'll get two buttons.
-
-1. On this page, click **Code → Download ZIP** and unzip it.
-2. Go to `chrome://extensions` and turn on **Developer mode** (top right).
-3. Click **Load unpacked** and choose the unzipped folder (the one containing `manifest.json`).
-4. Pin it: click the puzzle-piece icon in Chrome's toolbar, then the pin next to **Zonos Dispute Researcher**. On a dispute page, the **Notes and Research** button appears as usual; the toolbar icon opens the panel too.
-
-The extension keeps its own settings, so paste the Entry Assistant token under **Settings** again.
-
-**Updates:** an extension loaded this way doesn't update itself. Download the new ZIP, replace the folder, and click the reload arrow on the extension's card in `chrome://extensions`. Automatic updates would need the extension published on the Chrome Web Store, for example as a private listing for zonos.com.
+Tampermonkey and Chrome only install an update when the version goes up. Raise `@version` in the script header and `version` in `manifest.json` together with every change you push to `main`. GitHub then builds the extension ZIP and publishes it under [Releases](https://github.com/kars3n-zonos/zonos-dispute-researcher/releases); upload that ZIP to the Chrome Web Store.
 
 **Why it asks for access to all websites:** it checks whichever merchant site you enter, and those can be anywhere. It only fetches pages for the checks you start, and it never sends your cookies.
 
 ## Set up
 
-1. Open a dispute (`brokerage.dashboard.zonos.com/duty-disputes/<id>`) and click **Notes and Research** in the bottom-right corner.
+1. Open a dispute (`brokerage.dashboard.zonos.com/duty-disputes/<id>`) and click **Notes and Research** in the bottom-right corner. Shared notes turn on by themselves.
 2. In the panel, open **Settings**, paste the Entry Assistant token (ask the repo owner), click **Save**, then **Test**. It should say "Connected".
-3. The first time the script contacts a site, Tampermonkey may ask for permission. Allow it.
+3. Tampermonkey only: the first time the script contacts a site, Tampermonkey may ask for permission. Allow it.
 
 ## Use
 

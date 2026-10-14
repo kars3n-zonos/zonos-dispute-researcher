@@ -4,6 +4,13 @@
 (() => {
   'use strict';
 
+  // Marks the page so a Tampermonkey copy of the script, if one is installed too, steps aside and this
+  // extension is the one that runs
+  globalThis.__ZDR_EXTENSION = true;
+  const mark = () => document.documentElement?.setAttribute('data-zdr-extension', chrome.runtime.getManifest().version);
+  if (document.documentElement) mark();
+  else document.addEventListener('readystatechange', mark, { once: true });
+
   // GM_getValue is synchronous, so everything in storage is loaded up front; the script waits for this
   const cache = {};
   globalThis.__ZDR_READY = chrome.storage.local.get(null).then(items => { Object.assign(cache, items); });
