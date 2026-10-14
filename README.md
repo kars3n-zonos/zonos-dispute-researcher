@@ -1,45 +1,27 @@
 # Zonos Dispute Researcher
 
-A Tampermonkey script, also available as an unpacked Chrome extension, for the Zonos brokerage dashboard. On a duty dispute page it adds a **Notes and Research** button. The panel it opens holds the dispute's shared notes and saved Claude answers. It also gathers the dispute's details, checks the merchant's website, looks up the HTS codes in the Entry Assistant API, and opens claude.ai with a research prompt ready to send.
+A Tampermonkey script for the Zonos brokerage dashboard. On a duty dispute page it adds a **Notes and Research** button. The panel it opens holds the dispute's shared notes and saved Claude answers. It also gathers the dispute's details, checks the merchant's website, looks up the HTS codes in the Entry Assistant API, and opens claude.ai with a research prompt ready to send.
 
 It never clicks or changes anything on the dashboard, and it never sends a message on claude.ai. You review the prompt and press Enter.
 
 ## Install
-
-### Tampermonkey script (recommended: updates itself)
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) in Chrome.
 2. Go to `chrome://extensions`, open Tampermonkey's **Details**, and turn on **Allow User Scripts**. On older Chrome versions, turn on **Developer mode** at the top right of `chrome://extensions` instead.
 3. Open the install link and click **Install** on the page Tampermonkey shows:
    **https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js**
 
-It updates itself: Tampermonkey checks this repo about once a day. To update right away, click the Tampermonkey icon, then **Check for userscript updates**.
+## Updates
 
-### Unpacked Chrome extension (if you can't use Tampermonkey)
+Updates install automatically. Tampermonkey checks this repo about once a day. To get an update right away, click the Tampermonkey icon, then **Check for userscript updates**.
 
-The same script, packaged as an extension. It works the same way, but Chrome never updates an extension installed like this, so you update it by hand.
-
-1. Download **[zonos-dispute-researcher-extension.zip](https://github.com/kars3n-zonos/zonos-dispute-researcher/releases/latest/download/zonos-dispute-researcher-extension.zip)** and unzip it.
-2. Open `chrome://extensions` and turn on **Developer mode** (top right).
-3. Click **Load unpacked** and choose the unzipped folder. A welcome page opens with the next steps.
-
-To update: download the ZIP again, replace the folder's contents, and click the reload arrow on the extension's card in `chrome://extensions`.
-
-### Both installed?
-
-That's fine. When the extension is installed, the Tampermonkey copy switches itself off, so there's only ever one panel. The two keep separate settings, so the extension needs the Entry Assistant token pasted once. Shared notes join by themselves in both.
-
-### For the maintainer
-
-Tampermonkey only installs an update when the version goes up. Raise `@version` in the script header with every change you push to `main`, and `version` in `manifest.json` to match. GitHub then builds the extension ZIP and publishes it under [Releases](https://github.com/kars3n-zonos/zonos-dispute-researcher/releases).
-
-**Why it asks for access to all websites:** it checks whichever merchant site you enter, and those can be anywhere. It only fetches pages for the checks you start, and it never sends your cookies.
+For the maintainer: Tampermonkey only installs an update when `@version` in the script header goes up, so raise it with every change you push to `main`.
 
 ## Set up
 
 1. Open a dispute (`brokerage.dashboard.zonos.com/duty-disputes/<id>`) and click **Notes and Research** in the bottom-right corner. Shared notes turn on by themselves.
 2. In the panel, open **Settings**, paste the Entry Assistant token (ask the repo owner), click **Save**, then **Test**. It should say "Connected".
-3. Tampermonkey only: the first time the script contacts a site, Tampermonkey may ask for permission. Allow it.
+3. The first time the script contacts a site, Tampermonkey may ask for permission. Allow it. It contacts the merchant site you enter (which can be anywhere), the notes server and the Entry Assistant API, and never sends your cookies to merchant sites.
 
 ## Use
 

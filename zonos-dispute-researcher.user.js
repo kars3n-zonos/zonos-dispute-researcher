@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.20.0
+// @version      0.20.1
 // @description  Adds a "Notes and Research" panel to duty dispute pages: shared notes and saved Claude answers for each dispute, plus merchant research handed to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -45,11 +45,9 @@
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
 
-  // As a Chrome extension, extension/gm-shim.js sets __ZDR_READY while it loads saved values; Tampermonkey has none
   function onReady(fn) {
-    const start = () => Promise.resolve(globalThis.__ZDR_READY).then(fn);
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
-    else start();
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn, { once: true });
+    else fn();
   }
 
   async function waitFor(check, { timeout = 15000, interval = 250 } = {}) {
@@ -2423,12 +2421,6 @@
   }
 
   onReady(() => {
-    // With the Chrome extension installed as well, the extension runs and this Tampermonkey copy steps aside,
-    // so there's never a second panel
-    if (!globalThis.__ZDR_EXTENSION && document.documentElement.hasAttribute('data-zdr-extension')) {
-      console.info('[Dispute Researcher] The Chrome extension is installed, so this Tampermonkey copy is off. You can remove it from Tampermonkey.');
-      return;
-    }
     if (location.host === DASHBOARD_HOST) initDashboard();
     else if (location.host === 'claude.ai') initClaude();
   });
