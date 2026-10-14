@@ -1,5 +1,5 @@
-# Builds the Chrome extension ZIP whenever the script or the extension changes, and publishes it as a
-# GitHub release named after the version. The same ZIP is what gets uploaded to the Chrome Web Store.
+# Builds the unpacked Chrome extension's ZIP whenever the script or the extension changes, and publishes
+# it as a GitHub release named after the version, so the README's download link always has the latest.
 name: Build extension
 
 on:
@@ -39,7 +39,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          notes="Chrome extension for v$VERSION. Upload this ZIP to the Chrome Web Store, or install it directly: unzip it, open chrome://extensions, turn on Developer mode, click Load unpacked and choose the unzipped folder."
+          notes="Unpacked Chrome extension for v$VERSION. To install: unzip it, open chrome://extensions, turn on Developer mode, click Load unpacked and choose the unzipped folder. To update an earlier install, replace the folder's contents and click the reload arrow on the extension's card."
           if gh release view "v$VERSION" > /dev/null 2>&1; then
             gh release upload "v$VERSION" zonos-dispute-researcher-extension.zip --clobber
           else
