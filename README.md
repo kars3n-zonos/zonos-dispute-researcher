@@ -49,25 +49,34 @@ For the maintainer: Tampermonkey only installs an update when `@version` in the 
 
 ### What Claude's answer looks like
 
-Claude has to research before it answers, every time:
+Claude's job is the fact-finding you'd otherwise do by hand. It finds out everything that matters about the item and the seller, catches what doesn't add up, and works out what proof is still missing. The merchant's claim is the starting point, not the outline. Claude follows the same rules a broker would:
 
-- It runs a set of required searches for each line (model and part numbers, the product name, price, datasheet and the merchant's site) and works through every research step. None of that is listed in the answer.
-- It sticks to the dispute: it checks the merchant's claim against the entry as filed rather than classifying the item from scratch, and names a different code only if the evidence rules out both the current code and the merchant's.
-- If web search is off in that chat, it says so instead of answering. Turn web search on and send again.
+- The merchant has to prove their claim, and every red flag is a reason to ask for more.
+- Without proof, the higher duty stands, especially for tariffs like Section 232 and 301. For example, the Russia aluminum rate stays until documents show where the aluminum was smelted and cast.
+- Every specific thing the merchant says gets checked against their own website, photos and documents.
 
-Every answer is short and uses the same layout, one block per line:
+Before answering, Claude does the research:
 
+- **Documents.** It reads every attached document like an investigator: dates against the order date, where the goods ship from, which suppliers are named, and whether it covers this shipment.
+- **The claim.** It reads the claim text critically, for example for an AI template with blanks left in.
+- **Searches and the seller.** It runs the required searches for each line and researches the seller, plus any supplier or factory named in the documents.
+- **HS code disputes.** It works out the right code within the heading, using essential character, what each statistical suffix covers, and the closest CBP rulings. The answer can be neither the current code nor the merchant's.
+
+None of that research is listed in the answer. If web search is off in that chat, Claude says so instead of answering: turn it on and send again.
+
+Every answer uses the same layout, one block per line:
+
+- **Bottom line:** where it stands and the next step, in one line.
 - **Dispute:** what the merchant wants changed, from what to what.
-- **The findings:**
-  - Code it should be (HS code disputes only).
-  - Description it should be: what it is, what it does and what it's made of.
-  - Prices found: low and high, with links, against the declared value.
-  - Marketed use.
-  - Only for those disputes: Origin, Section 232, a tariff provision, or a value, weight or quantity check.
-  - Discrepancies between what was found and what the merchant says.
-  - Ask the merchant for: only when one specific document would change the answer, otherwise left out.
-- **More details:** one line per claim, plus the closest CBP ruling for HS code and description disputes.
+- **Red flags:** everything that doesn't add up, each with its source.
+- **What we found:**
+  - **Every dispute:** the product (what it is, specs, materials), how it's sold, the seller, the supplier or maker, the origin and its evidence, where it shipped from, and prices against the declared value.
+  - **HS code disputes:** the code and the closest rulings.
+  - **Section 232, tariff, value, weight or quantity disputes:** a line for that claim.
+- **Ask the merchant for:** the specific documents that would settle what's unproven, and what each would prove.
 - **Verdict:** "The merchant's claim is substantiated / somewhat substantiated / not substantiated because …", with the proof in the sentence itself.
+
+Every answer ends with "Would you like me to draft an email?" Answer yes in the chat, and Claude writes a short, friendly email to the merchant with the requests listed.
 
 ### Claude's answers
 
@@ -85,7 +94,13 @@ Every answer is short and uses the same layout, one block per line:
 
 ## Privacy
 
-- It reads the dispute page only. It sends product details, the merchant's reasons and the files you tick to claude.ai. It leaves out customer names, emails, tracking numbers, broker notes and claim decisions.
+- It reads the dispute page only. It sends claude.ai:
+  - the product details, the merchant's reasons and the files you tick;
+  - the order number and date;
+  - the merchant's website and email domain;
+  - the country the parcel was posted in, read from the tracking number.
+
+  It leaves out names, full email addresses, the tracking number itself, broker notes and claim decisions.
 - Every document on the ticked lines and the order, including invoices and receipts, is attached by default. Open **Documents to attach** to untick any you don't want sent.
 - Notes and saved Claude answers are kept on the notes server (notes.kars3n.com). Everyone who uses the script can read them.
 - To join shared notes, the script sends the notes server (notes.kars3n.com) your dashboard sign-in token. It does this once, and again about once a month to renew. The token comes from the dashboard's login and lasts 60 seconds. The server checks it and keeps only your name, your zonos.com email and an id, never the token itself. You then get your own notes key, which lasts 30 days and renews while you use the dashboard.

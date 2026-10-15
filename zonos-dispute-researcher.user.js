@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.20.1
+// @version      0.21.0
 // @description  Adds a "Notes and Research" panel to duty dispute pages: shared notes and saved Claude answers for each dispute, plus merchant research handed to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -776,14 +776,25 @@
     });
 
     const email = parties.Email || '';
+    // An international postal tracking number ends in the posting country's code (UPU S10: "LK286208102AU");
+    // only that country goes into the prompt, never the number
+    const postedCode = (/^[A-Z]{2}\d{9}([A-Z]{2})$/.exec((parties['Tracking #'] || '').toUpperCase()) || [])[1];
     return {
       disputeId: location.pathname.split('/').filter(Boolean).pop(),
       org: parties.Organization || '',
       emailDomain: (email.split('@')[1] || '').toLowerCase(),
+      website: /^(https?:\/\/)?[\w-]+(\.[\w-]+)+/i.test(parties.Website || '') ? parties.Website : '',
+      ordered: /\d/.test(parties.Ordered || '') ? parties.Ordered : '',
+      order: /^order_/i.test(parties['Original order'] || '') ? parties['Original order'] : '',
+      postedIn: postedCode ? regionName(postedCode) : '',
       items,
       orderDocs: docLinks.filter(a => !boxes.some(b => b.contains(a))).map(docOf),
     };
   }
+
+  const regionName = code => {
+    try { return new Intl.DisplayNames(['en'], { type: 'region' }).of(code) || code; } catch { return code; }
+  };
 
   const FREE_MAIL = /^(gmail|googlemail|yahoo|ymail|rocketmail|hotmail|outlook|live|msn|icloud|me|mac|aol|proton|protonmail|gmx|mail|zoho|yandex|qq|163|126|bigpond|optusnet|comcast|verizon|att|sbcglobal|shaw|rogers|btinternet|orange|web|t-online|libero|naver|hanmail)\./i;
   const guessWebsite = domain => (domain && !FREE_MAIL.test(domain) ? 'https://' + domain : '');
@@ -886,7 +897,7 @@
       .replace(/([a-z])([A-Z])/g, '$1 $2')
       .split(/[\s_\-.()]+/)
       .filter(w => /^[a-z]{3,}$/i.test(w) && /[aeiouy]/i.test(w))
-      .filter(w => !/^(screen|shot|screenshot|image|img|temp|photo|pic|scan|receipt|invoice|order|copy|final|edited|file|untitled|sku|mpn|upc|ean|part|model|item)$/i.test(w))
+      .filter(w => !/^(screen|shot|screenshot|image|img|temp|photo|pic|scan|receipt|invoice|order|purchase|proforma|commercial|packing|list|bill|lading|certificate|declaration|statement|quote|quotation|copy|final|edited|file|untitled|sku|mpn|upc|ean|part|model|item)$/i.test(w))
       .filter(w => !orgWords.has(w.toLowerCase()));
     return words.join(' ');
   }
@@ -912,7 +923,8 @@
     for (const item of d.items.filter(i => i.inDispute)) {
       const desc = item.fields.find(f => /^description$/i.test(f.label));
       [item.title, desc?.current, desc?.claimed].forEach(v => idsIn(v).forEach(id => add(id, 'the item description')));
-      item.claims.forEach(c => idsIn(c.reason).forEach(id => add(id, "the merchant's reason")));
+      // System identifiers quoted in a claim ("232_RU_ALUM_DERIV_JUL24_CERTIFICATION", "item_AU_2053") aren't product numbers
+      item.claims.forEach(c => idsIn((c.reason || '').replace(/\b\w*_\w+\b/g, ' ')).forEach(id => add(id, "the merchant's reason")));
     }
     for (const doc of [...d.items.flatMap(i => i.docs), ...d.orderDocs]) {
       idsIn(doc.name.replace(/\.[a-z0-9]{2,5}$/i, '')).forEach(id => add(id, `the file name ${doc.name}`));
@@ -942,7 +954,7 @@
       ids[0] && !name.toLowerCase().includes(ids[0].toLowerCase()) && `${name} ${ids[0]}`,
       `${key} price`,
       `${key} datasheet OR specifications`,
-      clean(desc?.claimed) && clean(desc.claimed).toLowerCase() !== name.toLowerCase() && clean(desc.claimed).slice(0, 80),
+      cut(desc?.claimed) && cut(desc.claimed).toLowerCase() !== name.toLowerCase() && cut(desc.claimed).slice(0, 80),
       host && `site:${host} ${ids[0] || name}`,
     ].filter(q => q && q.replace(/"/g, '').trim().length >= 3);
     return [...new Map(queries.map(q => [q.toLowerCase(), q])).values()].slice(0, 8);
@@ -1180,7 +1192,7 @@
 
   // What counts as evidence for each kind of claim
   const CLAIM_CHECKS = [
-    [/hs code/i, "Does the product, as the evidence shows it, fit the merchant's code better than the current one? Use the HTS facts, notes and rulings here plus your own HTS knowledge (GRI, section and chapter notes)."],
+    [/hs code/i, "Which code does the product, as the evidence shows it, actually fit: the current one, the merchant's, or another in the heading? Check every spec they give that the code wording turns on. Use the HTS facts, notes and rulings here plus your own HTS knowledge (GRI, section and chapter notes)."],
     [/description/i, 'Does the claimed description match what the product actually is and how it is marketed (listing titles, categories, what it fits)?'],
     [/origin|country/i, 'Is there proof of where it was made: "Made in" marks in the images, where the manufacturer makes it, listings, and the documents (commercial invoice, certificate of origin)? Origin is where the item was made or last substantially transformed, not where it shipped from or where the seller is based. The merchant saying so is not proof.'],
     [/value/i, 'Does the claimed value match the price actually paid, per the invoice, receipt or listing? Complaints about duties or fees are not a reason to change the declared value.'],
@@ -1191,15 +1203,18 @@
   const CHAPTER_99_CHECK = "The merchant's code is a Chapter 99 provision, which adds a duty on top of a regular code rather than replacing it. Work out what the merchant actually means (for example, steel rather than aluminum) and whether the evidence supports that.";
   const SECTION_232_CHECK = "Does Section 232 really not apply, or apply only the way the merchant says? That turns on whether the item is a steel, aluminum or copper article or derivative covered for its HTS code, how much of it is that metal, and where the metal was melted and poured (steel) or smelted and cast (aluminum). Look for documents that prove it: a mill certificate, a manufacturer's statement, or an invoice that breaks out the metal's value. The merchant saying so is not proof.";
 
-  function checkFor(field, item) {
+  function checkFor(claim, item) {
+    const { field } = claim;
     const hs = item.fields.find(f => /^hs code$/i.test(f.label));
     if (/hs code/i.test(field) && isChapter99(hsCodeIn(hs?.claimed))) return CHAPTER_99_CHECK;
-    if (/tariff|exempt|exclusion|chapter 99|232/i.test(field) && disputeKinds(item).s232) return SECTION_232_CHECK;
+    if (disputeKinds(item).s232 && (/tariff|exempt|exclusion|chapter 99|232/i.test(field) || /232|alumin|steel|copper/i.test(claim.reason || ''))) return SECTION_232_CHECK;
     return (CLAIM_CHECKS.find(([re]) => re.test(field)) || [null, 'What evidence supports or contradicts it?'])[1];
   }
 
   // Claims as the merchant filed them, or the changed fields when the page shows no claim text
   const claimsOf = item => (item.claims.length ? item.claims : item.fields.filter(f => f.claimed).map(f => ({ field: f.label, reason: '' })));
+  // The dashboard's own automated note ("Zonos classified this code from the description…") isn't the merchant's reason
+  const merchantReason = c => (/^zonos (classified|reviewed|accepted)/i.test(c.reason || '') ? '' : c.reason || '');
 
   // What a line's dispute is about, so the reply template asks for the right things. A tariff claim is
   // treated as Section 232 when it or its reason mentions 232 or a metal, or the lookups show 232 duties.
@@ -1210,7 +1225,9 @@
     const claimed99 = isChapter99(hsCodeIn(item.fields.find(f => /^hs code$/i.test(f.label))?.claimed));
     const tariff = claimed99 || has(/tariff|exempt|exclusion|chapter 99|232|301/i);
     const metalDuty = !!facts && facts.codes.some(c => /232|steel|alumin|copper/i.test(c.extra || ''));
-    const s232 = tariff && (has(/232/i) || says(/232|steel|alumin|copper|metal/i) || metalDuty);
+    // A merchant can file a Section 232 complaint under any field (often the HS code), so the reason counts too
+    const s232 = (tariff && (has(/232/i) || says(/232|steel|alumin|copper|metal/i) || metalDuty))
+      || says(/section 232|\b232\b|russia\w*\s+alumin|alumin\w*\s+(tariff|from russia)/i);
     const kinds = {
       hs: has(/hs code/i) && !claimed99,
       description: has(/description/i),
@@ -1290,23 +1307,31 @@
   const MINOR_FIELDS = /^(qty|quantity)/i;
 
   // Claude on claude.ai can only reach the API through the entry-assistant skill (it holds its own token)
-  const SKILL_STEP = "Use the entry-assistant skill (it calls the Entry Assistant API) to check the current code and the merchant's code, read the section, chapter and Chapter 99 notes named above, and check the duties and Chapter 99 headings for the origin you actually find. Look up another code only if the evidence rules out both. If you can't use the skill, use your own HTS knowledge and carry on.";
+  const SKILL_STEP = "Use the entry-assistant skill (it calls the Entry Assistant API) to look up the current code, the merchant's code and any other code in the heading the evidence points to; read the section, chapter and Chapter 99 notes named above; and check the duties and Chapter 99 headings for the origin you actually find. If you can't use the skill, use your own HTS knowledge and carry on.";
 
-  const IMAGE_STEP = 'Start with the attached images, before searching. Zoom in on small print and note every marking you can read: brands and logos; model, part, SKU and serial numbers; barcodes (UPC/EAN); "Made in" or "Product of" marks; material, fiber and care tags; stamped, cast or engraved marks; certification marks and IDs (CE, UL, FCC ID); packaging and shipping labels. Say what each image shows; if something is too blurry to read, say so instead of guessing.';
+  // Documents first, read like an investigator: in practice the red flags are usually in them
+  const DOCS_STEP = 'Start with the attached documents and images, before searching, and read each one like an investigator. For each, note what it is; its date (compare it with the order date); who it\'s from and to; where the goods ship from; any supplier, manufacturer or factory named, with its address; product names and numbers; quantities, prices and currency; HS codes; and whether it actually covers this shipment. Note anything that contradicts the entry or the claim. In photos, zoom in on small print: brands and logos, model, part and serial numbers, barcodes, "Made in" or "Product of" marks, material and fiber tags, stamped or cast marks, certification IDs (CE, UL, FCC ID), and labels. If something is too blurry to read, say so instead of guessing.';
+
+  const CLAIM_TEXT_STEP = "Read the merchant's claim critically. Is it template or AI-written text with blanks left in (\"[supplier name]\", \"[e.g. …]\"), generic wording, or a promise of documents they didn't attach? Does the reason actually address the field they want changed? Each of these is a red flag.";
+
+  const SELLER_STEP = "Research the seller: who they are and where they're based, whether they make the item or resell it, and where they ship from. Look at the website's About and Contact pages and the business registry for its country, and check whether the contact email's domain points to a different company. Then look up every supplier, manufacturer or factory named in the documents or on the product: what it makes and where it is.";
 
   function buildPrompt(d, s, attachedNames) {
     const L = [];
     const items = d.items.filter(i => i.inDispute);
     const allDocs = [...d.items.flatMap(i => i.docs), ...d.orderDocs].map(x => x.name);
     const notAttached = allDocs.filter(n => !attachedNames.includes(n));
-    const hasImages = attachedNames.some(isImage);
     const claims = items.flatMap(item => claimsOf(item).map(c => ({ ...c, line: item.line })));
     const about = re => claims.some(c => re.test(c.field));
     const kinds = items.map(i => disputeKinds(i, s.facts?.[i.line]?.data));
     const any232 = kinds.some(k => k.s232);
     const productClaim = about(PRODUCT_CLAIM) || any232;
 
-    L.push("I'm a customs broker reviewing a duty dispute. For each claim below, find out whether there's real evidence for it, then reply in the exact template at the end. The reply is short; the research isn't.");
+    L.push("I'm a customs broker at Zonos handling a duty dispute. Do the fact-finding I'd otherwise do by hand: find out everything that matters about the item and the seller, catch anything that doesn't add up, and work out what proof is still missing. The merchant's claim is context, not the outline: check every fact in it, but research whatever matters for the duty, even if they didn't mention it.");
+    L.push('', 'How I handle disputes:',
+      '- The merchant has to prove their claim. Every red flag is a reason to ask them for more.',
+      '- When proof is missing, the higher-duty option stands, especially for tariffs (Section 232, Section 301, the Russia aluminum rate). A tariff stays until documents show it doesn\'t apply.',
+      '- Every specific thing the merchant says (numbers, materials, use, origin) gets checked against their own website, images and documents.');
     L.push('', "**Research before you reply, every time.** Search the web and open the pages you find: run every search under \"Required searches\" and do every step under \"How to research\", then check you didn't skip one. None of that goes in the reply. Don't fill in the template from this prompt or from memory: everything here is the merchant's side or the entry as filed, and it's what you're checking. If you can't search the web in this chat, don't answer; reply only: \"I can't search the web in this chat. Turn on web search and send this again.\"");
 
     L.push('', '## Merchant', `- Name: ${d.org || 'unknown'}`);
@@ -1314,6 +1339,10 @@
     if (!website) L.push('- Website: not provided. Find it from the name if you can.');
     else if (s.site?.platforms.length) L.push(`- Website: ${s.site.finalUrl} (${s.site.platforms.join(', ')})`);
     else L.push(`- Website: ${s.site?.finalUrl || website}`);
+    if (d.emailDomain) L.push(`- Contact email domain: ${d.emailDomain}`);
+    if (d.ordered) L.push(`- Order placed: ${d.ordered} (compare document dates with this)`);
+    if (d.postedIn) L.push(`- Posted in: ${d.postedIn} (from the tracking number's country code). Where it was posted doesn't decide where it was made.`);
+    if (d.order) L.push(`- Order number: ${d.order}`);
 
     for (const item of items) {
       L.push('', items.length > 1 ? `## Line ${item.line}: ${item.title}` : `## Item: ${item.title}`);
@@ -1322,13 +1351,13 @@
         L.push(`| ${f.label} | ${f.current} | ${f.claimed || 'no change'} |`);
       }
       // Decision statuses stay out of the prompt so the research isn't steered by them
-      const itemClaims = claimsOf(item);
+      const itemClaims = claimsOf(item).map(c => ({ ...c, reason: merchantReason(c) }));
       if (itemClaims.length) {
-        L.push('', 'Claims to check:');
+        L.push('', 'What the merchant says:');
         itemClaims.forEach((c, i) => {
           const same = itemClaims.slice(0, i).find(p => p.reason && p.reason === c.reason);
           const reason = same ? `same reason as ${same.field}` : c.reason ? `"${c.reason}"` : 'none given';
-          L.push(`- ${c.field}. Merchant's reason: ${reason}. Check: ${checkFor(c.field, item)}`);
+          L.push(`- ${c.field}. Their reason: ${reason}. Check: ${checkFor(c, item)}`);
         });
       }
       const facts = s.facts?.[item.line];
@@ -1378,28 +1407,31 @@
     const declared = items.map(i => i.fields.find(f => /^declared value$/i.test(f.label))?.current).filter(Boolean);
     const platformUnknown = !!website && !s.site?.platforms.length;
     const valueStep = about(/value/i) && "For the value claim, find the price actually paid: the invoice or receipt if one is attached, otherwise the listing price around the order date.";
-    const judgeStep = "Judge each claim. First: does the merchant's reason actually address the field they want changed? If it doesn't (for example, asking to lower the declared value while only complaining about duties), the claim has no substance unless the documents show otherwise. Then weigh the evidence against that claim's \"Check\"." +
+    const judgeStep = "Then decide where this stands: what's proven, what isn't, and what to ask the merchant for. Without proof, the higher-duty option stands, especially for tariffs." +
       (allFacts.length ? ' The HTS facts above come from the current HTS release, so trust them over memory.' : '');
 
     const steps = [
       items.length > 1 && `There are ${items.length} lines. Research each one on its own, since they may be different products, and keep each line's findings to its own block in the reply.`,
-      hasImages && IMAGE_STEP,
+      attachedNames.length > 0 && DOCS_STEP,
+      claims.some(c => merchantReason(c)) && CLAIM_TEXT_STEP,
       siteStep,
       "Run every Required search for each line, then follow up: open the best results (the manufacturer's page, the merchant's listing, marketplace listings), and search again for any new model, part or brand names you found there or in the images. Try variations: with and without dashes or spaces, and partial numbers. Don't stop at the first result.",
-      "Find how the item is marketed: listing titles, categories, and what it fits or is compatible with, on the merchant's site and on marketplaces. Compare that with the declared description and the merchant's description. For example, a lever sold for ATVs or motorcycles is a vehicle part, not a farm machinery part.",
+      "Fact-check every specific statement in the claim and in any new description against the merchant's own product page, images, manuals and spec sheets: numbers (output, size, weight, capacity), materials, what it's for, and where it's made. For example, a charger described as 25 W whose power adapter is rated 54 W, or a product page whose photos say \"Made in China\" while the entry says Australia.",
+      SELLER_STEP,
+      "Find how the item is marketed: listing titles, categories, and what it fits or is compatible with, on the merchant's site and on marketplaces. For example, a lever sold for ATVs or motorcycles is a vehicle part, not a farm machinery part.",
       `Find prices for the same item: the merchant's site, eBay (including sold listings), AliExpress, Amazon and anywhere else it's sold. Compare them with the declared value${declared.length === 1 ? ` (${declared[0]})` : ''}.`,
       valueStep,
-      productClaim && "Find the manufacturer's own page for the item, plus spec sheets or datasheets.",
+      productClaim && "Find the manufacturer's own page for the item, plus spec sheets, manuals or datasheets.",
       productClaim && 'Answer every "What to find" point.',
-      about(/hs code/i) && "For the HS code claim, read the wording of the current code and the merchant's code (and the section and chapter notes) and check which one the evidence fits. Don't classify the item from scratch: name a third code only if the evidence clearly rules out both.",
+      about(/hs code/i) && "For the HS code claim, work out the right code within the heading. Decide what the item is in its main identity, and for kits and sets what gives it its essential character (GRI 3(b)). Then read the subheading and statistical suffix wording in the current HTS, including the residual \"other\" lines, and check every spec the wording turns on. Compare with the closest CBP rulings (CROSS, with the entry-assistant skill or at rulings.cbp.gov), and say why any ruling that points elsewhere doesn't fit (a different input, a different build, outdated wording). The answer can be neither the current code nor the merchant's.",
       (productClaim || metalMatters) && "Find what it's made of. If it's metal, say which metal (steel, stainless steel, aluminum, copper or brass, zinc alloy) and roughly how much of its weight is metal, using the images, listings and spec sheets.",
-      productClaim && 'Look for country-of-origin evidence: "Made in" marks in the images or on listings; where the manufacturer is based and where it has factories; the same product sold by overseas sellers on AliExpress, Alibaba, 1688, DHgate, Temu or Amazon. A barcode prefix only shows where the barcode was registered, not where the item was made.',
+      productClaim && 'Look for country-of-origin evidence: "Made in" marks in the images, documents or listings; where the manufacturer and its suppliers are and where they have factories; the same product sold by overseas sellers on AliExpress, Alibaba, 1688, DHgate, Temu or Amazon. Where it was posted or shipped from doesn\'t decide origin, and a barcode prefix only shows where the barcode was registered.',
       hasChapter99 && "Using the Chapter 99 headings above, work out which ones apply. For Section 232 headings that comes down to the metal, the share of the weight that is metal, what the item is used for (for example motorcycle or other vehicle parts), and where it's made.",
-      any232 && "For the Section 232 claim: is the item a steel, aluminum or copper article or derivative covered for its HTS code (the Chapter 99 headings above, or what the entry-assistant skill finds)? Estimate its metal content by weight, and by value if the documents show it, and find where the metal was melted and poured (steel) or smelted and cast (aluminum), from mill certificates, the manufacturer or the attached documents. The merchant's word that it isn't steel, or that the metal content is small, isn't proof without such a document.",
-      productClaim && 'Find CBP rulings (CROSS) on this kind of product, with the entry-assistant skill or at rulings.cbp.gov, and note the closest one: its number, what it covers, and how this item compares.',
+      any232 && "For the Section 232 claim: is the item a steel, aluminum or copper article or derivative covered for its HTS code (the Chapter 99 headings above, or what the entry-assistant skill finds)? Estimate its metal content by weight, and by value if the documents show it, and find where the metal was melted and poured (steel) or smelted and cast (aluminum), from mill certificates, the manufacturer or the attached documents. The merchant's word that it isn't steel, isn't Russian, or that the metal content is small, isn't proof without such a document.",
+      productClaim && !about(/hs code/i) && 'Find CBP rulings (CROSS) on this kind of product, with the entry-assistant skill or at rulings.cbp.gov, and note the closest one: its number, what it covers, and how this item compares.',
       about(/qty|quantity|weight/i) && 'For a quantity or weight claim, compare it with the invoice, the listing or the shipping documents.',
       platformUnknown && "Name the e-commerce platform the merchant's site runs on (Shopify, WooCommerce and so on).",
-      "Compare what you found with what the merchant says: their description, their reasons, and the exact wording of any code they want (size limits, materials, use). Note every mismatch for the Discrepancies line.",
+      "Collect every red flag: anything in the documents, the claim, the website or your research that contradicts the entry, the claim or itself, or that's missing when it should be there.",
       SKILL_STEP,
       judgeStep,
     ].filter(Boolean);
@@ -1412,14 +1444,15 @@
     // verdict, and the verdict line has to carry its own proof.
     L.push('', '## Reply',
       `Fill in this template${items.length > 1 ? ', one block per line, in this order' : ''}:`,
-      '- Copy the labels exactly, in the same order. Replace each <…> with what you found and drop the angle brackets. Write "Not found" rather than leaving a line out, except Ask the merchant for (see below).',
+      '- Copy the headings and labels, in this order. Replace each <…> with what you found and drop the angle brackets. Write "Not found" where you looked and found nothing.',
       "- Keep it short: one line per bullet, no paragraphs, no greeting, no recap of the dispute. Write only the final reply: no progress notes, no list of the steps or searches, and no mention of the Entry Assistant API or the skill.",
       '- Put HTS and Chapter 99 codes in backticks, and link a source for every fact.',
-      "- Stick to the dispute. Judge the merchant's claim against the entry as filed; don't classify the item from scratch or discuss codes nobody is disputing. Name a different code only if the evidence clearly rules out both the current code and the merchant's.",
-      "- Include Ask the merchant for only when one specific thing the merchant has (a spec sheet, the material composition, an ingredient list, the supplier invoice, a label photo) would change the answer. Otherwise leave that line out; usually it isn't needed. Never a nice-to-have, something you could research, or a legal or ruling question.",
-      "- Under Discrepancies, give one sub-bullet for each place what you found contradicts what the merchant says, with its source. For example: their code covers microphones up to 10 mm across, but this one is 60 mm.",
-      "- The verdict must carry its proof. Don't just say what the item \"clearly\" is: say what shows it (which photo, document or listing, with its link) and which rule it meets or fails (the HTS heading or subheading text, the origin rule, the Section 232 heading). One or two sentences on one line, starting exactly with \"The merchant's claim is\".",
-      `  An example of the level of proof wanted (not of the content): "The merchant's claim is somewhat substantiated because the item is a finished microphone, not a part: the merchant's own listing ([link]) sells it as a complete USB condenser mic and photo 2 shows it assembled with its cable, so heading 8518 is right but their subheading (parts of microphones) is not; it belongs with complete microphones in 8518.10."`);
+      "- Red flags come first: anything that doesn't add up, from the documents, the claim text, the website or your research, each with its source. Nothing is too small: a document dated years before the order, goods shipping from a different country than the stated origin, a template with blanks left in, an email domain that doesn't match the website, a spec that contradicts the claim, a promised document that isn't attached.",
+      "- Under Ask the merchant for, list the specific documents or facts that would settle what's still unproven, each with what it would prove. For example: a mill certificate or supplier declaration naming the countries where the aluminum was smelted and cast; a bill of materials with each component's origin and cost; the latest supplier invoice; a spec sheet showing the output. Only what the merchant can actually provide. Settle classification questions yourself.",
+      "- The verdict must carry its proof. Don't just say what the item \"clearly\" is: say what shows it (which photo, document or listing, with its link) and which rule it meets or fails (the HTS heading or subheading text, the origin rule, the Section 232 heading). One or two sentences on one line.",
+      `  An example of the level of proof wanted (not of the content): "The merchant's claim is somewhat substantiated because the item is a finished microphone, not a part: the merchant's own listing ([link]) sells it as a complete USB condenser mic and photo 2 shows it assembled with its cable, so heading 8518 is right but their subheading (parts of microphones) is not; it belongs with complete microphones in 8518.10."`,
+      '- End the whole reply (once, after the last block) with this line on its own: "Would you like me to draft an email?"',
+      '- If I say yes, write a short, friendly email to the merchant contact: what the charge or code depends on, the requests as a numbered list, what happens once you have them, and the order number at the end. For example: "Hey Matt, I\'m looking at your dispute for the Section 232 duties. This charge depends on where the aluminum was smelted and cast, so we can remedy it once we have evidence that neither happened in Russia. Please send: 1. … Once we have these, we\'ll review the charge and recalculate the landed cost."');
     items.forEach((item, i) => L.push('', ...replyBlock(item, s, { platformUnknown: platformUnknown && i === 0 })));
     return L.filter(line => line !== false).join('\n');
   }
@@ -1435,39 +1468,43 @@
     return `**Dispute:** ${asks.join(' · ') || 'see the claims above'}${k.s232 && !named232 ? ' · Section 232' : ''}`;
   }
 
-  // Short on purpose: the findings first, one line per claim after, and the verdict with its proof last.
-  // Lines for origin, Section 232, tariffs, value, weight and quantity appear only for those disputes.
+  // The bottom line first, then the red flags and the facts, what to ask for, and the verdict with its proof.
+  // Lines for the code, origin, Section 232, tariffs, value, weight and quantity appear only for those disputes.
   function replyBlock(item, s, { platformUnknown }) {
     const facts = s.facts?.[item.line]?.data;
     const k = disputeKinds(item, facts);
     const declared = item.fields.find(f => /^declared value$/i.test(f.label))?.current || '<declared value>';
     const theirCode = hsCodeIn(item.fields.find(f => /^hs code$/i.test(f.label))?.claimed);
-    const fields = [...new Set(claimsOf(item).map(c => c.field))];
     return [
       `### Line ${item.line}: ${item.title}`,
+      '**Bottom line:** <where this stands and the next step, in one line>',
       disputeLine(item, k),
       '',
-      k.hs && `- **Code it should be:** \`<code>\` — <why, in a few words> (merchant wants \`${theirCode || '<their code>'}\`)`,
-      "- **Description it should be:** <brief: what it is, what it does, and what it's made of>",
-      `- **Prices found:** low <price> ([<site>](<link>)) · high <price> ([<site>](<link>)) · declared ${declared}`,
-      '- **Marketed use:** <what listings say it is for and what it fits> ([<site>](<link>))',
-      (k.origin || k.s232 || k.tariff) && '- **Origin:** <country> — <the evidence>',
-      k.s232 && "- **Section 232:** <applies | does not apply | can't tell> — <the metal and its share, where it was melted or smelted, and the heading>",
-      k.tariff && "- **Tariff provision:** <applies | does not apply | can't tell> — <whether the item meets the terms of the heading or exclusion they name>",
-      k.value && `- **Value check:** price paid <amount> per <the invoice | receipt | listing> vs declared ${declared}`,
-      k.weight && '- **Weight check:** <weight per the invoice, listing or shipping documents> vs the claimed weight',
-      k.quantity && '- **Quantity check:** <quantity per the invoice, order or listing> vs the claimed quantity',
-      '- **Discrepancies:**',
-      '  - <each place the evidence contradicts the merchant, with its source; or "None found">',
-      '- **Ask the merchant for:** <one specific document or fact, and what it would change; leave this line out when nothing is needed>',
+      '**Red flags**',
+      '1. <each thing that doesn\'t add up, with its source; or "None found">',
       '',
-      '#### More details',
-      ...fields.map(f => `- **${f} claim:** <supported | partly supported | not supported> — <why, with a link>`),
-      (k.hs || k.description) && '- **Closest ruling:** <the CBP ruling number and how this item compares; or "none close">',
+      '**What we found**',
+      "- **Product:** <what it is, what it does, the specs that matter, and what it's made of> ([<source>](<link>))",
+      k.description && "- **Description it should be:** <brief: what it is, what it does, and what it's made of>",
+      '- **Sold as:** <how the seller and other listings market it, and what it fits> ([<source>](<link>))',
+      "- **Seller:** <who they are, where they're based, maker or reseller, related companies>",
+      '- **Supplier or maker:** <companies named in the documents or found in research, what they make, and where>',
+      '- **Origin:** <country> — <the evidence>',
+      '- **Shipped from:** <where it was posted or shipped from, and how you know>',
+      `- **Prices:** low <price> ([<site>](<link>)) · high <price> ([<site>](<link>)) · declared ${declared}`,
+      k.hs && `- **Code:** \`<code>\` — <why: what the item is in its main identity, and the subheading or suffix wording it meets> (merchant wants \`${theirCode || '<their code>'}\`)`,
+      (k.hs || k.description) && '- **Closest rulings:** <ruling numbers, what they cover, which match and why any others don\'t>',
+      k.s232 && "- **Section 232:** <proven | not proven> — <the metal and its share, the countries where it was smelted and cast, and the heading>",
+      k.tariff && "- **Tariff provision:** <applies | does not apply | can't tell> — <whether the item meets the terms of the heading or exclusion they name>",
+      k.value && `- **Value:** price paid <amount> per <the invoice | receipt | listing> vs declared ${declared}`,
+      k.weight && '- **Weight:** <weight per the invoice, listing or shipping documents> vs the claimed weight',
+      k.quantity && '- **Quantity:** <quantity per the invoice, order or listing> vs the claimed quantity',
       platformUnknown && "- **Platform:** <what the merchant's site runs on>",
       '',
-      '#### Verdict',
-      "**The merchant's claim is <substantiated | somewhat substantiated | not substantiated>** because <the proof: what the evidence shows, where it comes from, and the rule it meets or fails>.",
+      '**Ask the merchant for**',
+      '1. <a specific document or fact> — <what it would prove; or "Nothing: the research settles it">',
+      '',
+      "**Verdict:** The merchant's claim is <substantiated | somewhat substantiated | not substantiated> because <the proof: what the evidence shows, where it comes from, and the rule it meets or fails>.",
     ];
   }
 
@@ -1828,9 +1865,10 @@
         body.replaceChildren(h('p', { class: 'err', text: "Couldn't find any items on this page. Wait for it to finish loading, then close and reopen this panel." }));
         return;
       }
+      // A site you entered before wins, then the dashboard's own Website field, then a guess from the email
       const saved = GM_getValue(SITE_PREFIX + data.org.toLowerCase(), '');
       const guessed = guessWebsite(data.emailDomain);
-      state = { path, data, website: saved || guessed, guessed: !saved && !!guessed, site: null, siteError: '', checking: false, matches: {}, checked: {}, facts: {}, factsPromise: null, selected: new Set(), answerOpen: false, showAnswer: {}, openAnswers: {} };
+      state = { path, data, website: saved || data.website || guessed, guessed: !saved && !data.website && !!guessed, site: null, siteError: '', checking: false, matches: {}, checked: {}, facts: {}, factsPromise: null, selected: new Set(), answerOpen: false, showAnswer: {}, openAnswers: {} };
       // Every document is attached by default; untick any you don't want sent
       for (const doc of [...data.items.flatMap(i => i.docs), ...data.orderDocs]) state.checked[doc.name] = true;
       shareOldAnswers(data.disputeId);
