@@ -6,7 +6,7 @@ It has no ads and no analytics. It never sells data, and it never uses data for 
 
 ## What it reads
 
-- **The dispute page you have open** on brokerage.dashboard.zonos.com: the items, the merchant's claims, and the dispute's documents.
+- **The dispute page you have open** on brokerage.dashboard.zonos.com: the items, the merchant's claims, and the dispute's documents. When you click an HS code on the page, it reads that code to open it in the Entry Assistant tab.
 - **The merchant's website**, but only the site you enter in the panel. It fetches public pages and product search results, and never sends your cookies.
 - **claude.ai**, only in the tab that Open in Claude opens. It fills the message box there, and reads Claude's reply when you click Save answer to dispute.
 
@@ -14,6 +14,7 @@ It has no ads and no analytics. It never sells data, and it never uses data for 
 
 - **claude.ai.** Only when you click Open in Claude: the research prompt and the documents you leave ticked. They go into your own Claude chat and are not sent until you press Enter.
 - **The Entry Assistant API** (entry.kars3n.com). For HTS lookups, it sends the HS codes and countries of origin on the dispute, using the token you enter under Settings.
+- **The Entry Assistant site** (entry.kars3n.com), shown in the panel's Entry Assistant tab. Its address carries the HS codes being looked up and the country of origin, and nothing else from the dispute. The dashboard's address isn't sent with it. To know whether the site can be shown inside the dashboard, the script also loads the site's home page once and reads its headers.
 - **The notes server** (notes.kars3n.com), which keeps the shared notes and saved Claude answers for each dispute so coworkers can see them:
   - **Notes and answers.** Their text, the dispute they belong to, the lines they cover, your name and the time.
   - **Joining.** To join, the script sends the server your dashboard sign-in token, issued by the dashboard's login and valid for 60 seconds. It does this once, then about once a month to renew. The server checks the token's signature and that the email is a zonos.com address, and then throws the token away. It keeps your name, your zonos.com email and your login's user id, so it knows who wrote what.
@@ -26,7 +27,7 @@ Nothing else leaves your browser.
 
 Tampermonkey's storage for the script keeps:
 
-- your settings: your name, the Entry Assistant token and your notes key;
+- your settings: your name, the Entry Assistant token, your notes key and the panel's width;
 - a draft of the note you're typing;
 - a copy of each dispute's notes and answers, so nothing is lost while offline;
 - when each line was sent to Claude.

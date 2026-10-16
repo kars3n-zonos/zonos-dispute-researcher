@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.21.0
-// @description  Adds a "Notes and Research" panel to duty dispute pages: shared notes and saved Claude answers for each dispute, plus merchant research handed to Claude on claude.ai. Never clicks or changes anything on the dashboard, and never sends a message on claude.ai.
+// @version      0.22.0
+// @description  Adds a "Notes and Research" panel to duty dispute pages: shared notes and saved Claude answers for each dispute, merchant research handed to Claude on claude.ai, and the Entry Assistant site for looking up and comparing HTS codes. Never changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
 // @updateURL    https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js
@@ -37,6 +37,7 @@
   const DISPUTE_PATH = /^\/duty-disputes\/[^/]+\/?$/i;
   const HANDOFF_PREFIX = 'zdr:handoff:';
   const SITE_PREFIX = 'zdr:site:';
+  const PANEL_WIDTH_KEY = 'zdr:panelWidth';
   const HANDOFF_TTL_MS = 30 * 60 * 1000;
   const MAX_FILE_BYTES = 15 * 1024 * 1024;
 
@@ -822,13 +823,22 @@
   ];
   const MARKETPLACES = [['Etsy', /(^|\.)etsy\.com$/i], ['eBay', /(^|\.)ebay\./i], ['Amazon', /(^|\.)amazon\./i]];
 
+  // Response headers as { name: value }, with repeated headers joined by ", "
+  function headerMap(raw) {
+    const headers = {};
+    for (const line of (raw || '').split(/\r?\n/)) {
+      const i = line.indexOf(':');
+      if (i <= 0) continue;
+      const name = line.slice(0, i).trim().toLowerCase();
+      const value = line.slice(i + 1).trim();
+      headers[name] = headers[name] ? `${headers[name]}, ${value}` : value;
+    }
+    return headers;
+  }
+
   async function inspectSite(url) {
     const r = await gmRequest({ url, headers: { Accept: 'text/html,application/xhtml+xml' } });
-    const headers = {};
-    for (const line of (r.responseHeaders || '').split(/\r?\n/)) {
-      const i = line.indexOf(':');
-      if (i > 0) headers[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
-    }
+    const headers = headerMap(r.responseHeaders);
     const html = r.responseText || '';
     const finalUrl = r.finalUrl || url;
     const { origin, hostname } = new URL(finalUrl);
@@ -1185,6 +1195,85 @@
     return L;
   }
 
+  /* ------------------------------------------ dashboard: Entry Assistant site */
+
+  // The Entry Assistant website, shown in the panel's second tab. Its address picks the page: one code
+  // (?code=) or two compared (?compare=current,claimed), for goods made in `from`; embed=1 asks for its
+  // compact layout. The site itself needs no token.
+  const ENTRY_SITE = 'https://entry.kars3n.com/';
+
+  function entryLink({ codes = [], from = '' } = {}, embed = false) {
+    const url = new URL(ENTRY_SITE);
+    const [a, b] = codes;
+    if (a && b) url.searchParams.set('compare', `${a},${b}`);
+    else if (a) url.searchParams.set('code', a);
+    if (from) url.searchParams.set('from', from);
+    if (embed) url.searchParams.set('embed', '1');
+    return url.href;
+  }
+
+  // A site shows inside another only if its headers allow it: a frame-ancestors rule that lets this
+  // dashboard in, or, with no such rule, no X-Frame-Options
+  function framingAllowed(headers) {
+    const rules = (headers['content-security-policy'] || '').split(',')
+      .map(policy => /(?:^|;)\s*frame-ancestors\s+([^;]*)/i.exec(policy))
+      .filter(Boolean);
+    if (!rules.length) return !/deny|sameorigin/i.test(headers['x-frame-options'] || '');
+    return rules.every(([, sources]) => sources.trim().split(/\s+/).some(src => {
+      if (src === '*' || src === 'https:') return true;
+      const m = /^(?:https:\/\/)?(\*\.)?([a-z0-9.-]+)(?::\d+)?\/?$/i.exec(src);
+      if (!m) return false;
+      const host = location.hostname;
+      return m[1] ? host.endsWith(`.${m[2].toLowerCase()}`) : host === m[2].toLowerCase();
+    }));
+  }
+
+  // Asked once per page load. A "no" is asked again after a minute, so a change on the site shows up
+  // without reloading; if the site can't be reached, the frame is tried anyway.
+  let entryFrameCheck = null;
+  function entryFrameable() {
+    const c = entryFrameCheck;
+    if (!c || (c.result === false && Date.now() - c.at > 60000)) {
+      const check = { at: Date.now(), result: null };
+      check.promise = gmRequest({ url: ENTRY_SITE, headers: { Accept: 'text/html' }, timeout: 15000 })
+        .then(r => framingAllowed(headerMap(r.responseHeaders)), () => true)
+        .then(ok => (check.result = ok));
+      entryFrameCheck = check;
+    }
+    return entryFrameCheck.promise;
+  }
+
+  const sameCode = (a, b) => {
+    const x = digitsOf(a);
+    const y = digitsOf(b);
+    return !!x && !!y && (x.startsWith(y) || y.startsWith(x));
+  };
+  // "8504.40.9580" as "8504.40.95.80"; an extra digit (4202.91.80900) is dropped
+  const tidyCode = raw => codeCandidates(raw)[0] || '';
+
+  // A line's current code, the merchant's code if they claim another, and the declared origin
+  function lineCodes(item) {
+    const hs = item.fields.find(f => /^hs code$/i.test(f.label));
+    const codes = [...new Set([hsCodeIn(hs?.current), hsCodeIn(hs?.claimed)].map(tidyCode).filter(Boolean))];
+    return { codes, from: isoCountry(item.fields.find(f => /^country of origin$/i.test(f.label))?.current) };
+  }
+
+  // What to show for a code clicked on the dashboard: both of the line's codes when the merchant claims
+  // a different one and the clicked code is either of them, otherwise just the clicked code
+  function clickedCodeTarget(button) {
+    const code = tidyCode(button.textContent);
+    if (!code) return null;
+    const main = document.querySelector('main');
+    const d = main && extractDispute();
+    const items = d?.items || [];
+    const header = main && lineHeaders(main).find(hd => itemBox(hd, main).contains(button));
+    const line = header ? +LINE_RE.exec(clean(header.textContent))[1] : 0;
+    const item = items.find(i => i.line === line) || items.find(i => lineCodes(i).codes.some(c => sameCode(c, code)));
+    const { codes = [], from = '' } = item ? lineCodes(item) : {};
+    const pair = codes.length === 2 && codes.some(c => sameCode(c, code));
+    return { codes: pair ? codes : [code], from: isChapter99(code) ? '' : from };
+  }
+
   /* ------------------------------------------------- dashboard: the prompt */
 
   // Claims about what the product is, which call for the full product hunt
@@ -1519,16 +1608,39 @@
     button:disabled { opacity: .55; cursor: default; }
     button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .launch { position: fixed; right: 20px; bottom: 20px; z-index: 2147483000; background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 999px; padding: 10px 16px; font-weight: 600; box-shadow: 0 6px 20px rgba(0,0,0,.35); }
-    .panel { position: fixed; top: 0; right: 0; height: 100vh; width: min(460px, 100vw); z-index: 2147483001; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border-left: 1px solid var(--line); box-shadow: -10px 0 30px rgba(0,0,0,.3); }
+    .panel { position: fixed; top: 0; right: 0; height: 100vh; width: min(var(--w, 480px), 100vw); z-index: 2147483001; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border-left: 1px solid var(--line); box-shadow: -10px 0 30px rgba(0,0,0,.3); }
+    .panel.docked { box-shadow: none; }
+    .panel.resizing { user-select: none; }
+    .panel.resizing iframe { pointer-events: none; }
     [hidden] { display: none !important; }
-    header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
-    .icon { background: none; border: 0; color: var(--muted); font-size: 20px; line-height: 1; padding: 2px 6px; border-radius: 6px; }
-    .icon:hover { color: var(--fg); background: var(--soft); }
+    .grip { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 2; }
+    .grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; }
+    .grip:hover::after, .grip:focus-visible::after, .resizing .grip::after { background: var(--accent); }
+    .grip:focus-visible { outline: none; }
+    header { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; padding: 6px 8px 0 10px; border-bottom: 1px solid var(--line); }
+    .tabs { display: flex; gap: 2px; min-width: 0; }
+    .tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: 9px 8px 8px; font-weight: 600; white-space: nowrap; }
+    .tab:hover { color: var(--fg); }
+    .tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+    .header-actions { display: flex; align-items: center; gap: 2px; padding-bottom: 5px; }
+    .icon { background: none; border: 0; color: var(--muted); font-size: 18px; line-height: 1; padding: 3px 6px; border-radius: 6px; }
+    .icon:hover, .icon[aria-pressed="true"] { color: var(--fg); background: var(--soft); }
+    .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
     .body { flex: 1; overflow-y: auto; padding: 14px 16px; }
     footer { border-top: 1px solid var(--line); padding: 12px 16px; }
+    .entry-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+    .entry-caption { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .entry-bar a { flex: none; font-size: 12px; }
+    .entry-frame { flex: 1; display: block; width: 100%; min-height: 0; border: 0; background: var(--bg); }
+    .entry-blocked { padding: 16px; }
+    .entry-blocked p { margin: 0 0 12px; }
+    a.primary, a.secondary { display: inline-block; text-decoration: none; }
+    .group { margin-bottom: 16px; }
+    .group .row { margin-top: 6px; }
     .section { margin-bottom: 18px; }
     .label { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
     .row { display: flex; gap: 6px; }
+    .row > button { flex: none; white-space: nowrap; }
     input[type="text"], input[type="password"] { flex: 1; min-width: 0; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
     .primary { background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 6px; padding: 8px 12px; font-weight: 600; }
     .secondary { background: transparent; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; }
@@ -1554,7 +1666,8 @@
     .doc { display: flex; align-items: baseline; gap: 6px; margin: 4px 0 0 2px; font-size: 12px; overflow-wrap: anywhere; }
     a { color: var(--accent); }
     .actions { display: flex; gap: 8px; }
-    .status { min-height: 18px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+    .status { font-size: 12px; color: var(--muted); }
+    .status:not(:empty) { margin-top: 8px; }
     .fine { margin: 6px 0 0; font-size: 11px; color: var(--muted); }
     .chip.state { white-space: nowrap; }
     .chip.v-yes { color: var(--ok); border-color: currentColor; }
@@ -1594,8 +1707,6 @@
     .note-meta .linkish { font-size: 11px; }
     textarea.note-input { width: 100%; min-height: 56px; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; resize: vertical; }
     textarea.answer { width: 100%; min-height: 110px; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; resize: vertical; }
-    .settings { margin-top: 8px; font-size: 12px; }
-    .settings summary { cursor: pointer; color: var(--muted); }
   `;
 
   function createPanel() {
@@ -1654,30 +1765,141 @@
       // With the box emptied, this joins through the dashboard sign-in
       testNotesKey().then(() => state && syncNow());
     }
-    const settings = h('details', { class: 'settings' },
-      h('summary', { text: 'Settings' }),
-      h('div', { class: 'row', style: 'margin-top:6px' }, authorInput),
-      h('div', { class: 'row', style: 'margin-top:6px' },
-        notesKeyInput,
-        h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => saveNotesKey() }),
-        h('button', { class: 'secondary', type: 'button', text: 'Test', onclick: () => testNotesKey() })),
-      notesKeyNote,
-      h('div', { class: 'row', style: 'margin-top:6px' },
-        tokenInput,
-        h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => saveToken() }),
-        h('button', { class: 'secondary', type: 'button', text: 'Test', onclick: () => testConnection() })),
-      tokenNote);
+    const settingsBody = h('div', { class: 'body' },
+      h('div', { class: 'group' },
+        h('p', { class: 'label', text: 'Your name' }),
+        h('div', { class: 'row' }, authorInput)),
+      h('div', { class: 'group' },
+        h('p', { class: 'label', text: 'Shared notes' }),
+        h('div', { class: 'row' },
+          notesKeyInput,
+          h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => saveNotesKey() }),
+          h('button', { class: 'secondary', type: 'button', text: 'Test', onclick: () => testNotesKey() })),
+        notesKeyNote),
+      h('div', { class: 'group' },
+        h('p', { class: 'label', text: 'Entry Assistant token' }),
+        h('p', { class: 'hint', style: 'margin:0 0 6px', text: "For the HTS lookups that go into Claude's prompt. The Entry Assistant tab doesn't need it." }),
+        h('div', { class: 'row' },
+          tokenInput,
+          h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => saveToken() }),
+          h('button', { class: 'secondary', type: 'button', text: 'Test', onclick: () => testConnection() })),
+        tokenNote),
+      h('p', { class: 'fine', text: "The panel only reads the dispute page and never changes anything on the dashboard. Once the Entry Assistant site allows being shown here, clicking a code on the page opens it in the Entry Assistant tab instead of the dashboard's References window (Alt-click for theirs). Claude won't send anything until you press Enter there." }),
+      h('p', { class: 'fine', text: 'Drag the panel\'s left edge to make it wider or narrower; double-click the edge for the default width.' }));
+
+    // The Entry Assistant site, in a frame that's kept while you switch tabs
+    const entryCaption = h('span', { class: 'entry-caption' });
+    const entryNewTab = h('a', { target: '_blank', rel: 'noreferrer', text: 'Open in a new tab ↗' });
+    const entryFrame = h('iframe', { class: 'entry-frame', title: 'Entry Assistant', referrerpolicy: 'no-referrer', allow: 'clipboard-write', hidden: true });
+    const entryBlockedLink = h('a', { class: 'primary', target: '_blank', rel: 'noreferrer', text: 'Open Entry Assistant ↗' });
+    const entryBlocked = h('div', { class: 'entry-blocked', hidden: true },
+      h('p', { text: "The Entry Assistant site doesn't allow being shown inside the dashboard yet, so it opens in its own tab for now." }),
+      entryBlockedLink);
+
+    const views = {
+      dispute: h('section', { class: 'view' }, body,
+        h('footer', {},
+          h('div', { class: 'actions' }, openBtn, copyBtn),
+          status)),
+      entry: h('section', { class: 'view', hidden: true },
+        h('div', { class: 'entry-bar' }, entryCaption, entryNewTab),
+        entryBlocked, entryFrame),
+      settings: h('section', { class: 'view', hidden: true }, settingsBody),
+    };
+    const tab = (name, text) => h('button', { class: 'tab', type: 'button', role: 'tab', 'aria-selected': 'false', text, onclick: () => setView(name) });
+    const tabs = { dispute: tab('dispute', 'Notes and Research'), entry: tab('entry', 'Entry Assistant') };
+    const gear = h('button', { class: 'icon', type: 'button', 'aria-label': 'Settings', title: 'Settings', 'aria-pressed': 'false', text: '⚙︎', onclick: () => setView(view === 'settings' ? lastView : 'settings') });
+    const grip = h('div', { class: 'grip', role: 'separator', tabindex: '0', 'aria-orientation': 'vertical', 'aria-label': 'Resize panel', title: 'Drag to resize. Double-click for the default width.' });
     const panel = h('aside', { class: 'panel', hidden: true, 'aria-label': 'Notes and Research' },
+      grip,
       h('header', {},
-        h('strong', { text: 'Notes and Research' }),
-        h('button', { class: 'icon', type: 'button', 'aria-label': 'Close panel', text: '×', onclick: () => close() })),
-      body,
-      h('footer', {},
-        h('div', { class: 'actions' }, openBtn, copyBtn),
-        status,
-        h('p', { class: 'fine', text: "Only reads this page; it never clicks or changes anything on the dashboard. Claude won't send anything until you press Enter there." }),
-        settings));
+        h('nav', { class: 'tabs', role: 'tablist' }, tabs.dispute, tabs.entry),
+        h('div', { class: 'header-actions' },
+          gear,
+          h('button', { class: 'icon', type: 'button', 'aria-label': 'Close panel', title: 'Close', text: '×', onclick: () => close() }))),
+      views.dispute, views.entry, views.settings);
     root.append(h('style', { text: PANEL_CSS }), h('div', { class: 'wrap' }, launch, panel));
+
+    let view = 'dispute';
+    let lastView = 'dispute';
+    function setView(name) {
+      view = name;
+      if (name !== 'settings') lastView = name;
+      for (const [k, el] of Object.entries(views)) el.hidden = k !== name;
+      for (const [k, el] of Object.entries(tabs)) el.setAttribute('aria-selected', String(k === name));
+      gear.setAttribute('aria-pressed', String(name === 'settings'));
+      if (name === 'entry') showEntryPage();
+      if (name === 'settings') refreshNotesKeyNote();
+    }
+    setView('dispute');
+
+    // Opened from a code on the page or a line card: the site comes up with those codes
+    let entryTarget = null;
+    function showEntry(target) {
+      entryTarget = target;
+      setView('entry');
+      open();
+    }
+    async function showEntryPage() {
+      const t = entryTarget || {};
+      const [a, b] = t.codes || [];
+      entryCaption.textContent = !a ? 'Look up and compare HTS codes, notes, rulings and more.'
+        : `${b ? `Comparing ${a} with ${b}` : a}${t.from ? ` · made in ${regionName(t.from)}` : ''}`;
+      entryNewTab.href = entryBlockedLink.href = entryLink(t);
+      const ok = await entryFrameable();
+      entryFrame.hidden = !ok;
+      entryBlocked.hidden = ok;
+      entryNewTab.hidden = !ok;
+      const url = entryLink(t, true);
+      if (ok && entryFrame.getAttribute('src') !== url) entryFrame.setAttribute('src', url);
+    }
+
+    // While the panel is open the page is narrowed beside it rather than covered, unless the window is
+    // too narrow for both; the width is yours to drag and is remembered
+    const DEFAULT_WIDTH = 480;
+    const MIN_WIDTH = 380;
+    const MIN_PAGE = 640;
+    let width = GM_getValue(PANEL_WIDTH_KEY, 0) || DEFAULT_WIDTH;
+    const panelWidth = () => Math.round(Math.max(MIN_WIDTH, Math.min(width, innerWidth - 320, 1400)));
+    const dockStyle = h('style', { id: 'zdr-dock' });
+    function dock() {
+      const w = panelWidth();
+      host.style.setProperty('--w', `${w}px`);
+      const docked = !panel.hidden && innerWidth - w >= MIN_PAGE;
+      panel.classList.toggle('docked', docked);
+      const css = docked ? `body { margin-right: ${w}px !important; }` : '';
+      if (dockStyle.textContent !== css) dockStyle.textContent = css;
+      if (!dockStyle.isConnected) (document.head || document.documentElement).append(dockStyle);
+    }
+    window.addEventListener('resize', () => { if (!panel.hidden) dock(); });
+    grip.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      try { grip.setPointerCapture(e.pointerId); } catch { /* the drag still works while the pointer stays on the edge */ }
+      panel.classList.add('resizing');
+      const move = ev => { width = innerWidth - ev.clientX; dock(); };
+      const done = () => {
+        grip.removeEventListener('pointermove', move);
+        grip.removeEventListener('pointerup', done);
+        grip.removeEventListener('pointercancel', done);
+        panel.classList.remove('resizing');
+        width = panelWidth();
+        GM_setValue(PANEL_WIDTH_KEY, width);
+      };
+      grip.addEventListener('pointermove', move);
+      grip.addEventListener('pointerup', done);
+      grip.addEventListener('pointercancel', done);
+    });
+    grip.addEventListener('dblclick', () => { width = DEFAULT_WIDTH; GM_deleteValue(PANEL_WIDTH_KEY); dock(); });
+    grip.addEventListener('keydown', e => {
+      const step = e.key === 'ArrowLeft' ? 40 : e.key === 'ArrowRight' ? -40 : 0;
+      if (!step) return;
+      e.preventDefault();
+      width = panelWidth() + step;
+      dock();
+      width = panelWidth();
+      GM_setValue(PANEL_WIDTH_KEY, width);
+    });
 
     let state = null;
     let siteInput = null;
@@ -1712,7 +1934,7 @@
           else showNotesState(pad);
         }
         updateLaunchLabel();
-        if (!settings.open) refreshNotesKeyNote();
+        if (view !== 'settings') refreshNotesKeyNote();
       });
     }
 
@@ -1780,10 +2002,9 @@
 
     const setTokenNote = (text, kind = '') => { tokenNote.textContent = text; tokenNote.className = `hint ${kind}`; };
 
-    // Settings stays open until a token is saved, so it's hard to miss
+    // Without a token, the Notes and Research tab also says so (see render)
     function refreshTokenNote() {
       const saved = !!GM_getValue(TOKEN_KEY, '');
-      settings.open = !saved;
       if (saved) setTokenNote('Token saved. Click Test to check the connection.');
       else setTokenNote('No token saved, so the HTS lookups are off. Paste the ENTRY_API_TOKEN value from your entry-assistant skill.', 'warn');
     }
@@ -1807,7 +2028,10 @@
       tokenInput.value = '';
       refreshTokenNote();
       if (value) testConnection();
-      if (state) state.factsPromise = loadFacts();
+      if (state) {
+        state.factsPromise = loadFacts();
+        render();
+      }
     }
 
     // HTS lookups for every disputed item that shows an HS code
@@ -1851,6 +2075,7 @@
       attach();
       launch.hidden = true;
       panel.hidden = false;
+      dock();
       if (state && state.path === location.pathname) {
         reopenSync();
         return;
@@ -1903,6 +2128,7 @@
 
     function close() {
       panel.hidden = true;
+      dock();
       stopPolling();
       updateLaunchLabel();
       launch.hidden = false;
@@ -1992,6 +2218,10 @@
         const on = s.selected.has(item.line);
         const { text, kind } = lineStatus(rec.lines[item.line], lineAnswer(pad, item.line));
         const fields = [...new Set(claimsOf(item).map(c => c.field))];
+        const target = lineCodes(item);
+        const entryLine = target.codes.length > 0 && h('div', { class: 'sub-block' },
+          noteLink(target.codes.length === 2 ? `Compare ${target.codes[0]} with ${target.codes[1]} in Entry Assistant` : `Look up ${target.codes[0]} in Entry Assistant`,
+            () => showEntry(target)));
         return h('div', {},
           h('label', { class: `line${on ? ' on' : ''}` },
             h('input', { type: 'checkbox', checked: on, 'aria-label': `Research line ${item.line}: ${item.title}`, onchange: e => toggleLine(item.line, e.target.checked) }),
@@ -2002,6 +2232,7 @@
               h('span', { class: 'line-tags' },
                 fields.map(f => h('span', { class: 'tag', text: f })),
                 h('span', { class: `chip state ${kind}`, text })))),
+          entryLine,
           savedAnswer(item));
       };
 
@@ -2132,6 +2363,9 @@
         docsBlock,
         valueHint,
         answerSection,
+        !GM_getValue(TOKEN_KEY, '') && h('p', { class: 'hint warn' },
+          "The HTS lookups for Claude's prompt are off until the Entry Assistant token is saved in ",
+          noteLink('Settings', () => setView('settings')), '.'),
       ].filter(Boolean));
 
       body.scrollTop = scroll;
@@ -2220,10 +2454,14 @@
 
     return {
       show() { attach(); updateLaunchLabel(); if (panel.hidden) launch.hidden = false; },
-      hide() { stopPolling(); launch.hidden = true; panel.hidden = true; },
-      reset() { stopPolling(); state = null; panel.hidden = true; setStatus(''); },
-      keepAttached() { if (!host.isConnected && (!launch.hidden || !panel.hidden)) attach(); },
+      hide() { stopPolling(); launch.hidden = true; panel.hidden = true; dock(); },
+      reset() { stopPolling(); state = null; panel.hidden = true; dock(); setStatus(''); },
+      keepAttached() {
+        if (!host.isConnected && (!launch.hidden || !panel.hidden)) attach();
+        if (!panel.hidden && !dockStyle.isConnected) dock();
+      },
       open,
+      showEntry,
     };
   }
 
@@ -2239,11 +2477,30 @@
       ui = ui || createPanel();
       ui.open();
     });
+    // A code on the dispute page (the dashboard's "Look up in the HTS" buttons) opens in the panel's Entry
+    // Assistant tab instead of the dashboard's References window, comparing the line's two codes when the
+    // merchant claims another one. This runs before the dashboard's own click handler; Alt-click skips it.
+    // While the site doesn't allow being shown in the dashboard, the click goes to the dashboard as before.
+    window.addEventListener('click', e => {
+      const button = e.target?.closest?.('button[title="Look up in the HTS"]');
+      if (!button || e.altKey || !DISPUTE_PATH.test(location.pathname)) return;
+      if (entryFrameCheck?.result === false) {
+        entryFrameable(); // asks again if it's been a minute, for the next click
+        return;
+      }
+      const target = clickedCodeTarget(button);
+      if (!target) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      ui = ui || createPanel();
+      ui.showEntry(target);
+    }, true);
     const onRoute = () => {
       ui?.keepAttached();
       if (location.pathname === lastPath) return;
       lastPath = location.pathname;
       if (DISPUTE_PATH.test(location.pathname)) {
+        entryFrameable(); // known by the time a code is clicked
         ui = ui || createPanel();
         ui.reset();
         ui.show();

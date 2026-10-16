@@ -1,8 +1,11 @@
 # Zonos Dispute Researcher
 
-A Tampermonkey script for the Zonos brokerage dashboard. On a duty dispute page it adds a **Notes and Research** button. The panel it opens holds the dispute's shared notes and saved Claude answers. It also gathers the dispute's details, checks the merchant's website, looks up the HTS codes in the Entry Assistant API, and opens claude.ai with a research prompt ready to send.
+A Tampermonkey script for the Zonos brokerage dashboard. On a duty dispute page it adds a **Notes and Research** button. The panel it opens sits beside the page and has two tabs:
 
-It never clicks or changes anything on the dashboard, and it never sends a message on claude.ai. You review the prompt and press Enter.
+- **Notes and Research:** the dispute's shared notes and saved Claude answers. It also gathers the dispute's details, checks the merchant's website, looks up the HTS codes in the Entry Assistant API, and opens claude.ai with a research prompt ready to send.
+- **Entry Assistant:** the Entry Assistant site (entry.kars3n.com), for looking up and comparing codes, notes, rulings and the rest. Clicking a code on the dispute page opens it here.
+
+It never changes anything on the dashboard, and it never sends a message on claude.ai. You review the prompt and press Enter.
 
 ## Install
 
@@ -20,19 +23,28 @@ For the maintainer: Tampermonkey only installs an update when `@version` in the 
 ## Set up
 
 1. Open a dispute (`brokerage.dashboard.zonos.com/duty-disputes/<id>`) and click **Notes and Research** in the bottom-right corner. Shared notes turn on by themselves.
-2. In the panel, open **Settings**, paste the Entry Assistant token (ask the repo owner), click **Save**, then **Test**. It should say "Connected".
-3. The first time the script contacts a site, Tampermonkey may ask for permission. Allow it. It contacts the merchant site you enter (which can be anywhere), the notes server and the Entry Assistant API, and never sends your cookies to merchant sites.
+2. In the panel, open **Settings** (the ⚙ at the top), paste the Entry Assistant token (ask the repo owner), click **Save**, then **Test**. It should say "Connected". The token is only for the HTS lookups in Claude's prompt; the Entry Assistant tab works without it.
+3. The first time the script contacts a site, Tampermonkey may ask for permission. Allow it. It contacts the merchant site you enter (which can be anywhere), the notes server and the Entry Assistant site and API, and never sends your cookies to merchant sites.
 
 ## Use
 
-- The panel only shows what the dispute page doesn't: your notes, a card for each line to tick, the merchant website, the documents to attach, Claude's saved answers, and the Claude buttons. Everything else (claims, HTS facts, product numbers, matches on the merchant's site) still goes into the prompt.
+- **The panel sits beside the page.** While it's open the dispute page narrows to make room, so nothing is hidden under it. Drag the panel's left edge to make it wider or narrower (it remembers); double-click the edge to go back to the default width. In a window too narrow for both, the panel covers the page instead.
+- **Notes and Research** only shows what the dispute page doesn't: your notes, a card for each line to tick, the merchant website, the documents to attach, Claude's saved answers, and the Claude buttons. Everything else (claims, HTS facts, product numbers, matches on the merchant's site) still goes into the prompt.
 - **Open in Claude** opens claude.ai with the prompt and files filled in. Check it, then press Enter.
 - **Copy prompt** copies the prompt if you'd rather paste it yourself.
 - For Claude to run its own HTS lookups, add the entry-assistant skill in claude.ai and allow its code sandbox to reach `entry.kars3n.com`.
 
+### Entry Assistant tab
+
+- The **Entry Assistant** tab shows the Entry Assistant site itself: search, compare, the manual, references and import checks all work there.
+- **Clicking a code on the dispute page** (the underlined HS codes) opens it in this tab instead of the dashboard's small References window. When the merchant claims a different HS code, either code opens the comparison of the two: current against claimed, for the declared country of origin. Any other code opens on its own. To get the dashboard's References window instead, hold **Alt** while clicking. Until the Entry Assistant site allows being shown inside the dashboard, codes open the dashboard's window as they always have.
+- Each line card also has a link: **Compare … in Entry Assistant**, or **Look up … in Entry Assistant** when only one code is on the line.
+- The bar above the site says what's showing; **Open in a new tab** opens the same page full size.
+- The site stays loaded while you switch tabs, so you can go back to your notes and return to where you were.
+
 ### Notes
 
-- The **Notes** box at the top of the panel is a scratch pad for each dispute: links, reminders, anything you can't submit yet.
+- The **Notes** box at the top of the Notes and Research tab is a scratch pad for each dispute: links, reminders, anything you can't submit yet.
 - **Add note** (or Ctrl+Enter) saves it with your name and the time. Set your name under **Settings**. Links are clickable, and you can edit or delete any note.
 - What you're typing is kept as a draft, even if you close the panel or the tab.
 - The launch button shows how many notes a dispute has, for example "Notes and Research · 2 notes".
@@ -91,6 +103,7 @@ Every answer ends with "Would you like me to draft an email?" Answer yes in the 
 - **No button.** On a dispute page the Tampermonkey icon should show a number. No number: check **Allow User Scripts** and that the script is switched on in the dashboard. A number but no button: click the Tampermonkey icon, then **Open Notes and Research**.
 - **Is it running?** Press F12 and open the Console. It should show `[Dispute Researcher] v… running on …`.
 - **HTS lookup failed.** The panel and the message after Copy or Open say why. **Settings → Test** checks the token.
+- **The Entry Assistant tab says the site doesn't allow being shown inside the dashboard.** The site has to allow it (its owner can switch that on). Until then, the button there opens the same page in a new tab, and codes on the page open the dashboard's own References window.
 
 ## Privacy
 
@@ -102,6 +115,7 @@ Every answer ends with "Would you like me to draft an email?" Answer yes in the 
 
   It leaves out names, full email addresses, the tracking number itself, broker notes and claim decisions.
 - Every document on the ticked lines and the order, including invoices and receipts, is attached by default. Open **Documents to attach** to untick any you don't want sent.
+- The Entry Assistant tab loads the Entry Assistant site (entry.kars3n.com). Its address carries only the HS codes being looked up and the country of origin, never the dispute, the merchant or anything else from the page, and the dashboard's address isn't passed along.
 - Notes and saved Claude answers are kept on the notes server (notes.kars3n.com). Everyone who uses the script can read them.
 - To join shared notes, the script sends the notes server (notes.kars3n.com) your dashboard sign-in token. It does this once, and again about once a month to renew. The token comes from the dashboard's login and lasts 60 seconds. The server checks it and keeps only your name, your zonos.com email and an id, never the token itself. You then get your own notes key, which lasts 30 days and renews while you use the dashboard.
 - The Entry Assistant token is stored in Tampermonkey on your computer, never in this script.
