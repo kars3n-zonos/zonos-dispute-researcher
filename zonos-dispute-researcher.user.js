@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.22.0
+// @version      0.22.1
 // @description  Adds a "Notes and Research" panel to duty dispute pages: shared notes and saved Claude answers for each dispute, merchant research handed to Claude on claude.ai, and the Entry Assistant site for looking up and comparing HTS codes. Never changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1248,8 +1248,12 @@
     const y = digitsOf(b);
     return !!x && !!y && (x.startsWith(y) || y.startsWith(x));
   };
-  // "8504.40.9580" as "8504.40.95.80"; an extra digit (4202.91.80900) is dropped
-  const tidyCode = raw => codeCandidates(raw)[0] || '';
+  // "8504.40.9580" as "8504.40.95.80". An extra digit (4202.91.80900) is dropped, and so is the "00" the
+  // dashboard adds to a Chapter 99 heading (9903.82.0200), since those stop at 8 digits.
+  const tidyCode = raw => {
+    const d = digitsOf(raw);
+    return codeCandidates(isChapter99(d) ? d.slice(0, 8) : d)[0] || '';
+  };
 
   // A line's current code, the merchant's code if they claim another, and the declared origin
   function lineCodes(item) {
