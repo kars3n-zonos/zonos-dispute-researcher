@@ -28,9 +28,9 @@ For the maintainer: Tampermonkey only installs an update when `@version` in the 
 
 ## Use
 
-- **The panel sits beside the page.** While it's open the dispute page narrows to make room, so nothing is hidden under it. Drag the panel's left edge to make it wider or narrower (it remembers); double-click the edge to go back to the default width. In a window too narrow for both, the panel covers the page instead.
+- **The panel sits beside the page.** While it's open the dispute page narrows to make room, so nothing is hidden under it. Drag the panel's left edge to make it wider or narrower (it remembers); double-click the edge to go back to the default width. It won't get so wide that the page is narrower than about 640 px, so it always stays beside the page. Only in a window too narrow for both does it cover the page.
 - **Research** only shows what the dispute page doesn't: a card for each line to tick, the merchant website, the documents to attach, Claude's saved answers, and the Claude buttons. Everything else (claims, HTS facts, product numbers, matches on the merchant's site) still goes into the prompt.
-- **Open in Claude** opens claude.ai with the prompt and files filled in. Check it, then press Enter.
+- **Open in Claude** opens claude.ai with the prompt and files filled in. Check it, then press Enter. If Claude asks you to sign in first, the prompt fills in once you have.
 - **Copy prompt** copies the prompt if you'd rather paste it yourself.
 - For Claude to run its own HTS lookups, add the entry-assistant skill in claude.ai and allow its code sandbox to reach `entry.kars3n.com`.
 
@@ -85,7 +85,8 @@ Every answer ends with "Would you like me to draft an email?" Answer yes in the 
 
 ### Claude's answers
 
-- To save Claude's answer, click **Save answer to dispute** in the banner on claude.ai once Claude has finished. If it can't read the answer from the page, it asks you to paste it. You can also use **Paste Claude's answer** in the panel.
+- Nothing shows over claude.ai. When you come back to the dashboard, the panel's status says whether the prompt and files went in. If the message box couldn't be filled, the prompt is on your clipboard to paste.
+- Once Claude has finished, come back to the dashboard: under **Claude's answers** the panel shows **Claude's answer is ready**, with the verdicts it found and a preview. Click **Save answer** to save and share it, or **Dismiss**. If Claude writes the email afterward, the research answer stays the one offered. You can also use **Paste Claude's answer** in the panel.
 - Answers are saved as Markdown, so headings, bold, lists, links and tables are kept. Pasting works with either Claude's copy button or a selection copied from the chat.
 - Saved answers are shared with everyone who uses the script, with nothing to set up. You're let in because you're signed in to the dashboard with a zonos.com account. Your name comes from your email; change it under **Settings**.
 - Coworkers' answers show up within about 15 seconds while the panel is open. Answers are saved on your computer first, so nothing is lost if the notes server can't be reached; they're shared when it's back.

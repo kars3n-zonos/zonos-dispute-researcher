@@ -8,7 +8,7 @@ It has no ads and no analytics. It never sells data, and it never uses data for 
 
 - **The dispute page you have open** on brokerage.dashboard.zonos.com: the items, the merchant's claims, and the dispute's documents. When you click an HS code on the page, it reads that code to open it in the Entry Assistant tab.
 - **The merchant's website**, but only the site you enter in the panel. It fetches public pages and product search results, and never sends your cookies.
-- **claude.ai**, only in the tab that Open in Claude opens. It fills the message box there, and reads Claude's reply when you click Save answer to dispute.
+- **claude.ai**, only in the tab that Open in Claude opens. It fills the message box there and keeps a copy of Claude's finished answer on your computer, so the panel can offer to save it. Nothing is shared until you click Save answer.
 
 ## Where data goes
 
@@ -29,7 +29,8 @@ Tampermonkey's storage for the script keeps:
 
 - your settings: your name, the Entry Assistant token, your notes key and the panel's width;
 - a copy of each dispute's answers (and any notes from before), so nothing is lost while offline;
-- when each line was sent to Claude.
+- when each line was sent to Claude;
+- how filling Claude's message box went, and Claude's latest answer for a dispute, until the panel has shown them or you save or dismiss the answer (a week at most).
 
 Research records and copies of answers are removed after 120 days without changes. Removing the script from Tampermonkey removes all of it.
 

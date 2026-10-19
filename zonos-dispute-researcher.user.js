@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.23.0
+// @version      0.23.1
 // @description  Adds a "Research" panel to duty dispute pages: merchant research handed to Claude on claude.ai, Claude's answers saved and shared for each dispute, and the Entry Assistant site for looking up and comparing HTS codes. Never changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -985,7 +985,7 @@
 
   async function entryApi(path, timeout = 30000) {
     const token = GM_getValue(TOKEN_KEY, '');
-    if (!token) throw apiError('no-token', 'No Entry Assistant token is saved. Add it under Settings at the bottom of this panel.');
+    if (!token) throw apiError('no-token', 'No Entry Assistant token is saved. Add it under Settings (the gear at the top of this panel).');
     let r;
     try {
       r = await gmRequest({ url: `${ENTRY_API}/${path}`, headers: { Accept: 'application/json', Authorization: `Bearer ${token}` }, timeout });
@@ -1657,6 +1657,9 @@
     .linkish { background: none; border: 0; padding: 0; color: var(--accent); font-size: 12px; text-decoration: underline; }
     .saved { margin: 6px 0 0; padding: 8px 10px; background: var(--soft); border-radius: 6px; }
     .answers { display: grid; gap: 8px; margin-bottom: 8px; }
+    .reply-ready { border: 2px solid var(--accent); background: var(--tint); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+    .reply-title { margin: 0 0 2px; font-weight: 600; }
+    .reply-ready summary { cursor: pointer; font-size: 12px; color: var(--muted); }
     .answer-card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
     .answer-card.theirs { border-left: 3px solid var(--accent); }
     .answer-card summary { cursor: pointer; font-size: 12px; }
@@ -1828,13 +1831,15 @@
       if (ok && entryFrame.getAttribute('src') !== url) entryFrame.setAttribute('src', url);
     }
 
-    // While the panel is open the page is narrowed beside it rather than covered, unless the window is
-    // too narrow for both; the width is yours to drag and is remembered
+    // While the panel is open the page is narrowed beside it rather than covered. The width is yours to
+    // drag and is remembered, but the panel never takes so much room that the page gets narrower than
+    // MIN_PAGE, so a wide panel in a smaller window stays beside the page. Only a window too narrow for
+    // both gets the panel over the page.
     const DEFAULT_WIDTH = 480;
     const MIN_WIDTH = 380;
     const MIN_PAGE = 640;
     let width = GM_getValue(PANEL_WIDTH_KEY, 0) || DEFAULT_WIDTH;
-    const panelWidth = () => Math.round(Math.max(MIN_WIDTH, Math.min(width, innerWidth - 320, 1400)));
+    const panelWidth = () => Math.round(Math.max(MIN_WIDTH, Math.min(width, innerWidth - MIN_PAGE, 1400)));
     const dockStyle = h('style', { id: 'zdr-dock' });
     function dock() {
       const w = panelWidth();
@@ -1920,7 +1925,10 @@
     function startPolling() {
       stopPolling();
       pollTimer = setInterval(() => {
-        if (state && !panel.hidden && document.visibilityState === 'visible') syncNow();
+        if (state && !panel.hidden && document.visibilityState === 'visible') {
+          syncNow();
+          claudeTabNews();
+        }
       }, NOTES_POLL_MS);
     }
     function stopPolling() {
@@ -1944,10 +1952,42 @@
       return new Set(data.items.filter(i => i.inDispute && !rec.lines[i.line]?.sentAt && !lineAnswer(pad, i.line)).map(i => i.line));
     }
 
-    // Claude's answer may have been saved from the claude.ai tab while this one was in the background
-    window.addEventListener('focus', () => { if (state && !panel.hidden) render(); });
+    // Coming back from the Claude tab: it may have filled the message box and kept Claude's answer
+    window.addEventListener('focus', () => {
+      if (!state || panel.hidden) return;
+      render();
+      claudeTabNews();
+    });
 
     const setStatus = (text, kind = '') => { status.textContent = text; status.className = `status ${kind}`; };
+
+    // What the Claude tab left for this panel: how filling its message box went (shown once), and Claude's
+    // finished answer, which render() offers to save
+    function claudeTabNews() {
+      const s = state;
+      if (!s || panel.hidden) return;
+      const last = s.lastHandoff;
+      const fill = last && GM_getValue(FILL_PREFIX + last.id, null);
+      if (fill && fill.at !== last.reportedAt) {
+        last.reportedAt = fill.at;
+        const [text, ok] = fillMessage(fill, last);
+        setStatus(text, ok ? 'ok' : 'warn');
+        if (!fill.login) GM_deleteValue(FILL_PREFIX + last.id);
+      }
+      const reply = GM_getValue(REPLY_PREFIX + s.data.disputeId, null);
+      if ((reply?.at || 0) !== (s.replyShown || 0)) render();
+    }
+
+    function fillMessage(fill, last) {
+      const names = fill.files.join(', ');
+      const also = [last.skipped.length && `Couldn't download ${last.skipped.join('; ')}.`, last.warning].filter(Boolean).join(' ');
+      const say = (text, ok) => [`${text}${also ? ` ${also}` : ''}`, ok && !also];
+      if (fill.login) return say('Claude asked you to sign in. Once you have, in that tab, the prompt fills in by itself.', false);
+      if (!fill.typed) return say(`Claude's message box couldn't be filled, so the prompt is on your clipboard: click the box there and press Ctrl+V.${names ? ` Then attach ${names} from the dispute page.` : ''}`, false);
+      if (!fill.attached) return say(`Claude has the prompt, but the files didn't attach: add ${names} from the dispute page.`, false);
+      const n = fill.files.length;
+      return say(`Claude has the prompt${n ? ` and ${n} ${n === 1 ? 'file' : 'files'}` : ''}. Nothing has been sent: check it there and press Enter. Claude's answer shows up here to save once it's done.`, true);
+    }
 
     const setTokenNote = (text, kind = '') => { tokenNote.textContent = text; tokenNote.className = `hint ${kind}`; };
 
@@ -2190,21 +2230,44 @@
       const noneHint = inDispute.length > 0 && !picked.length
         && h('p', { class: 'hint', text: doneCount === inDispute.length ? 'Every line has a saved answer. Tick a line to research it again.' : 'Tick the lines you want researched.' });
 
-      const saveAnswer = () => {
-        const text = answerInput.value.trim();
-        if (!text) return;
-        const lines = picked.length ? picked.map(i => i.line) : inDispute.map(i => i.line);
+      const storeAnswer = (text, lines) => {
         const verdicts = recordAnswer(d.disputeId, lines, text);
-        answerInput.value = '';
         s.answerOpen = false;
         s.selected = unresearchedLines(d);
         const found = Object.entries(verdicts).map(([line, v]) => `line ${line}: ${v.verdict}`).join(', ');
         setStatus(found ? `Answer saved for everyone on this dispute (${found}).` : "Answer saved for everyone on this dispute, but it has no verdict sentence (\"The merchant's claim is …\").", found ? 'ok' : 'warn');
         answersChanged();
       };
+      const saveAnswer = () => {
+        const text = answerInput.value.trim();
+        if (!text) return;
+        answerInput.value = '';
+        storeAnswer(text, picked.length ? picked.map(i => i.line) : inDispute.map(i => i.line));
+      };
 
       // Every saved answer, newest first, folded; open one to read it formatted or copy its Markdown
       const answers = visibleAnswers(pad);
+
+      // Claude's finished answer from the tab Open in Claude opened, kept on this computer until you save
+      // or dismiss it. One that's already saved (pasted by hand, say) is let go.
+      const replyKey = REPLY_PREFIX + d.disputeId;
+      let reply = GM_getValue(replyKey, null);
+      if (reply && answers.some(a => a.text === reply.text.trim().slice(0, 30000))) {
+        GM_deleteValue(replyKey);
+        reply = null;
+      }
+      s.replyShown = reply?.at || 0;
+      const replyLines = reply && (reply.lines.length ? reply.lines : inDispute.map(i => i.line));
+      const replyVerdicts = reply && Object.entries(parseVerdicts(reply.text, replyLines)).map(([line, v]) => `line ${line}: ${v.verdict}`).join(', ');
+      const replyBlock = reply && h('div', { class: 'reply-ready' },
+        h('p', { class: 'reply-title', text: `Claude's answer is ready${replyVerdicts ? ` (${replyVerdicts})` : ''}` }),
+        h('p', { class: 'hint', style: 'margin:0 0 6px', text: `From the chat opened ${shortDate(reply.at)}. Saving shares it with everyone on this dispute.` }),
+        h('details', { open: !!s.replyPreview, ontoggle: e => { s.replyPreview = e.currentTarget.open; } },
+          h('summary', { text: 'Preview' }),
+          h('div', { class: 'md saved' }, renderMarkdown(reply.text))),
+        h('div', { class: 'row', style: 'margin-top:8px' },
+          h('button', { class: 'primary', type: 'button', text: 'Save answer', onclick: () => { GM_deleteValue(replyKey); storeAnswer(reply.text, replyLines); } }),
+          h('button', { class: 'secondary', type: 'button', text: 'Dismiss', onclick: () => { GM_deleteValue(replyKey); render(); } })));
       const answerCard = a => {
         const verdicts = [...new Set(Object.values(parseVerdicts(a.text, a.lines || [])).map(v => capitalized(v.verdict)))];
         const confirming = s.confirmDelete === a.id;
@@ -2230,6 +2293,7 @@
       const answerSection = inDispute.length > 0 && h('div', { class: 'section' },
         h('p', { class: 'label', text: answers.length ? `Claude's answers (${answers.length})` : "Claude's answers" }),
         syncState,
+        replyBlock,
         answers.length > 0 && h('div', { class: 'answers' }, answers.map(answerCard)),
         s.answerOpen
           ? h('div', {},
@@ -2237,7 +2301,7 @@
               h('div', { class: 'row', style: 'margin-top:6px' },
                 h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: saveAnswer }),
                 h('button', { class: 'secondary', type: 'button', text: 'Cancel', onclick: () => { s.answerOpen = false; render(); } })))
-          : h('button', { class: 'secondary', type: 'button', text: "Paste Claude's answer", title: 'Saved as Markdown and shared with everyone on this dispute. On claude.ai, Save answer to dispute does the same.', onclick: () => { s.answerOpen = true; render(); answerInput.focus(); } }));
+          : h('button', { class: 'secondary', type: 'button', text: "Paste Claude's answer", title: 'Saved as Markdown and shared with everyone on this dispute.', onclick: () => { s.answerOpen = true; render(); answerInput.focus(); } }));
 
       showSyncState(pad);
       // Redraws happen while lookups finish; if you're typing in a box that gets moved (the website box),
@@ -2347,10 +2411,12 @@
       GM_setValue(HANDOFF_PREFIX + id, { id, createdAt: Date.now(), disputeId: d.disputeId, lines, prompt, files });
       markSent(d.disputeId, d.items);
       render();
+      // How filling the message box went is reported back when you return here (see claudeTabNews)
+      state.lastHandoff = { id, skipped, warning: lookupWarning().trim() };
       GM_openInTab(`https://claude.ai/new#zdr=${id}`, { active: true, insert: true, setParent: true });
       const warning = lookupWarning();
-      if (skipped.length) setStatus(`Opened Claude, but couldn't attach: ${skipped.join('; ')}.${warning}`, 'warn');
-      else setStatus(`Opened Claude in a new tab. Check the message there, then press Enter to send.${warning}`, warning ? 'warn' : 'ok');
+      if (skipped.length) setStatus(`Opened Claude, but couldn't download: ${skipped.join('; ')}.${warning}`, 'warn');
+      else setStatus(`Opened Claude in a new tab. The prompt and files go into its message box; nothing is sent until you press Enter there.${warning}`, warning ? 'warn' : 'ok');
     }
 
     return {
@@ -2371,6 +2437,7 @@
     console.info(`[Dispute Researcher] v${typeof GM_info !== 'undefined' ? GM_info.script.version : '?'} running on ${location.pathname}`);
     purgeOldHandoffs();
     purgeOldRecords();
+    purgeOldReports();
     let ui = null;
     let lastPath = null;
     // A way in from the Tampermonkey toolbar menu, in case the button doesn't show
@@ -2416,91 +2483,61 @@
 
   /* -------------------------------------------------- claude.ai: fill the box */
 
-  const BANNER_CSS = `
-    :host { all: initial; }
-    .banner { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 2147483000; width: min(640px, calc(100vw - 32px)); display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; padding: 12px 14px; border-radius: 10px; background: #1c1917; color: #f5f5f4; border: 1px solid #44403c; box-shadow: 0 10px 30px rgba(0,0,0,.35); font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-    .msg { grid-column: 1; } .msg.ok { color: #bbf7d0; } .msg.warn { color: #fde68a; }
-    .actions { grid-column: 1; display: flex; flex-wrap: wrap; gap: 8px; } .actions:empty { display: none; }
-    textarea.paste { flex-basis: 100%; min-height: 90px; font: inherit; color: #f5f5f4; background: #292524; border: 1px solid #57534e; border-radius: 6px; padding: 6px 8px; resize: vertical; }
-    button { font: inherit; cursor: pointer; border-radius: 6px; padding: 5px 10px; border: 1px solid #57534e; background: transparent; color: inherit; }
-    button.primary { background: #f59e0b; border-color: #f59e0b; color: #111; font-weight: 600; }
-    .close { grid-column: 2; grid-row: 1 / span 2; align-self: start; border: 0; font-size: 18px; line-height: 1; padding: 2px 6px; color: #a8a29e; }
-    button:focus-visible { outline: 2px solid #f59e0b; outline-offset: 2px; }
-  `;
+  // Nothing is shown over claude.ai. The tab that Open in Claude opens fills the message box (it never
+  // sends), then reports how that went, and later Claude's finished answer, through Tampermonkey storage.
+  // The dashboard panel shows both when you come back to it, and saves the answer only when you say so.
+  const FILL_PREFIX = 'zdr:fill:'; // per handoff: { id, disputeId, at, files, typed, attached } or { login }
+  const REPLY_PREFIX = 'zdr:reply:'; // per dispute: { handoffId, lines, text, at }
+  const REPORT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  // This tab only (sessionStorage), so signing in to Claude, which drops the #zdr marker, doesn't lose the prompt
+  const PENDING_KEY = 'zdr:pendingHandoff';
+  const tabPending = {
+    get() { try { return sessionStorage.getItem(PENDING_KEY) || ''; } catch { return ''; } },
+    set(id) { try { if (id) sessionStorage.setItem(PENDING_KEY, id); else sessionStorage.removeItem(PENDING_KEY); } catch { /* not kept */ } },
+  };
 
-  function createBanner() {
-    const host = h('div', { id: 'zdr-banner' });
-    const root = host.attachShadow({ mode: 'open' });
-    // Keep claude.ai's keyboard shortcuts from firing while typing in the paste box
-    for (const type of ['keydown', 'keyup', 'keypress']) host.addEventListener(type, e => e.stopPropagation());
-    const msg = h('div', { class: 'msg' });
-    const actions = h('div', { class: 'actions' });
-    root.append(h('style', { text: BANNER_CSS }), h('div', { class: 'banner', role: 'status' },
-      msg, actions, h('button', { class: 'close', type: 'button', 'aria-label': 'Dismiss', text: '×', onclick: () => host.remove() })));
-    document.documentElement.append(host);
-    return {
-      set(text, kind = '', buttons = []) { msg.textContent = text; msg.className = `msg ${kind}`; actions.replaceChildren(...buttons); },
-      remove() { host.remove(); },
-    };
+  // Fill reports and kept answers go once the dashboard has used them, or after a week
+  function purgeOldReports() {
+    for (const key of GM_listValues()) {
+      if (!key.startsWith(FILL_PREFIX) && !key.startsWith(REPLY_PREFIX)) continue;
+      const v = GM_getValue(key, null);
+      if (!v || Date.now() - (v.at || 0) > REPORT_TTL_MS) GM_deleteValue(key);
+    }
   }
 
-  const bannerButton = (text, onclick, primary) => h('button', { type: 'button', class: primary ? 'primary' : '', text, onclick });
-
-  // Claude's latest reply on the page. claude.ai's markup changes, so several markers are tried,
-  // and anything that is our own prompt is skipped.
+  // Claude's latest reply on the page, as Markdown. claude.ai's markup changes, so several markers are
+  // tried, newest message first, and our own prompt is skipped.
   const ANSWER_SELECTORS = ['[data-is-streaming]', '.font-claude-response', '.font-claude-message', '[data-testid="assistant-message"]'];
   function latestAnswer() {
     for (const sel of ANSWER_SELECTORS) {
-      const found = [...document.querySelectorAll(sel)]
-        .map(el => ({ el, text: (el.innerText || '').trim() }))
-        .filter(x => x.text.length > 40 && !x.text.includes('## How to research'));
-      if (found.length) {
-        const last = found[found.length - 1];
-        // Kept as Markdown so headings, bold, lists, links and tables survive
-        return { text: htmlToMarkdown(last.el) || last.text, streaming: !!last.el.closest('[data-is-streaming="true"]') };
+      const els = document.querySelectorAll(sel);
+      for (let i = els.length - 1; i >= 0; i--) {
+        const raw = (els[i].textContent || '').trim();
+        if (raw.length <= 40 || raw.includes('## How to research') || raw.startsWith("I'm a customs broker at Zonos")) continue;
+        return { el: els[i], raw, streaming: !!els[i].closest('[data-is-streaming="true"]') };
       }
     }
     return null;
   }
 
-  // Saves Claude's answer into the dispute's record, so the dashboard shows each line's verdict
-  function saveButtons(handoff, banner, copyAgain) {
-    return [bannerButton('Save answer to dispute', () => saveAnswerFromPage(handoff, banner, copyAgain), true), copyAgain];
+  // Keeps Claude's newest finished answer that has a verdict sentence, for the panel to offer. A later
+  // reply without one (the email to the merchant, say) doesn't replace it. Stops after six hours.
+  function keepAnswers(handoff) {
+    let lastRaw = '';
+    const end = Date.now() + 6 * 60 * 60 * 1000;
+    const timer = setInterval(() => {
+      if (Date.now() > end) {
+        clearInterval(timer);
+        return;
+      }
+      const found = latestAnswer();
+      if (!found || found.streaming || found.raw === lastRaw) return;
+      lastRaw = found.raw;
+      const text = htmlToMarkdown(found.el) || found.raw;
+      if (!VERDICT_RE.test(text)) return;
+      GM_setValue(REPLY_PREFIX + handoff.disputeId, { handoffId: handoff.id, lines: handoff.lines || [], text, at: Date.now() });
+    }, 3000);
   }
-
-  // Saves the answer with the dispute's notes and sends it to the notes server straight away, so
-  // coworkers see it; if that can't happen now, the dashboard sends it the next time the dispute is open
-  async function storeAnswer(handoff, banner, text, copyAgain) {
-    const verdicts = recordAnswer(handoff.disputeId, handoff.lines || [], text);
-    const found = Object.entries(verdicts).map(([line, v]) => `line ${line}: ${v.verdict}`).join(', ');
-    const what = found ? `(${found})` : '(no verdict sentence found: "The merchant\'s claim is …")';
-    banner.set(`Saved to ${handoff.disputeId} ${what}. Sharing it with your team…`, found ? 'ok' : 'warn', saveButtons(handoff, banner, copyAgain));
-    const sync = await syncNotes(handoff.disputeId);
-    banner.set(sync.ok
-      ? `Saved to ${handoff.disputeId} ${what} and shared with your team.`
-      : `Saved to ${handoff.disputeId} ${what} on this computer. It will be shared the next time you open the dispute${sync.error ? ` (${sync.error.replace(/\.$/, '')})` : ''}.`,
-    found && sync.ok ? 'ok' : 'warn', saveButtons(handoff, banner, copyAgain));
-  }
-
-  function saveAnswerFromPage(handoff, banner, copyAgain) {
-    const found = latestAnswer();
-    if (found?.streaming) {
-      banner.set("Claude is still writing. Click Save answer to dispute again when it's finished.", 'warn', saveButtons(handoff, banner, copyAgain));
-      return;
-    }
-    if (found && VERDICT_RE.test(found.text)) {
-      storeAnswer(handoff, banner, found.text, copyAgain);
-      return;
-    }
-    const box = h('textarea', { class: 'paste', rows: 5, placeholder: "Paste Claude's whole answer here", 'aria-label': "Claude's answer", onpaste: pasteAsMarkdown });
-    banner.set("Couldn't read Claude's answer from the page. Copy it with the copy button under the answer, then paste it here:", 'warn', [
-      box,
-      bannerButton('Save', () => { if (box.value.trim()) storeAnswer(handoff, banner, box.value.trim(), copyAgain); }, true),
-      copyAgain,
-    ]);
-    box.focus();
-  }
-
   const COMPOSER_SELECTORS = ['div.ProseMirror[contenteditable="true"]', '[contenteditable="true"][aria-label]', '[contenteditable="true"]', 'textarea'];
   function findComposer() {
     for (const sel of COMPOSER_SELECTORS) {
@@ -2556,66 +2593,48 @@
     return false;
   }
 
-  async function fillFromHandoff(handoff, banner) {
-    const copyAgain = bannerButton('Copy prompt again', () => GM_setClipboard(handoff.prompt, 'text'));
+  // Fills the message box and attaches the files, then reports how it went. Returns false when Claude
+  // wants you to sign in first, so the prompt is kept for after that.
+  async function fillFromHandoff(handoff) {
+    const report = result => GM_setValue(FILL_PREFIX + handoff.id, { id: handoff.id, disputeId: handoff.disputeId, at: Date.now(), files: handoff.files.map(f => f.name), ...result });
     if (/^\/login/.test(location.pathname)) {
-      banner.set('Sign in to Claude, then start a new chat. The research prompt will be offered again.', 'warn');
-      return;
+      report({ login: true });
+      return false;
     }
-    banner.set(`Filling in the research prompt for ${handoff.disputeId}…`);
     const composer = await waitFor(findComposer, { timeout: 20000 });
-    if (!composer) {
-      GM_setClipboard(handoff.prompt, 'text');
-      banner.set("Couldn't find the message box. The prompt is on your clipboard: click the message box and press Ctrl+V.", 'warn', [copyAgain]);
-      return;
+    let typed = false;
+    let attached = !handoff.files.length;
+    if (composer) {
+      await sleep(600); // let the editor finish mounting
+      const box = findComposer() || composer;
+      typed = await insertText(box, handoff.prompt);
+      if (handoff.files.length) {
+        try {
+          attached = attachFiles(handoff.files.map(dataUrlToFile), findComposer() || box);
+        } catch { /* reported below */ }
+      }
     }
-    await sleep(600); // let the editor finish mounting
-    const box = findComposer() || composer;
-    const typed = await insertText(box, handoff.prompt);
     if (!typed) GM_setClipboard(handoff.prompt, 'text');
-
-    let filesNote = '';
-    if (handoff.files.length) {
-      const names = handoff.files.map(f => f.name).join(', ');
-      let attached = false;
-      try {
-        attached = attachFiles(handoff.files.map(dataUrlToFile), findComposer() || box);
-      } catch { /* reported below */ }
-      filesNote = attached
-        ? ` Added ${handoff.files.length} file(s) (${names}); check they show up by the message box.`
-        : ` Couldn't attach the files. Attach these from the dispute page: ${names}.`;
-    }
     GM_deleteValue(HANDOFF_PREFIX + handoff.id);
-
-    const lead = typed
-      ? 'The research prompt is in the message box.'
-      : "Couldn't type into the message box, so the prompt is on your clipboard. Click the box and press Ctrl+V (skip this if it already shows as pasted text).";
-    banner.set(`${lead}${filesNote} Nothing has been sent: review it, then press Enter. When Claude has answered, click Save answer to dispute.`, typed ? 'ok' : 'warn',
-      handoff.disputeId ? saveButtons(handoff, banner, copyAgain) : [copyAgain]);
+    report({ typed, attached });
+    return true;
   }
 
   function initClaude() {
     purgeOldHandoffs();
-    const id = (INITIAL_HASH.match(/zdr=([a-z0-9]+)/i) || [])[1];
+    purgeOldReports();
+    let id = (INITIAL_HASH.match(/zdr=([a-z0-9]+)/i) || [])[1] || '';
     if (id) history.replaceState(history.state, '', location.pathname + location.search);
-    let handoff = id ? GM_getValue(HANDOFF_PREFIX + id, null) : null;
-    const auto = !!handoff;
-    // Signing in drops the #zdr marker, so offer the newest waiting prompt instead of filling it unasked
-    if (!handoff) handoff = listHandoffs().sort((a, b) => b.createdAt - a.createdAt)[0] || null;
+    else id = tabPending.get();
+    const handoff = id ? GM_getValue(HANDOFF_PREFIX + id, null) : null;
+    tabPending.set(handoff ? id : '');
     if (!handoff) return;
-
-    const banner = createBanner();
-    const fill = () => fillFromHandoff(handoff, banner);
-    if (auto) {
-      fill();
-      return;
-    }
-    banner.set(`A research prompt for ${handoff.disputeId} is waiting.`, '', [
-      bannerButton('Fill message box', fill, true),
-      bannerButton('Discard', () => { GM_deleteValue(HANDOFF_PREFIX + handoff.id); banner.remove(); }),
-    ]);
+    fillFromHandoff(handoff).then(done => {
+      if (!done) return;
+      tabPending.set('');
+      if (handoff.disputeId) keepAnswers(handoff);
+    });
   }
-
   onReady(() => {
     if (location.host === DASHBOARD_HOST) initDashboard();
     else if (location.host === 'claude.ai') initClaude();
