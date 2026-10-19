@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.22.1
-// @description  Adds a "Notes and Research" panel to duty dispute pages: shared notes and saved Claude answers for each dispute, merchant research handed to Claude on claude.ai, and the Entry Assistant site for looking up and comparing HTS codes. Never changes anything on the dashboard, and never sends a message on claude.ai.
+// @version      0.23.0
+// @description  Adds a "Research" panel to duty dispute pages: merchant research handed to Claude on claude.ai, Claude's answers saved and shared for each dispute, and the Entry Assistant site for looking up and comparing HTS codes. Never changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
 // @updateURL    https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js
@@ -148,7 +148,7 @@
   /* ------------------------------------------- memory: what's been researched */
 
   // One record per dispute on this computer: when each line went to Claude. (Claude's answers are kept
-  // with the shared notes.) Used by the dashboard and claude.ai, since Tampermonkey storage is the same on both.
+  // with the shared answers.) Used by the dashboard and claude.ai, since Tampermonkey storage is the same on both.
   const DISPUTE_PREFIX = 'zdr:dispute:';
   const DISPUTE_TTL_MS = 120 * 24 * 60 * 60 * 1000;
 
@@ -221,16 +221,17 @@
     return { text: 'Not researched yet', kind: '' };
   }
 
-  /* -------------------------------------------------------- notes: scratch pad */
+  /* --------------------------------------------- shared answers: the notes server */
 
-  // Notes per dispute, kept in Tampermonkey storage on this computer. Each note has its own id, author
-  // and times, so a shared server can hold the same notes later.
+  // Claude's saved answers, per dispute, kept in Tampermonkey storage on this computer and shared through
+  // the notes server, where each is a note with kind 'answer'. (The panel used to have its own notes too;
+  // the dashboard has a notes section now, so those are no longer shown or written.)
   const NOTES_PREFIX = 'zdr:notes:';
   const AUTHOR_KEY = 'zdr:author';
-  // Shared notes live on the notes server. Anyone signed in to this dashboard joins on their own: the
-  // script shows the server the dashboard's sign-in token (Clerk keeps a 60-second one in the __session
-  // cookie), the server checks it and the zonos.com email, and hands back a notes key for 30 days, which
-  // is renewed while you keep using the dashboard. A key pasted under Settings is used instead.
+  // Anyone signed in to this dashboard joins the notes server on their own: the script shows the server
+  // the dashboard's sign-in token (Clerk keeps a 60-second one in the __session cookie), the server checks
+  // it and the zonos.com email, and hands back a notes key for 30 days, which is renewed while you keep
+  // using the dashboard. A key pasted under Settings is used instead.
   const NOTES_API = 'https://notes.kars3n.com/api/v1';
   const NOTES_KEY = 'zdr:notesKey'; // pasted by hand
   const NOTES_JOIN = 'zdr:notesJoin'; // { key, name, expiresAt } from joining, plus { failedAt, error } after a failed try
@@ -241,14 +242,11 @@
   const joinRecord = () => GM_getValue(NOTES_JOIN, null) || {};
   const sharedNotesOn = () => !!(manualNotesKey() || joinRecord().key) || location.host === DASHBOARD_HOST;
 
-  // A note is shown unless it's waiting to be deleted on the server. Notes without `mine: false`
-  // are your own (everything written before shared notes was turned on). Claude's saved answers are
-  // notes too, with kind 'answer' and the lines they answer, shown in their own section.
+  // An answer is shown unless it's waiting to be deleted on the server. Answers without `mine: false`
+  // are your own. Old plain notes still sync with the rest but aren't shown.
   const isAnswer = n => n.kind === 'answer';
-  const visibleNotes = pad => pad.notes.filter(n => n.pending !== 'delete' && !isAnswer(n));
   const visibleAnswers = pad => pad.notes.filter(n => n.pending !== 'delete' && isAnswer(n)).sort((a, b) => b.createdAt - a.createdAt);
-  const loadNotes = id => GM_getValue(NOTES_PREFIX + id, null) || { id, notes: [], draft: '', updatedAt: 0 };
-  const noteCount = id => visibleNotes(loadNotes(id)).length;
+  const loadNotes = id => GM_getValue(NOTES_PREFIX + id, null) || { id, notes: [], updatedAt: 0 };
   const newNoteId = () => `n_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
   // The newest answer covering a line, from anyone, with its verdict for that line if it has one
@@ -267,14 +265,9 @@
     GM_setValue(NOTES_PREFIX + id, pad);
   }
 
-  // Each change is saved here first and marked `pending` until the server confirms it
-  const addNote = (id, text) => changeNotes(id, pad => {
-    const now = Date.now();
-    pad.notes.push({ id: newNoteId(), author: GM_getValue(AUTHOR_KEY, '') || 'Me', text, createdAt: now, updatedAt: now, pending: 'add' });
-    pad.draft = '';
-  });
-  // An answer is cut to what the server takes: 30,000 characters in a request under 64 KB. Saving the
-  // same answer twice (a second click on Save) keeps one copy.
+  // Each change is saved here first and marked `pending` until the server confirms it. An answer is cut to
+  // what the server takes: 30,000 characters in a request under 64 KB. Saving the same answer twice (a
+  // second click on Save) keeps one copy.
   const addAnswer = (id, lines, text, createdAt = Date.now()) => changeNotes(id, pad => {
     let md = text.trim().slice(0, 30000);
     while (new TextEncoder().encode(JSON.stringify(md)).length > 60000) md = md.slice(0, Math.floor(md.length * 0.9));
@@ -289,16 +282,11 @@
     rec.answers = [];
     saveRecord(rec);
   }
-  const editNote = (id, noteId, text) => changeNotes(id, pad => {
-    const note = pad.notes.find(n => n.id === noteId);
-    if (note) Object.assign(note, { text, edited: true, updatedAt: Date.now(), pending: note.synced ? 'edit' : 'add' });
-  });
   const deleteNote = (id, noteId) => changeNotes(id, pad => {
     const note = pad.notes.find(n => n.id === noteId);
     if (note?.synced) note.pending = 'delete';
     else pad.notes = pad.notes.filter(n => n.id !== noteId);
   });
-  const saveDraft = (id, text) => changeNotes(id, pad => { pad.draft = text; });
 
   const jwtClaims = token => {
     try { return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); } catch { return null; }
@@ -334,7 +322,7 @@
       return apiError(kind, message);
     };
     const token = await dashboardSignIn();
-    if (!token) throw fail('join', "Couldn't join shared notes: no current dashboard sign-in found. Reload the page.");
+    if (!token) throw fail('join', "Couldn't join shared answers: no current dashboard sign-in found. Reload the page.");
     let r;
     try {
       r = await gmRequest({
@@ -347,7 +335,7 @@
     }
     let json = null;
     try { json = JSON.parse(r.responseText); } catch { /* handled below */ }
-    if (r.status !== 200 || !json?.key) throw fail('join', `Couldn't join shared notes: ${json?.error || `the notes server answered ${r.status}.`}`);
+    if (r.status !== 200 || !json?.key) throw fail('join', `Couldn't join shared answers: ${json?.error || `the notes server answered ${r.status}.`}`);
     GM_setValue(NOTES_JOIN, { key: json.key, name: json.name, expiresAt: json.expiresAt });
     if (!GM_getValue(AUTHOR_KEY, '')) GM_setValue(AUTHOR_KEY, json.name);
     return json.key;
@@ -367,7 +355,7 @@
     }
     if (usable) return rec.key;
     if (rec.error) throw apiError('join', rec.error);
-    throw apiError('no-token', 'Open a dispute on the dashboard to join shared notes.');
+    throw apiError('no-token', 'Open a dispute on the dashboard to join shared answers.');
   }
 
   async function notesApi(method, path, body, retried = false) {
@@ -453,19 +441,6 @@
       changeNotes(id, pad => { pad.syncError = e.message; });
       return { shared: true, ok: false, error: e.message };
     }
-  }
-
-  // Note text with its links made clickable, built from text and link nodes, never HTML
-  function linkified(text) {
-    const parts = [];
-    let last = 0;
-    for (const m of text.matchAll(/https?:\/\/[^\s<>"]+/g)) {
-      const url = m[0].replace(/[).,;:!?\]'}]+$/, '');
-      parts.push(text.slice(last, m.index), h('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: url }));
-      last = m.index + url.length;
-    }
-    parts.push(text.slice(last));
-    return parts;
   }
 
   /* ------------------------------------------------ Markdown: saving and showing */
@@ -1703,13 +1678,8 @@
     .md th, .md td { border: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; }
     .md th { background: var(--bg); font-weight: 600; }
     .md hr { border: 0; border-top: 1px solid var(--line); margin: 10px 0; }
-    .note-list { list-style: none; padding: 0; margin: 0 0 8px; }
-    .note { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin: 0 0 6px; }
-    .note-text { white-space: pre-wrap; overflow-wrap: anywhere; }
-    .note.theirs { border-left: 3px solid var(--accent); }
     .note-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 4px; font-size: 11px; color: var(--muted); }
     .note-meta .linkish { font-size: 11px; }
-    textarea.note-input { width: 100%; min-height: 56px; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; resize: vertical; }
     textarea.answer { width: 100%; min-height: 110px; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; resize: vertical; }
   `;
 
@@ -1723,39 +1693,39 @@
     const status = h('div', { class: 'status', role: 'status' });
     const openBtn = h('button', { class: 'primary', type: 'button', text: 'Open in Claude', onclick: () => run(handoff) });
     const copyBtn = h('button', { class: 'secondary', type: 'button', text: 'Copy prompt', onclick: () => run(copyPrompt) });
-    const launch = h('button', { class: 'launch', type: 'button', text: 'Notes and Research', hidden: true, onclick: () => open() });
+    const launch = h('button', { class: 'launch', type: 'button', text: 'Research', hidden: true, onclick: () => open() });
     const tokenInput = h('input', { type: 'password', placeholder: 'Paste your Entry Assistant token', 'aria-label': 'Entry Assistant token', autocomplete: 'off' });
     const tokenNote = h('p', { class: 'hint' });
-    // A new name also goes to the notes server, which puts it on the notes you already wrote
+    // A new name also goes to the notes server, which puts it on the answers you already saved
     const authorInput = h('input', {
-      type: 'text', placeholder: 'Your name, shown on your notes', 'aria-label': 'Your name, shown on your notes',
+      type: 'text', placeholder: 'Your name, shown on answers you save', 'aria-label': 'Your name, shown on answers you save',
       value: GM_getValue(AUTHOR_KEY, ''),
       onchange: () => {
         const name = clean(authorInput.value);
         GM_setValue(AUTHOR_KEY, name);
         if (name && (manualNotesKey() || joinRecord().key)) {
           notesApi('PATCH', '/me', { name }).then(
-            () => { GM_setValue(NOTES_JOIN, { ...joinRecord(), name }); setNotesKeyNote(`Your notes now show as ${name}.`, 'ok'); if (state) syncNow(); },
+            () => { GM_setValue(NOTES_JOIN, { ...joinRecord(), name }); setNotesKeyNote(`Your answers now show as ${name}.`, 'ok'); if (state) syncNow(); },
             e => setNotesKeyNote(e.message, 'err'));
         }
       },
     });
-    const notesKeyInput = h('input', { type: 'password', placeholder: 'Notes key (only if joining by yourself fails)', 'aria-label': 'Shared notes key', autocomplete: 'off' });
+    const notesKeyInput = h('input', { type: 'password', placeholder: 'Notes key (only if joining by yourself fails)', 'aria-label': 'Notes key', autocomplete: 'off' });
     const notesKeyNote = h('p', { class: 'hint' });
     const setNotesKeyNote = (text, kind = '') => { notesKeyNote.textContent = text; notesKeyNote.className = `hint ${kind}`; };
     function refreshNotesKeyNote() {
       const rec = joinRecord();
       if (!authorInput.value && root.activeElement !== authorInput) authorInput.value = GM_getValue(AUTHOR_KEY, '');
       if (manualNotesKey()) setNotesKeyNote('Using the notes key you pasted. To join through your dashboard sign-in instead, empty the box and click Save.');
-      else if (rec.key) setNotesKeyNote(`Shared notes: joined through your dashboard sign-in as ${rec.name}.`, 'ok');
+      else if (rec.key) setNotesKeyNote(`Shared answers: joined through your dashboard sign-in as ${rec.name}.`, 'ok');
       else if (rec.error) setNotesKeyNote(rec.error, 'err');
-      else setNotesKeyNote('Shared notes: you join on your own through your dashboard sign-in.');
+      else setNotesKeyNote('Shared answers: you join on your own through your dashboard sign-in.');
     }
     async function testNotesKey() {
       setNotesKeyNote('Testing…');
       try {
         const me = await notesApi('GET', '/me');
-        setNotesKeyNote(`Connected to shared notes as ${me.name}.`, 'ok');
+        setNotesKeyNote(`Connected to shared answers as ${me.name}.`, 'ok');
       } catch (e) {
         setNotesKeyNote(e.message, 'err');
       }
@@ -1774,7 +1744,7 @@
         h('p', { class: 'label', text: 'Your name' }),
         h('div', { class: 'row' }, authorInput)),
       h('div', { class: 'group' },
-        h('p', { class: 'label', text: 'Shared notes' }),
+        h('p', { class: 'label', text: 'Shared answers' }),
         h('div', { class: 'row' },
           notesKeyInput,
           h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => saveNotesKey() }),
@@ -1811,10 +1781,10 @@
       settings: h('section', { class: 'view', hidden: true }, settingsBody),
     };
     const tab = (name, text) => h('button', { class: 'tab', type: 'button', role: 'tab', 'aria-selected': 'false', text, onclick: () => setView(name) });
-    const tabs = { dispute: tab('dispute', 'Notes and Research'), entry: tab('entry', 'Entry Assistant') };
+    const tabs = { dispute: tab('dispute', 'Research'), entry: tab('entry', 'Entry Assistant') };
     const gear = h('button', { class: 'icon', type: 'button', 'aria-label': 'Settings', title: 'Settings', 'aria-pressed': 'false', text: '⚙︎', onclick: () => setView(view === 'settings' ? lastView : 'settings') });
     const grip = h('div', { class: 'grip', role: 'separator', tabindex: '0', 'aria-orientation': 'vertical', 'aria-label': 'Resize panel', title: 'Drag to resize. Double-click for the default width.' });
-    const panel = h('aside', { class: 'panel', hidden: true, 'aria-label': 'Notes and Research' },
+    const panel = h('aside', { class: 'panel', hidden: true, 'aria-label': 'Research' },
       grip,
       h('header', {},
         h('nav', { class: 'tabs', role: 'tablist' }, tabs.dispute, tabs.entry),
@@ -1908,22 +1878,16 @@
     let state = null;
     let siteInput = null;
     let answerInput = null;
-    let noteInput = null;
-    let editInput = null;
-    let draftTimer = null;
-    // The notes block is built once per dispute and updated in place, so the note box is never moved and
-    // never loses focus while lookups finish in the background; everything else redraws inside `rest`
-    const notesLabel = h('p', { class: 'label', text: 'Notes' });
-    const notesList = h('ul', { class: 'note-list', hidden: true });
-    const notesState = h('span', { class: 'hint', style: 'margin:0' });
+    // Whether answers are shared and synced; kept outside `rest` so a sync can update it without a redraw
+    const syncState = h('p', { class: 'hint', style: 'margin:0 0 8px' });
     const rest = h('div');
 
-    // While the panel is open, coworkers' notes are picked up every 15 seconds and when you come back to the tab
+    // While the panel is open, coworkers' answers are picked up every 15 seconds and when you come back to the tab
     const NOTES_POLL_MS = 15000;
     let pollTimer = null;
-    // The panel is only redrawn when the notes or answers changed, so reading or selecting text in an open
-    // answer isn't interrupted every 15 seconds. The first sync also re-picks the lines to tick, since
-    // coworkers' answers may have just arrived.
+    // The panel is only redrawn when the answers changed, so reading or selecting text in an open answer
+    // isn't interrupted every 15 seconds. The first sync also re-picks the lines to tick, since coworkers'
+    // answers may have just arrived.
     function syncNow() {
       if (!state) return Promise.resolve();
       const id = state.data.disputeId;
@@ -1935,18 +1899,17 @@
           state.synced = true;
           if (first && !state.selectionTouched) state.selected = unresearchedLines(state.data);
           if (first || JSON.stringify(pad.notes) !== before) render();
-          else showNotesState(pad);
+          else showSyncState(pad);
         }
-        updateLaunchLabel();
         if (view !== 'settings') refreshNotesKeyNote();
       });
     }
 
-    function showNotesState(pad) {
+    function showSyncState(pad) {
       const shared = sharedNotesOn();
       const waiting = pad.notes.filter(n => n.pending).length;
-      notesState.className = `hint${shared && pad.syncError ? ' warn' : ''}`;
-      notesState.textContent = !shared
+      syncState.className = `hint${shared && pad.syncError ? ' warn' : ''}`;
+      syncState.textContent = !shared
         ? 'Saved on this computer only.'
         : pad.syncError
           ? `${pad.syncError} Saved here; it will sync when it can${waiting ? ` (${waiting} waiting)` : ''}.`
@@ -1968,26 +1931,8 @@
       if (document.visibilityState === 'visible' && state && !panel.hidden) syncNow();
     });
 
-    // The launch button shows how many notes this dispute has, so they're hard to miss
-    function updateLaunchLabel() {
-      const id = location.pathname.split('/').filter(Boolean).pop();
-      const n = DISPUTE_PATH.test(location.pathname) ? noteCount(id) : 0;
-      launch.textContent = n ? `Notes and Research · ${n} ${n === 1 ? 'note' : 'notes'}` : 'Notes and Research';
-    }
-
-    function submitNote() {
-      const text = noteInput.value.trim();
-      if (!text || !state) return;
-      clearTimeout(draftTimer);
-      addNote(state.data.disputeId, text);
-      noteInput.value = '';
-      notesChanged();
-      noteInput.focus();
-    }
-
-    // Show the change at once, then send it to the shared notes server in the background
-    function notesChanged() {
-      updateLaunchLabel();
+    // Show the change at once, then send it to the notes server in the background
+    function answersChanged() {
       render();
       syncNow();
     }
@@ -2006,7 +1951,7 @@
 
     const setTokenNote = (text, kind = '') => { tokenNote.textContent = text; tokenNote.className = `hint ${kind}`; };
 
-    // Without a token, the Notes and Research tab also says so (see render)
+    // Without a token, the Research tab also says so (see render)
     function refreshTokenNote() {
       const saved = !!GM_getValue(TOKEN_KEY, '');
       if (saved) setTokenNote('Token saved. Click Test to check the connection.');
@@ -2104,20 +2049,7 @@
       // Lines not yet sent to Claude or answered start ticked (checked again once coworkers' answers arrive)
       state.selected = unresearchedLines(data);
       answerInput = h('textarea', { class: 'answer', rows: 6, placeholder: "Paste Claude's whole answer here (formatting is kept as Markdown)", 'aria-label': "Claude's answer", onpaste: pasteAsMarkdown });
-      // The unsent note is saved as you type, so closing the panel or the tab doesn't lose it
-      noteInput = h('textarea', {
-        class: 'note-input', rows: 2, placeholder: 'Add a note or paste a link…', 'aria-label': 'New note',
-        value: loadNotes(data.disputeId).draft || '',
-        oninput: () => { clearTimeout(draftTimer); draftTimer = setTimeout(() => saveDraft(data.disputeId, noteInput.value), 400); },
-        onkeydown: e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitNote(); } },
-      });
-      body.replaceChildren(
-        h('div', { class: 'section' },
-          notesLabel, notesList, noteInput,
-          h('div', { class: 'row', style: 'margin-top:6px;align-items:center' },
-            h('button', { class: 'secondary', type: 'button', text: 'Add note', onclick: () => submitNote() }),
-            notesState)),
-        rest);
+      body.replaceChildren(rest);
       startPolling();
       syncNow();
       siteInput = h('input', {
@@ -2134,11 +2066,10 @@
       panel.hidden = true;
       dock();
       stopPolling();
-      updateLaunchLabel();
       launch.hidden = false;
     }
 
-    // Reopening an already-loaded panel picks up coworkers' notes straight away
+    // Reopening an already-loaded panel picks up coworkers' answers straight away
     function reopenSync() {
       if (state && !pollTimer) startPolling();
       syncNow();
@@ -2269,7 +2200,7 @@
         s.selected = unresearchedLines(d);
         const found = Object.entries(verdicts).map(([line, v]) => `line ${line}: ${v.verdict}`).join(', ');
         setStatus(found ? `Answer saved for everyone on this dispute (${found}).` : "Answer saved for everyone on this dispute, but it has no verdict sentence (\"The merchant's claim is …\").", found ? 'ok' : 'warn');
-        notesChanged();
+        answersChanged();
       };
 
       // Every saved answer, newest first, folded; open one to read it formatted or copy its Markdown
@@ -2292,12 +2223,13 @@
             noteLink('Copy Markdown', () => { GM_setClipboard(a.text, 'text'); setStatus('Answer copied as Markdown.', 'ok'); }),
             a.mine !== false && (confirming
               ? [h('span', { text: 'Delete this answer for everyone?' }),
-                noteLink('Delete', () => { deleteNote(d.disputeId, a.id); s.confirmDelete = null; notesChanged(); }),
+                noteLink('Delete', () => { deleteNote(d.disputeId, a.id); s.confirmDelete = null; answersChanged(); }),
                 noteLink('Keep', () => { s.confirmDelete = null; render(); })]
               : noteLink('Delete', () => { s.confirmDelete = a.id; render(); }))));
       };
       const answerSection = inDispute.length > 0 && h('div', { class: 'section' },
         h('p', { class: 'label', text: answers.length ? `Claude's answers (${answers.length})` : "Claude's answers" }),
+        syncState,
         answers.length > 0 && h('div', { class: 'answers' }, answers.map(answerCard)),
         s.answerOpen
           ? h('div', {},
@@ -2307,47 +2239,12 @@
                 h('button', { class: 'secondary', type: 'button', text: 'Cancel', onclick: () => { s.answerOpen = false; render(); } })))
           : h('button', { class: 'secondary', type: 'button', text: "Paste Claude's answer", title: 'Saved as Markdown and shared with everyone on this dispute. On claude.ai, Save answer to dispute does the same.', onclick: () => { s.answerOpen = true; render(); answerInput.focus(); } }));
 
-      const shown = visibleNotes(pad);
-      const noteItem = n => {
-        const editing = s.editingNote === n.id;
-        const confirming = s.confirmDelete === n.id;
-        // Coworkers' notes can be read but not changed; only the author can edit or delete
-        const actions = n.mine === false ? []
-          : editing
-            ? [noteLink('Save', () => { const t = editInput.value.trim(); if (t) editNote(d.disputeId, n.id, t); s.editingNote = null; notesChanged(); }),
-              noteLink('Cancel', () => { s.editingNote = null; render(); })]
-            : confirming
-              ? [h('span', { text: 'Delete this note?' }),
-                noteLink('Delete', () => { deleteNote(d.disputeId, n.id); s.confirmDelete = null; notesChanged(); }),
-                noteLink('Keep', () => { s.confirmDelete = null; render(); })]
-              : [noteLink('Edit', () => {
-                  s.editingNote = n.id;
-                  editInput = h('textarea', { class: 'note-input', rows: 3, value: n.text, 'aria-label': 'Edit note' });
-                  render();
-                  editInput.focus();
-                }),
-                noteLink('Delete', () => { s.confirmDelete = n.id; render(); })];
-        const flags = [
-          n.edited && 'edited',
-          shared && n.pending && 'waiting to sync',
-          n.rejected && `not shared: ${n.rejected}`,
-        ].filter(Boolean);
-        return h('li', { class: `note${n.mine === false ? ' theirs' : ''}` },
-          editing ? editInput : h('div', { class: 'note-text' }, linkified(n.text)),
-          h('div', { class: 'note-meta' },
-            h('span', { text: [n.author, shortDate(n.createdAt), ...flags].join(' · ') }),
-            ...actions));
-      };
-      showNotesState(pad);
-      // Redraws happen while lookups finish; if you're typing in a box that gets moved (the website box,
-      // a note being edited), put focus and the cursor back where they were
+      showSyncState(pad);
+      // Redraws happen while lookups finish; if you're typing in a box that gets moved (the website box),
+      // put focus and the cursor back where it was
       const active = root.activeElement;
       const caret = active && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null;
       const scroll = body.scrollTop;
-
-      notesLabel.textContent = shown.length ? `Notes (${shown.length})` : 'Notes';
-      notesList.replaceChildren(...shown.map(noteItem));
-      notesList.hidden = shown.length === 0;
 
       rest.replaceChildren(...[
         h('div', { class: 'section' },
@@ -2457,7 +2354,7 @@
     }
 
     return {
-      show() { attach(); updateLaunchLabel(); if (panel.hidden) launch.hidden = false; },
+      show() { attach(); if (panel.hidden) launch.hidden = false; },
       hide() { stopPolling(); launch.hidden = true; panel.hidden = true; dock(); },
       reset() { stopPolling(); state = null; panel.hidden = true; dock(); setStatus(''); },
       keepAttached() {
@@ -2477,7 +2374,7 @@
     let ui = null;
     let lastPath = null;
     // A way in from the Tampermonkey toolbar menu, in case the button doesn't show
-    GM_registerMenuCommand('Open Notes and Research', () => {
+    GM_registerMenuCommand('Open Research', () => {
       ui = ui || createPanel();
       ui.open();
     });
