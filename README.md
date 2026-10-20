@@ -1,6 +1,6 @@
 # Zonos Dispute Researcher
 
-A Tampermonkey script for the Zonos brokerage dashboard. On a duty dispute page it adds a **Research** button. The panel it opens sits beside the page and has two tabs:
+A Tampermonkey script for the Zonos brokerage dashboard. On a duty dispute page, and on an order in the Entry Writer Queue, it adds a **Research** button. The panel it opens sits beside the page and has two tabs:
 
 - **Research:** gathers the dispute's details, checks the merchant's website, looks up the HTS codes in the Entry Assistant API, and opens claude.ai with a research prompt ready to send. Claude's answers are saved here and shared with everyone.
 - **Entry Assistant:** the Entry Assistant site (entry.kars3n.com), for looking up and comparing codes, notes, rulings and the rest. Clicking a code on the dispute page opens it here.
@@ -45,6 +45,25 @@ For the maintainer: Tampermonkey only installs an update when `@version` in the 
 ### Notes
 
 Use the dashboard's own **Notes** section on the dispute page. The panel had a notes box before the dashboard did; it's gone now. Notes written in it are still on the notes server but aren't shown.
+
+### Entry Writer Queue orders
+
+Every order in the Entry Writer Queue (`/entry-writer-queue/<class>/<id>`) gets the panel too. Each problem class is its own page with its own question and choices, so the panel reads the page as it is and gives Claude a research brief written for that class:
+
+| Class | What Claude works out | Decision |
+|---|---|---|
+| HS code review | What the flagged line really is, and whether the 10-digit code fits | Keep / Correct (with the code) / Block |
+| Declared value review | What the items really sell for, and whether the value is believable | One of the page's choices, with the value it should be |
+| Denied-party review | Whether the party is the listed entity, field by field, from the screening list | Clear (not a match) / Block (confirmed match) |
+| Entry rejected | What each CBP rejection code means and what to change, such as the extra HTS lines a 609 needs | Refresh / Re-send / Refile, with the fixes |
+| Submission failed | What the filing gateway's error and flags mean (a flag like DT2 points to a partner agency) | Refresh / Re-send / Submit, with the fixes |
+| Validation blocked, CBP hold, CBP exam, PGA hold, CBP cancelled, Unfileable, Carrier manifest mismatch, Duty dispute review | The cause, and what the agency or the entry needs | One of the page's choices |
+
+- The panel shows the class, what the page asks, the finding, the choices on the page and a link to each code in Entry Assistant. An HS code review's code opens beside GreenLight's suggestion or the correction you've typed.
+- The HTS lookups for the codes on the page include what to report on the entry line for the origin and the partner agencies, which is what rejections and gateway errors usually turn on.
+- Open **Parties** and **Items** on the page before you send, so Claude gets the shipper and every line. The panel reads the page again when you click Open in Claude.
+- Claude's answer ends with **Decision:**, one of the page's own choices, and a note to paste into the page's note box. **Copy the review note** (or **Copy note** on a saved answer) copies just that note. The panel never fills in or clicks anything on the dashboard: you make the decision there.
+- A class nobody has seen yet still works: Claude gets the page and a general brief.
 
 ### Disputes with several lines
 

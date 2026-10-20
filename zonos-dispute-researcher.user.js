@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      0.23.1
-// @description  Adds a "Research" panel to duty dispute pages: merchant research handed to Claude on claude.ai, Claude's answers saved and shared for each dispute, and the Entry Assistant site for looking up and comparing HTS codes. Never changes anything on the dashboard, and never sends a message on claude.ai.
+// @version      0.24.0
+// @description  Adds a "Research" panel to duty dispute pages and Entry Writer Queue orders: merchant research handed to Claude on claude.ai, Claude's answers saved and shared for each dispute, and the Entry Assistant site for looking up and comparing HTS codes. Never changes anything on the dashboard, and never sends a message on claude.ai.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
 // @updateURL    https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js
@@ -1046,6 +1046,9 @@
         extraDuties: res.extraDuties || [],
         extra: extraText(res.extraDuties),
         payLess: (res.payLess || []).map(p => `${p.value} ${p.what}${p.detail ? `: ${p.detail}` : ''}`),
+        // What to report on the entry line, and partner agencies: used for queue orders (rejections, holds)
+        report: res.report || null,
+        agencies: res.agencies || [],
         rulings: [],
       };
     }
@@ -1081,14 +1084,16 @@
   // Every disputed item gets its code(s) looked up for the declared origin, with their Chapter 99 headings.
   // Rulings and the code comparison only when the HS code is disputed; the second origin only when origin is.
   // One failed call doesn't sink the rest: it's noted in `problems`, unless the token itself is the problem.
-  async function gatherFacts(item) {
+  // Options for queue orders: `roles` names the two codes, `rulings` fetches them even for one code, and
+  // `extended` adds what to report on the entry line and the partner agencies to the prompt.
+  async function gatherFacts(item, { roles = ['Current code', "Merchant's code"], rulings = false, extended = false } = {}) {
     const hs = item.fields.find(f => /^hs code$/i.test(f.label));
     const origin = item.fields.find(f => /^country of origin$/i.test(f.label));
     const current = hsCodeIn(hs?.current);
     const claimed = hsCodeIn(hs?.claimed);
     const from = isoCountry(origin?.current);
     const claimedFrom = isoCountry(origin?.claimed);
-    const facts = { codes: [], compare: null, origins: [], problems: [] };
+    const facts = { codes: [], compare: null, origins: [], problems: [], extended };
     let firstError = null;
     const attempt = async (label, run, fallback) => {
       try {
@@ -1102,7 +1107,7 @@
       }
     };
 
-    const wanted = [['Current code', current], ["Merchant's code", claimed]].filter(([, raw]) => raw);
+    const wanted = [[roles[0], current], [roles[1], claimed]].filter(([, raw]) => raw);
     facts.codes = await Promise.all(wanted.map(([role, raw]) => attempt(`${role} ${raw}`,
       () => lookupCode(raw, isChapter99(raw) ? '' : from).then(r => ({ ...r, role })),
       { asked: raw, role, failed: true })));
@@ -1113,12 +1118,33 @@
     await Promise.all([
       claimed && a && b && !isChapter99(a) && !isChapter99(b) && attempt('Code comparison',
         async () => { facts.compare = await entryApi(`compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`); }),
-      claimed && attempt('CBP rulings', () => Promise.all(found.filter(c => !isChapter99(c.code)).map(async c => { c.rulings = await fetchRulings(c.code); }))),
+      (claimed || rulings) && attempt('CBP rulings', () => Promise.all(found.filter(c => !isChapter99(c.code)).map(async c => { c.rulings = await fetchRulings(c.code); }))),
       current && from && claimedFrom && facts.codes[0].code && attempt(`Duty if made in ${claimedFrom}`,
         async () => { facts.origins = [{ ...facts.codes[0], from }, { ...(await lookupCode(current, claimedFrom)), from: claimedFrom, role: 'Current code' }]; }),
     ]);
     await Promise.all([...found, ...facts.origins.slice(1)].map(addChapter99));
     return facts;
+  }
+
+  // For queue orders: the codes to report on the entry line for this origin, in order, what the rules
+  // couldn't settle, and the partner agencies (PGA) that review these goods
+  function reportLines(c) {
+    const L = [];
+    const lines = c.report?.lines || [];
+    if (lines.length) {
+      L.push(`  What to report on the entry line${c.originName ? ` if made in ${c.originName}` : ''}:`);
+      for (const r of lines.slice(0, 8)) {
+        const extra = [r.program, r.rate, r.hold && 'CBP says not to report it yet', r.check && `check first: ${clean(r.check)}`].filter(Boolean).join(', ');
+        L.push(`  - ${r.where}: ${r.code}${extra ? ` (${extra})` : ''}${r.why ? `. ${clean(r.why)}` : ''}`);
+        for (const alt of (r.instead || []).slice(0, 4)) L.push(`    - or ${alt.code} when ${clean(alt.when)}`);
+      }
+    }
+    for (const u of (c.report?.unsure || []).slice(0, 4)) L.push(`  Not settled by the code alone: ${clean(u)}`);
+    for (const a of c.agencies.slice(0, 6)) {
+      const flags = Array.isArray(a.flags) ? a.flags.join(', ') : a.flags || '';
+      L.push(`  Partner agency: ${a.agency}${a.program ? ` ${a.program}` : ''}${flags ? `, flags ${flags}` : ''} (${a.basis === 'list' ? "on the agency's list" : 'likely reviews these goods'})${a.what ? `: ${clean(a.what)}` : ''}`);
+    }
+    return L;
   }
 
   function factLines(f) {
@@ -1135,13 +1161,14 @@
         const duty = c.originName ? `Duty if made in ${c.originName}: ${c.originRate || c.general || 'none listed'}` : `General duty: ${c.general || 'none listed'}`;
         L.push(`- ${c.role} ${shown}: ${c.meaning}. ${duty}.${c.extra ? ` Extra duties: ${c.extra}.` : ''}`);
         if (c.payLess.length) L.push(`  Ways it may pay less: ${c.payLess.join('; ')}`);
+        if (f.extended) L.push(...reportLines(c));
       }
       const cmp = f.compare;
       if (cmp) {
         if (cmp.summary) L.push(`- Where they split: ${clean(cmp.summary)}`);
         if (cmp.decide?.length) L.push(`- What decides it: ${cmp.decide.map(x => x.rule).join(', then ')}. ${clean(cmp.decide[0].says)}`);
         for (const n of (cmp.notes || []).slice(0, 6)) {
-          const out = [n.leavesOut?.a && 'leaves out the current code', n.leavesOut?.b && "leaves out the merchant's code"].filter(Boolean).join(', ');
+          const out = [n.leavesOut?.a && `leaves out the ${(f.codes[0]?.role || 'current code').toLowerCase()}`, n.leavesOut?.b && `leaves out the ${(f.codes[1]?.role || "merchant's code").toLowerCase()}`].filter(Boolean).join(', ');
           L.push(`- ${n.name}${out ? ` (${out})` : ''}: "${clean(n.quote)}"`);
         }
       }
@@ -1240,8 +1267,16 @@
   // What to show for a code clicked on the dashboard: both of the line's codes when the merchant claims
   // a different one and the clicked code is either of them, otherwise just the clicked code
   function clickedCodeTarget(button) {
-    const code = tidyCode(button.textContent);
+    const code = codeOfButton(button);
     if (!code) return null;
+    // A queue order: an HS code review's flagged code opens next to GreenLight's suggestion or the
+    // correction typed in; any other code opens alone, for the origin on its row
+    if (WORK_ORDER_PATH.test(location.pathname)) {
+      const wo = readWorkOrder();
+      if (wo?.pair.length && wo.pair.some(c => sameCode(c, code))) return { codes: wo.pair, from: wo.pairFrom };
+      const found = wo?.codes.find(c => sameCode(c.code, code));
+      return { codes: [code], from: isChapter99(code) ? '' : found?.from || '' };
+    }
     const main = document.querySelector('main');
     const d = main && extractDispute();
     const items = d?.items || [];
@@ -1576,6 +1611,451 @@
     ];
   }
 
+  /* -------------------------------------------- dashboard: Entry Writer Queue orders */
+
+  // An order in the Entry Writer Queue: /entry-writer-queue/<PROBLEM_CLASS>/<subject id>. Each problem class
+  // is its own page with its own question and choices, so the page is read generally (what it shows, the
+  // codes on it, and the buttons it offers) and the research brief comes from the class's guide below.
+  const WORK_ORDER_PATH = /^\/entry-writer-queue\/([A-Z][A-Z_]+)\/([^/]+)\/?$/;
+  const isCasePage = () => DISPUTE_PATH.test(location.pathname) || WORK_ORDER_PATH.test(location.pathname);
+
+  // Safe-side rules shared by every class
+  const ORDER_RULES = [
+    "- Nothing is filed or cleared on a guess. When the evidence doesn't settle it, say exactly what's missing, and pick the safe choice (hold, block or fix) over the one that lets it through.",
+    '- Check everything the page says against the goods as they really are and the rules as they are today (the current HTS, CBP messages, the agency rules).',
+  ];
+
+  // goal: what the order is for. find: what the research must settle. found: the class's lines in the
+  // reply's "What we found". note: the name of the note box on the page.
+  const WORK_ORDER_GUIDES = {
+    HS_CODE_REVIEW: {
+      label: 'HS code review',
+      goal: "Our automated check (GreenLight) flagged the HS code on a line before filing. Find out exactly what the goods are, and decide whether the current 10-digit code is right; if it isn't, which code is.",
+      find: [
+        'The line\'s description is often vague ("Trousers"). Pin the item down from everything on the page: the other lines on the bill (a bill that also has "Womens Jeans" says something about the trousers), the value, the origin, the shipper and the carrier. If the shipper has a website, find the item there.',
+        "Work out every fact the code turns on (see What to find below). For clothing that's knit or crocheted versus woven, the fiber that predominates by weight, men's or boys' versus women's or girls', and the garment type; for other goods, what it is, what it's made of and what it does.",
+        'Read the heading, subheading and statistical suffix wording in the current HTS, including the residual "other" lines, and the section and chapter notes. Compare the closest CBP rulings (CROSS) and say why any that point elsewhere don\'t fit.',
+        "If GreenLight suggested a code, check it the same way: it can be wrong too. If the goods can't be pinned down well enough to choose between codes, say what's missing.",
+      ],
+      found: [
+        "- **What it is:** <the item: garment or product type, who it's for, material, knit or woven, construction> ([<source>](<link>))",
+        '- **Code:** `<the right 10-digit code>` — <the heading, subheading and suffix wording it meets> (current `<current code>`)',
+        "- **Closest rulings:** <ruling numbers, what they cover, which match and why any others don't>",
+        '- **Duty:** <the duty on the current code and on the right one, for the origin>',
+      ],
+      note: 'Review note',
+    },
+    VALUE_REVIEW: {
+      label: 'Declared value review',
+      goal: 'Our automated check (GreenLight) flagged the declared value as unlikely for these goods. Find what the items really sell for, and decide whether the declared value is believable or needs correcting.',
+      find: [
+        'Identify each item from its description, HS code and origin, as precisely as the page allows.',
+        'Find what each sells for: marketplaces in the origin country and in the US (eBay including sold listings, Amazon, AliExpress, local shops), and the shipper\'s own site if there is one. Compare unit by unit with the declared unit values.',
+        'Look for signs of undervaluation: values far below any real price, round placeholder values ($1, $5), the same value on every line, or a total that looks set to stay under a threshold.',
+        'Check the HS codes make sense for the descriptions while you\'re at it, and say if one doesn\'t.',
+      ],
+      found: [
+        '- **Prices found:** <per line: low and high with links> vs declared <unit value>',
+        '- **Value it should be:** <per line, if the declared value isn\'t believable, and how you got it>',
+      ],
+      note: 'Note',
+    },
+    DENIED_PARTY_REVIEW: {
+      label: 'Denied-party review',
+      goal: 'Denied-party screening matched a party on this consignment against a restricted-party list. Decide whether the party on the consignment is the listed entity.',
+      find: [
+        'Compare the party with each listed match field by field: name (and its spelling and transliteration), address, city or state, and country.',
+        "Find the listed entity's full record on the Consolidated Screening List (https://www.trade.gov/consolidated-screening-list) and the source list it names (OFAC SDN, BIS Entity List and so on): its aliases, addresses, ID numbers and program. An \"Unnamed listed entity\" match means the list record carries few details; say what that means for the match.",
+        "Work out who the consignment party is: a private person or a business, and what kind of address it is (a home, a hotel, a business). A common name that matches only partly, with nothing else matching, is not a match on its own.",
+        'Never clear a party whose address, ID numbers or other identifiers match the listed entity.',
+      ],
+      found: [
+        '- **Party on the consignment:** <who it is, as far as the page and public sources show>',
+        '- **Listed entity:** <list and program, name and aliases, addresses, identifiers> ([<source>](<link>))',
+        '- **Field by field:** name <match | partial | no> · address <…> · city <…> · country <…>',
+      ],
+      note: 'Adjudication note',
+    },
+    ENTRY_REJECTED: {
+      label: 'Entry rejected',
+      goal: "CBP rejected this entry. Explain each rejection code, find what in the entry caused it, and say exactly what to change before it's sent again.",
+      find: [
+        "Look up each rejection code in CBP's ACE documentation (the CATAIR error dictionary) and say what it means in plain words.",
+        "For classification codes, such as 609 (single HTS not allowed, second HTS required), use the HTS facts below, especially what to report on the entry line for the origin, to name the exact additional or corrected HTS numbers, usually Chapter 99 headings for Section 301, Section 232 or other extra duties.",
+        'Check recent CBP messages (CSMS) for changes that explain the rejection.',
+        'Check the lines on the page against the fix: codes, origins, values and quantities.',
+      ],
+      found: [
+        '- **Rejection:** <each code: what it means>',
+        '- **Cause:** <what in the entry triggered it, line by line>',
+      ],
+      note: 'Note',
+    },
+    SUBMISSION_FAILED: {
+      label: 'Submission failed',
+      goal: "The filing gateway refused to send this entry to CBP. Work out what the gateway's message means and what to fix before submitting again.",
+      find: [
+        "Decode the gateway's message: which invoice, line and field it names, and what the flag or code means. Flags on an HTS line usually belong to a partner agency (for example DT for NHTSA/DOT, FD for FDA, EP for EPA, AL or AQ for APHIS), and mean that line needs that agency's data or a disclaimer.",
+        'Use the HTS facts below (partner agencies and flags for each code) to say which agency, what it requires for these goods, and whether a disclaimer applies.',
+        'Check recent CBP messages (CSMS) and the agency\'s own guidance.',
+      ],
+      found: [
+        '- **Error:** <what the gateway refused, in plain words>',
+        '- **Cause:** <the line, field and rule behind it>',
+      ],
+      note: 'Note',
+    },
+    VALIDATION_BLOCKED: {
+      label: 'Validation blocked',
+      goal: 'Our pre-filing validation blocked this consignment. Find what failed and what to change so it can be filed.',
+      find: [
+        'Read each validation message on the page and find the field it is about.',
+        'Check the fields involved: HS codes valid in the current HTS release, origins, values, quantities and units, parties, and partner-agency data the codes call for.',
+      ],
+      found: ['- **What failed:** <each check and why>'],
+      note: 'Note',
+    },
+    CBP_HOLD: {
+      label: 'CBP hold',
+      goal: 'CBP put a hold on this shipment. Work out which hold it is, why CBP likely placed it, and what CBP will need to release it.',
+      find: [
+        'Name the hold from the codes and messages on the page, and say what it means.',
+        'Look at what about the goods could have triggered it: vague descriptions, values, origin, brands (possible counterfeits), forced-labor orders and UFLPA, import bans, AD/CVD, and partner-agency requirements for the codes.',
+        'List the documents or information to have ready for CBP.',
+      ],
+      found: ['- **Hold:** <which hold and what it means>', '- **Likely reason:** <what about these goods or this entry triggered it>'],
+      note: 'Note',
+    },
+    CBP_EXAM: {
+      label: 'CBP exam',
+      goal: 'CBP selected this shipment for an exam. Work out what kind of exam and why, and what to prepare so it clears.',
+      find: [
+        'Name the exam from the codes and messages on the page.',
+        "Check whether the entry matches the goods as they really are (descriptions, codes, values, origin), since that's what an exam looks at, and look for brands or goods that draw IPR, safety or agency attention.",
+        'List the documents to have ready.',
+      ],
+      found: ['- **Exam:** <type and what it means>', '- **Risks:** <what CBP is likely to look at in these goods>'],
+      note: 'Note',
+    },
+    PGA_HOLD: {
+      label: 'PGA hold',
+      goal: 'A partner government agency (FDA, USDA APHIS, EPA, CPSC, NHTSA, FWS and others) is holding this shipment. Work out which agency and why, and what it needs to release it.',
+      find: [
+        'Name the agency and the hold from the page.',
+        "Use the HTS facts below (partner agencies and flags for each code) and the agency's own rules to say what it requires for these goods: registrations, prior notice, permits, certificates, labels, or a disclaimer when the goods aren't regulated.",
+      ],
+      found: ['- **Agency and hold:** <which agency, which program, what the hold means>', '- **What it needs:** <documents or data, and from whom>'],
+      note: 'Note',
+    },
+    CBP_CANCELLED: {
+      label: 'CBP cancelled',
+      goal: 'CBP cancelled this entry. Work out why, and what has to happen next: a corrected new filing, nothing, or something else.',
+      find: ['Read the cancellation codes and messages on the page and say what they mean.', 'Work out whether the goods still need an entry, and what has to be different this time.'],
+      found: ['- **Cancellation:** <why CBP cancelled it>'],
+      note: 'Note',
+    },
+    UNFILEABLE: {
+      label: 'Unfileable',
+      goal: "This consignment was parked as unfileable. Work out what makes it unfileable, and whether it can be fixed and filed or should stay out.",
+      find: ['Read the reasons on the page.', 'For each, say whether it can be fixed (and how, from what source) or not.'],
+      found: ['- **Why it can\'t be filed:** <each reason>'],
+      note: 'Note',
+    },
+    CARRIER_MANIFEST_MISMATCH: {
+      label: 'Carrier manifest mismatch',
+      goal: "The carrier's manifest doesn't match our entry data. Find which fields differ and which side is right.",
+      find: ['Compare every field the page shows from both sides: tracking numbers, bills, piece counts, weights, values and descriptions.', 'Work out which side is right for each, from the documents and the goods.'],
+      found: ['- **Differences:** <each field: manifest vs our data, and which is right>'],
+      note: 'Note',
+    },
+    DUTY_DISPUTE_REVIEW: {
+      label: 'Duty dispute review',
+      goal: "A duty dispute needs a broker's review here. The merchant has to prove their claim; without proof, the higher duty stands.",
+      find: ["Check every fact the merchant gives against their website, the documents and the goods.", 'Work out what proof is still missing.'],
+      found: ['- **Claim:** <what the merchant wants changed>', '- **Proof:** <what supports or contradicts it>'],
+      note: 'Note',
+    },
+  };
+  const titleCase = s => s.toLowerCase().replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+  const guideFor = type => WORK_ORDER_GUIDES[type] || {
+    label: titleCase(type),
+    goal: "Work out what the problem on this order is, what caused it, and what to do so the shipment can move.",
+    find: ['Read every message and code on the page and say what each means.'],
+    found: ['- **Problem:** <what is wrong>', '- **Cause:** <why>'],
+    note: 'Note',
+  };
+
+  const S10_TRACKING = /\b[A-Z]{2}\d{9}[A-Z]{2}\b/g;
+  const codeOfButton = b => tidyCode(b.textContent) || tidyCode(((b.getAttribute('aria-label') || '').match(/\d{4}[\d.]{2,10}/) || [])[0]);
+
+  // Buttons that are a choice on the order, with the line of help the page gives each
+  const NOT_A_CHOICE = /^(claim( order| all)?|add note|upload|discard|view raw cbp response|back to entry writer queue|manage consignment)$/i;
+  function choicesOn(main, activity) {
+    const out = [];
+    for (const b of main.querySelectorAll('button')) {
+      if (b.getAttribute('aria-expanded') != null || b.title === 'Look up in the HTS' || (activity && activity.contains(b))) continue;
+      const label = clean(b.textContent);
+      if (!label || label.length > 60 || NOT_A_CHOICE.test(label) || /^[A-Z][a-z]+( [A-Za-z]+)* \([A-Z]{2}\)$/.test(label) || /^\d+$/.test(label)) continue;
+      const next = b.nextElementSibling;
+      const hint = next?.tagName === 'P' ? clean(next.textContent) : '';
+      if (!out.some(c => c.label === label)) out.push({ label, hint });
+    }
+    return out;
+  }
+
+  // An editable code and its lookup button say the same code twice
+  function oneCodeEach(text) {
+    const seen = [];
+    return clean(text).split(' ').filter(w => {
+      if (!/^\d{4}[\d.]{4,}$/.test(w)) return true;
+      if (seen.some(x => sameCode(x, w))) return false;
+      seen.push(w);
+      return true;
+    }).join(' ');
+  }
+
+  // The page as plain lines for the prompt: headings, "Label: value" pairs, tables as rows, editable fields
+  // by their values. Left out: the claim banner, the activity log (notes and staff names), upload forms,
+  // the consignee, everything about the shipper but its company name, country and email domain, and
+  // tracking numbers (only the posting country is kept).
+  function pageLines(main, activity) {
+    const out = [];
+    let line = '';
+    let party = '';
+    const push = text => {
+      const t = oneCodeEach(text);
+      if (!t) return;
+      const bare = t.replace(/^#+\s*/, '');
+      if (/^(consignee|shipper ?\/ ?exporter|shipper|exporter|importer of record|notify party)$/i.test(bare)) {
+        party = /^shipper|^exporter/i.test(bare) ? 'shipper' : 'hidden';
+        if (party === 'shipper') out.push(bare);
+        return;
+      }
+      if (/^#{2,3} /.test(t) || /^(items|handling units|status history|documents|activity|entry (and|&) consignment)\b/i.test(bare)) party = '';
+      if (party === 'hidden') return;
+      if (party === 'shipper') {
+        const m = /^(company name|country|email): (.+)$/i.exec(t);
+        if (!m) return;
+        out.push(/email/i.test(m[1]) ? `Email domain: ${(m[2].split('@')[1] || '—')}` : t);
+        return;
+      }
+      if (/^(claim this order to work it|you can view it, but edits|claimed by .+ view only)/i.test(t)) return;
+      out.push(t.replace(S10_TRACKING, '[tracking number]').replace(/\bconsignee (?!—)[^·]+·/i, 'consignee [left out] ·'));
+    };
+    const flush = () => { push(line); line = ''; };
+    const valueOf = el => {
+      if (el.tagName === 'SELECT') return clean(el.selectedOptions?.[0]?.textContent);
+      if (el.type === 'file' || el.type === 'checkbox' || el.type === 'radio' || el.type === 'hidden') return '';
+      return clean(el.value);
+    };
+    const cellText = td => {
+      const parts = [];
+      const walkCell = n => {
+        if (n.nodeType === 3) { parts.push(n.nodeValue); return; }
+        if (n.nodeType !== 1 || n.tagName === 'svg') return;
+        if (n.tagName === 'BUTTON') { const c = n.title === 'Look up in the HTS' ? codeOfButton(n) : ''; if (c) parts.push(` ${c} `); else if (!n.querySelector('button')) parts.push(` ${n.textContent} `); return; }
+        if (/^(INPUT|TEXTAREA|SELECT)$/.test(n.tagName)) { parts.push(` ${valueOf(n)} `); return; }
+        n.childNodes.forEach(walkCell);
+      };
+      walkCell(td);
+      return oneCodeEach(parts.join(''));
+    };
+    const walk = node => {
+      if (node.nodeType === 3) { line += node.nodeValue; return; }
+      if (node.nodeType !== 1) return;
+      const el = node;
+      const tag = el.tagName;
+      if (el === activity || tag === 'svg' || tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'FORM') return;
+      if (tag === 'INPUT') { const v = valueOf(el); if (v) line += ` ${v} `; return; }
+      if (tag === 'TABLE') {
+        flush();
+        party = '';
+        const head = [...el.querySelectorAll('thead th')].map(th => clean(th.textContent));
+        const rows = [...el.querySelectorAll('tbody tr')].map(tr => [...tr.children].map(cellText));
+        if (head.length) out.push(`| ${head.join(' | ')} |`);
+        for (const r of rows.slice(0, 25)) {
+          if (head.length) out.push(`| ${r.join(' | ')} |`);
+          else if (r.length === 2) push(`${r[0]}: ${r[1]}`);
+          else push(r.join(' · '));
+        }
+        return;
+      }
+      if (tag === 'BUTTON') {
+        if (el.title === 'Look up in the HTS') { const c = codeOfButton(el); if (c) line += ` ${c} `; return; }
+        // A country picker ("United States (US)") is a value, not a section
+        if (el.getAttribute('aria-expanded') != null && /\([A-Z]{2}\)$/.test(clean(el.textContent))) { line += ` ${clean(el.textContent)} `; return; }
+        if (el.getAttribute('aria-expanded') != null) { flush(); out.push(`## ${clean(el.textContent).replace(/\d+$/, '').trim()}`); party = ''; }
+        return; // other buttons are the choices, listed on their own
+      }
+      // A label and its value side by side: <div><p>Company name</p><p>Acme</p></div>, or dt/dd
+      const kids = [...el.children];
+      if (tag === 'DIV' && kids.length === 2 && kids.every(k => k.tagName === 'P') && !kids[0].children.length) {
+        flush();
+        push(`${clean(kids[0].textContent)}: ${cellText(kids[1]) || '—'}`);
+        return;
+      }
+      if (tag === 'DT') { flush(); line = `${clean(el.textContent)}: `; return; }
+      if (tag === 'DD') { line += cellText(el); flush(); return; }
+      const block = /^(DIV|P|SECTION|LI|UL|OL|HEADER|FOOTER|ARTICLE|ASIDE|LABEL|FIELDSET|NAV|DL)$/.test(tag);
+      if (/^H[1-6]$/.test(tag)) { flush(); push(`### ${el.textContent}`); return; }
+      if (block) flush();
+      el.childNodes.forEach(walk);
+      if (block) flush();
+      else line += ' '; // side-by-side spans keep a space between them
+    };
+    walk(main);
+    flush();
+    // Status history and other long lists can run on; keep the prompt to a sensible size
+    const text = [];
+    let size = 0;
+    for (const l of out) {
+      if (size > 9000) { text.push('… (the rest of the page is left out)'); break; }
+      if (text[text.length - 1] !== l) text.push(l);
+      size += l.length;
+    }
+    return text;
+  }
+
+  function readWorkOrder() {
+    const m = WORK_ORDER_PATH.exec(location.pathname);
+    const main = document.querySelector('main');
+    if (!m || !main) return null;
+    const [, type, id] = m;
+    const guide = guideFor(type);
+    const activityToggle = [...main.querySelectorAll('button[aria-expanded]')].find(b => /^activity$/i.test(clean(b.textContent)));
+    const activity = activityToggle?.parentElement;
+    const lines = pageLines(main, activity);
+    const tracking = [...main.querySelectorAll('h1, h2, td, dd, span, p')].map(e => clean(e.textContent)).find(x => /^[A-Z]{2}\d{9}[A-Z]{2}$/.test(x)) || '';
+    const postedCode = tracking.slice(-2);
+    // Codes on the page with the origin on the same row, or the page's own origin field
+    const pageOrigin = (() => {
+      for (const th of main.querySelectorAll('th, p, dt')) {
+        if (/^(origin|country of origin|coo)$/i.test(clean(th.textContent))) {
+          const v = clean((th.nextElementSibling || th.parentElement?.querySelector('td'))?.textContent);
+          const iso = (v.match(/\(([A-Z]{2})\)/) || v.match(/^([A-Z]{2})$/) || [])[1];
+          if (iso) return iso;
+        }
+      }
+      return '';
+    })();
+    const codes = [];
+    for (const b of main.querySelectorAll('button[title="Look up in the HTS"]')) {
+      if (activity?.contains(b)) continue;
+      const code = codeOfButton(b);
+      if (!code || codes.some(c => sameCode(c.code, code))) continue;
+      const row = b.closest('tr');
+      const rowText = row ? [...row.children].map(td => clean(td.textContent)).join(' | ') : '';
+      const from = (rowText.match(/\(([A-Z]{2})\)/) || rowText.match(/\|\s*([A-Z]{2})\s*(\||$)/) || [])[1] || pageOrigin;
+      codes.push({ code, from: isChapter99(code) ? '' : from });
+    }
+    // HS code review: the flagged line's code, and GreenLight's suggestion or the code typed as the correction
+    const fieldIn = (sel, label) => {
+      const row = [...main.querySelectorAll(`${sel} tr`)].find(tr => new RegExp(`^${label}$`, 'i').test(clean(tr.querySelector('th')?.textContent)));
+      return row ? clean(row.querySelector('td')?.textContent) : '';
+    };
+    const current = tidyCode(fieldIn('section[aria-labelledby="hs-review-line-heading"]', 'current hs code'));
+    const suggested = tidyCode(hsCodeIn(fieldIn('section[aria-labelledby="hs-review-result-heading"]', 'suggested hs code')));
+    const corrected = tidyCode(main.querySelector('#hs-review-correction')?.value || '');
+    const second = [corrected, suggested].find(c => c && current && !sameCode(c, current)) || '';
+    return {
+      kind: 'workOrder',
+      type,
+      label: guide.label,
+      workOrderId: id,
+      disputeId: `wo_${id}`,
+      question: clean(main.querySelector('section h2')?.textContent),
+      // The problem in one line: CBP's or the gateway's message first, then the automated check's finding
+      summary: [/^entry summary:|^http \d{3}|^\d{3} — /i, /flagged|returned|scored|refused|hold|exam|cancel|mismatch|unfileable|blocked|rejected/i]
+        .map(re => lines.find(l => l.length > 15 && !/^#|^\|/.test(l) && re.test(l))).find(Boolean) || '',
+      lines,
+      choices: choicesOn(main, activity),
+      codes: codes.slice(0, 8),
+      current,
+      pair: current && second ? [current, second] : [],
+      pairFrom: codes.find(c => sameCode(c.code, current))?.from || pageOrigin,
+      postedIn: /^[A-Z]{2}$/.test(postedCode) ? regionName(postedCode) : '',
+      hasShipper: lines.some(l => /^shipper/i.test(l)),
+      org: '',
+      emailDomain: '',
+      items: [],
+      orderDocs: [],
+    };
+  }
+
+  // A decision in Claude's answer to a queue order: "**Decision:** Keep the current HS code because …"
+  const DECISION_RE = /^[ \t>*_-]*decision[*_]*:(?![*_ \t]*<)[*_ \t]*([^\n]+)/im;
+  function decisionOf(text) {
+    const m = DECISION_RE.exec(text || '');
+    if (!m) return null;
+    const sentence = plainText(m[1]);
+    return { decision: sentence.split(/\s+because\s+/i)[0].replace(/[.:;]$/, '').trim(), sentence };
+  }
+  // The note to paste into the page's note box: the last "**… note:** …" line
+  function noteOf(text) {
+    const all = [...(text || '').matchAll(/^[ \t>*_-]*(?:review note|adjudication note|note)[*_]*:(?![*_ \t]*<)[*_ \t]*([^\n]+)/gim)];
+    return all.length ? plainText(all[all.length - 1][1]) : '';
+  }
+
+  const ORDER_SKILL_STEP = "Use the entry-assistant skill (it calls the Entry Assistant API) for every HTS code involved: what it covers, its duties and extra duties for the origin, what to report on the entry line, partner-agency flags, and CBP rulings and messages. If you can't use the skill, use your own knowledge and carry on.";
+
+  function buildWorkOrderPrompt(d, s) {
+    const g = guideFor(d.type);
+    const facts = Object.values(s.facts || {});
+    const L = [];
+    // Class names read badly in a sentence ("a submission failed"), so the class is quoted
+    L.push(`I'm a customs broker at Zonos working the Entry Writer Queue, on an order in the "${g.label}" class. ${g.goal} Do the fact-finding I'd otherwise do by hand, catch anything that doesn't add up, and end with a decision I can act on.`);
+    L.push('', 'How I work these:', ...ORDER_RULES);
+    L.push('', "**Research before you reply, every time.** Search the web and open the pages you find: do every step under \"How to research\", then check you didn't skip one. None of that goes in the reply. Don't fill in the template from this prompt or from memory: the page below is what you're checking. If you can't search the web in this chat, don't answer; reply only: \"I can't search the web in this chat. Turn on web search and send this again.\"");
+    L.push('', '## The order', `- Problem class: ${g.label}`);
+    if (d.question) L.push(`- The page asks: ${d.question}`);
+    if (d.postedIn) L.push(`- Posted in: ${d.postedIn} (from the tracking number's country code). Where it was posted doesn't decide where it was made.`);
+    if (d.choices.length) L.push(`- Choices on the page: ${d.choices.map(c => `"${c.label}"${c.hint ? ` (${c.hint.replace(/\.$/, '')})` : ''}`).join('; ')}`);
+    L.push('', '## What the page shows', '(Read from the dashboard. Tracking numbers, the consignee and staff notes are left out; the shipper only by company name, country and email domain.)', ...d.lines);
+    for (const f of facts.filter((x, i) => x.data || facts.findIndex(y => y.error) === i)) {
+      if (f.data) L.push(...factLines(f.data));
+      else if (f.error) L.push('', `HTS facts: the script's lookup didn't run (${LOOKUP_FAILED[f.kind] || 'the lookup failed'}). Look the codes up with the entry-assistant skill if you have it, otherwise use your own HTS knowledge, and say which in the reply.`);
+    }
+    if (d.type === 'HS_CODE_REVIEW' && d.current) {
+      const guide = checklistFor({ fields: [{ label: 'HS code', current: d.current, claimed: d.pair[1] || null }] });
+      L.push('', `What to find (based on ${guide.basis}):`, ...guide.points.map(p => `- ${p}`));
+    }
+    const steps = [
+      ...g.find,
+      !d.hasShipper && /HS_CODE|VALUE|DENIED/.test(d.type) && "The shipper isn't shown (the Parties section was closed); if the goods or the party can't be pinned down without it, say so.",
+      ORDER_SKILL_STEP,
+      "Collect every red flag: anything on the page or in your research that contradicts the entry or itself, or that's missing when it should be there.",
+      'Then decide, using one of the choices on the page.',
+    ].filter(Boolean);
+    L.push('', '## How to research', ...steps.map((step, i) => `${i + 1}. ${step}`));
+    L.push('', 'Use as many searches as it takes. A thorough answer matters more than a fast one.');
+    const choiceList = d.choices.length ? d.choices.map(c => c.label).join(' | ') : 'what to do';
+    L.push('', '## Reply',
+      'Fill in this template:',
+      '- Copy the headings and labels, in this order. Replace each <…> with what you found and drop the angle brackets. Write "Not found" where you looked and found nothing.',
+      '- Keep it short: one line per bullet, no paragraphs, no greeting. Write only the final reply: no progress notes, no list of the steps or searches, and no mention of the Entry Assistant API or the skill.',
+      '- Put HTS and Chapter 99 codes in backticks, and link a source for every fact.',
+      '- The decision is one of the choices on the page, written exactly as the page writes it; for a correction, give the new value too. It must carry its proof: what shows it (which source, with its link) and which rule it meets or fails.',
+      `- The ${g.note.toLowerCase()} is what I'll paste into the page's note box: one or two plain sentences, no Markdown, that say why.`,
+      '',
+      `### ${g.label}`,
+      '**Bottom line:** <the decision and the main reason, in one line>',
+      "**What's going on:** <what was flagged or refused, and why, in plain words>",
+      '',
+      '**Red flags**',
+      '1. <each thing that doesn\'t add up, with its source; or "None found">',
+      '',
+      '**What we found**',
+      ...g.found,
+      '',
+      '**What to do**',
+      '1. <each step on the dashboard: which line and field, from what to what; or "Nothing beyond the decision">',
+      '',
+      '**Missing to be sure:** <facts that would change the decision; or "Nothing">',
+      '',
+      `**Decision:** <${choiceList}> because <the proof>.`,
+      `**${g.note}:** <one or two plain sentences for the note box>`);
+    return L.join('\n');
+  }
   /* ------------------------------------------------- dashboard: the panel */
 
   const PANEL_CSS = `
@@ -1659,6 +2139,9 @@
     .answers { display: grid; gap: 8px; margin-bottom: 8px; }
     .reply-ready { border: 2px solid var(--accent); background: var(--tint); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
     .reply-title { margin: 0 0 2px; font-weight: 600; }
+    .order-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+    .order-q { margin: 0 0 4px; font-weight: 600; }
+    .order-links { margin-top: 8px; display: grid; gap: 4px; }
     .reply-ready summary { cursor: pointer; font-size: 12px; color: var(--muted); }
     .answer-card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
     .answer-card.theirs { border-left: 3px solid var(--accent); }
@@ -1983,8 +2466,8 @@
       const also = [last.skipped.length && `Couldn't download ${last.skipped.join('; ')}.`, last.warning].filter(Boolean).join(' ');
       const say = (text, ok) => [`${text}${also ? ` ${also}` : ''}`, ok && !also];
       if (fill.login) return say('Claude asked you to sign in. Once you have, in that tab, the prompt fills in by itself.', false);
-      if (!fill.typed) return say(`Claude's message box couldn't be filled, so the prompt is on your clipboard: click the box there and press Ctrl+V.${names ? ` Then attach ${names} from the dispute page.` : ''}`, false);
-      if (!fill.attached) return say(`Claude has the prompt, but the files didn't attach: add ${names} from the dispute page.`, false);
+      if (!fill.typed) return say(`Claude's message box couldn't be filled, so the prompt is on your clipboard: click the box there and press Ctrl+V.${names ? ` Then attach ${names} from the page.` : ''}`, false);
+      if (!fill.attached) return say(`Claude has the prompt, but the files didn't attach: add ${names} from the page.`, false);
       const n = fill.files.length;
       return say(`Claude has the prompt${n ? ` and ${n} ${n === 1 ? 'file' : 'files'}` : ''}. Nothing has been sent: check it there and press Enter. Claude's answer shows up here to save once it's done.`, true);
     }
@@ -2027,6 +2510,7 @@
     async function loadFacts() {
       const s = state;
       s.facts = {};
+      if (s.data.kind === 'workOrder') return loadOrderFacts(s);
       const items = s.data.items.filter(i => {
         const hs = i.fields.find(f => /^hs code$/i.test(f.label));
         return i.inDispute && (hsCodeIn(hs?.current) || hsCodeIn(hs?.claimed));
@@ -2040,6 +2524,30 @@
         } catch (e) {
           console.warn('[Dispute Researcher] HTS lookup failed', e);
           s.facts[item.line] = { error: e.message, kind: e.kind || 'server' };
+        }
+        if (s === state) render();
+      }));
+    }
+
+    // A queue order: the HS code review's pair first, then the other codes on the page, four at most, each
+    // with what to report on the entry line and the partner agencies
+    async function loadOrderFacts(s) {
+      const d = s.data;
+      const targets = d.pair.length ? [{ current: d.pair[0], claimed: d.pair[1], from: d.pairFrom }] : [];
+      for (const c of d.codes) {
+        if (targets.length < 4 && !targets.some(x => sameCode(x.current, c.code) || (x.claimed && sameCode(x.claimed, c.code)))) targets.push({ current: c.code, from: c.from });
+      }
+      if (!targets.length) return;
+      targets.forEach((_, i) => { s.facts[i] = { loading: true }; });
+      render();
+      const review = d.type === 'HS_CODE_REVIEW';
+      await Promise.all(targets.map(async (x, i) => {
+        const item = { fields: [{ label: 'HS code', current: x.current, claimed: x.claimed || null }, { label: 'Country of origin', current: x.from || '', claimed: null }] };
+        try {
+          s.facts[i] = { data: await gatherFacts(item, { roles: review ? ['Current code', 'Suggested or corrected code'] : ['Code on the page', 'Second code'], rulings: review, extended: true }) };
+        } catch (e) {
+          console.warn('[Dispute Researcher] HTS lookup failed', e);
+          s.facts[i] = { error: e.message, kind: e.kind || 'server' };
         }
         if (s === state) render();
       }));
@@ -2071,6 +2579,10 @@
       }
       const path = location.pathname;
       setStatus('');
+      if (WORK_ORDER_PATH.test(path)) {
+        openOrder(path);
+        return;
+      }
       body.replaceChildren(h('p', { class: 'muted', text: 'Reading the dispute…' }));
       const ready = await waitFor(() => lineHeaders(document.querySelector('main') || document.body).length > 0);
       if (path !== location.pathname) return;
@@ -2100,6 +2612,25 @@
       render();
       state.factsPromise = loadFacts();
       if (state.website) checkSite();
+    }
+
+    // A queue order: one page, read generally; no lines to tick, website or documents
+    async function openOrder(path) {
+      body.replaceChildren(h('p', { class: 'muted', text: 'Reading the order…' }));
+      await waitFor(() => document.querySelector('main section h2, main h1, main button[title="Look up in the HTS"]'));
+      if (path !== location.pathname) return;
+      const data = readWorkOrder();
+      if (!data || !data.lines.length) {
+        body.replaceChildren(h('p', { class: 'err', text: "Couldn't read this order. Wait for the page to finish loading, then close and reopen this panel." }));
+        return;
+      }
+      state = { kind: 'workOrder', path, data, site: null, matches: {}, checked: {}, facts: {}, factsPromise: null, selected: new Set(), answerOpen: false, showAnswer: {}, openAnswers: {} };
+      answerInput = h('textarea', { class: 'answer', rows: 6, placeholder: "Paste Claude's whole answer here (formatting is kept as Markdown)", 'aria-label': "Claude's answer", onpaste: pasteAsMarkdown });
+      body.replaceChildren(rest);
+      startPolling();
+      syncNow();
+      render();
+      state.factsPromise = loadFacts();
     }
 
     function close() {
@@ -2147,6 +2678,8 @@
     function render() {
       const s = state;
       const d = s.data;
+      const isOrder = d.kind === 'workOrder';
+      const word = isOrder ? 'order' : 'dispute';
       // The panel only shows what the dashboard page doesn't: the site check result is one line, and the
       // HTS facts, claim details and product numbers go into the prompt without being shown here
       const matchCount = Object.values(s.matches).reduce((n, found) => n + found.length, 0);
@@ -2234,15 +2767,17 @@
         const verdicts = recordAnswer(d.disputeId, lines, text);
         s.answerOpen = false;
         s.selected = unresearchedLines(d);
-        const found = Object.entries(verdicts).map(([line, v]) => `line ${line}: ${v.verdict}`).join(', ');
-        setStatus(found ? `Answer saved for everyone on this dispute (${found}).` : "Answer saved for everyone on this dispute, but it has no verdict sentence (\"The merchant's claim is …\").", found ? 'ok' : 'warn');
+        const found = isOrder ? decisionOf(text)?.decision : Object.entries(verdicts).map(([line, v]) => `line ${line}: ${v.verdict}`).join(', ');
+        setStatus(found ? `Answer saved for everyone on this ${word} (${found}).`
+          : isOrder ? 'Answer saved for everyone on this order, but it has no decision line ("Decision: …").'
+          : "Answer saved for everyone on this dispute, but it has no verdict sentence (\"The merchant's claim is …\").", found ? 'ok' : 'warn');
         answersChanged();
       };
       const saveAnswer = () => {
         const text = answerInput.value.trim();
         if (!text) return;
         answerInput.value = '';
-        storeAnswer(text, picked.length ? picked.map(i => i.line) : inDispute.map(i => i.line));
+        storeAnswer(text, isOrder ? [] : picked.length ? picked.map(i => i.line) : inDispute.map(i => i.line));
       };
 
       // Every saved answer, newest first, folded; open one to read it formatted or copy its Markdown
@@ -2257,11 +2792,11 @@
         reply = null;
       }
       s.replyShown = reply?.at || 0;
-      const replyLines = reply && (reply.lines.length ? reply.lines : inDispute.map(i => i.line));
-      const replyVerdicts = reply && Object.entries(parseVerdicts(reply.text, replyLines)).map(([line, v]) => `line ${line}: ${v.verdict}`).join(', ');
+      const replyLines = reply && (isOrder ? [] : reply.lines.length ? reply.lines : inDispute.map(i => i.line));
+      const replyVerdicts = reply && (isOrder ? decisionOf(reply.text)?.decision || '' : Object.entries(parseVerdicts(reply.text, replyLines)).map(([line, v]) => `line ${line}: ${v.verdict}`).join(', '));
       const replyBlock = reply && h('div', { class: 'reply-ready' },
         h('p', { class: 'reply-title', text: `Claude's answer is ready${replyVerdicts ? ` (${replyVerdicts})` : ''}` }),
-        h('p', { class: 'hint', style: 'margin:0 0 6px', text: `From the chat opened ${shortDate(reply.at)}. Saving shares it with everyone on this dispute.` }),
+        h('p', { class: 'hint', style: 'margin:0 0 6px', text: `From the chat opened ${shortDate(reply.at)}. Saving shares it with everyone on this ${word}.` }),
         h('details', { open: !!s.replyPreview, ontoggle: e => { s.replyPreview = e.currentTarget.open; } },
           h('summary', { text: 'Preview' }),
           h('div', { class: 'md saved' }, renderMarkdown(reply.text))),
@@ -2271,9 +2806,11 @@
       const answerCard = a => {
         const verdicts = [...new Set(Object.values(parseVerdicts(a.text, a.lines || [])).map(v => capitalized(v.verdict)))];
         const confirming = s.confirmDelete === a.id;
+        const decision = isOrder && decisionOf(a.text);
+        const note = isOrder && noteOf(a.text);
         const summary = [
-          a.lines?.length ? `Line${a.lines.length > 1 ? 's' : ''} ${a.lines.join(', ')}` : 'Answer',
-          verdicts.length ? verdicts.join(' / ') : 'no verdict',
+          isOrder ? 'Answer' : a.lines?.length ? `Line${a.lines.length > 1 ? 's' : ''} ${a.lines.join(', ')}` : 'Answer',
+          isOrder ? decision?.decision || 'no decision' : verdicts.length ? verdicts.join(' / ') : 'no verdict',
           a.author,
           shortDate(a.createdAt),
           shared && a.pending && 'waiting to sync',
@@ -2283,6 +2820,7 @@
           h('summary', { text: summary }),
           h('div', { class: 'md saved' }, renderMarkdown(a.text)),
           h('div', { class: 'note-meta' },
+            note && noteLink('Copy note', () => copyNote(note)),
             noteLink('Copy Markdown', () => { GM_setClipboard(a.text, 'text'); setStatus('Answer copied as Markdown.', 'ok'); }),
             a.mine !== false && (confirming
               ? [h('span', { text: 'Delete this answer for everyone?' }),
@@ -2290,7 +2828,7 @@
                 noteLink('Keep', () => { s.confirmDelete = null; render(); })]
               : noteLink('Delete', () => { s.confirmDelete = a.id; render(); }))));
       };
-      const answerSection = inDispute.length > 0 && h('div', { class: 'section' },
+      const answerSection = (isOrder || inDispute.length > 0) && h('div', { class: 'section' },
         h('p', { class: 'label', text: answers.length ? `Claude's answers (${answers.length})` : "Claude's answers" }),
         syncState,
         replyBlock,
@@ -2301,7 +2839,7 @@
               h('div', { class: 'row', style: 'margin-top:6px' },
                 h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: saveAnswer }),
                 h('button', { class: 'secondary', type: 'button', text: 'Cancel', onclick: () => { s.answerOpen = false; render(); } })))
-          : h('button', { class: 'secondary', type: 'button', text: "Paste Claude's answer", title: 'Saved as Markdown and shared with everyone on this dispute.', onclick: () => { s.answerOpen = true; render(); answerInput.focus(); } }));
+          : h('button', { class: 'secondary', type: 'button', text: "Paste Claude's answer", title: `Saved as Markdown and shared with everyone on this ${word}.`, onclick: () => { s.answerOpen = true; render(); answerInput.focus(); } }));
 
       showSyncState(pad);
       // Redraws happen while lookups finish; if you're typing in a box that gets moved (the website box),
@@ -2310,7 +2848,30 @@
       const caret = active && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null;
       const scroll = body.scrollTop;
 
-      rest.replaceChildren(...[
+      // A queue order: what the page asks, the choices, the latest decision with its note, and the codes
+      const latest = isOrder && answers.find(a => decisionOf(a.text));
+      const latestDecision = latest && decisionOf(latest.text);
+      const latestNote = latest && noteOf(latest.text);
+      const orderSection = isOrder && h('div', { class: 'section' },
+        h('p', { class: 'label', text: d.label }),
+        h('div', { class: 'order-card' },
+          d.question && h('p', { class: 'order-q', text: d.question }),
+          d.summary && h('p', { class: 'hint', style: 'margin:0', text: d.summary }),
+          d.choices.length > 0 && h('p', { class: 'hint', text: `Choices on the page: ${d.choices.map(c => c.label).join(' · ')}` }),
+          latestDecision && h('p', { class: 'verdict', style: 'margin-top:8px', text: `Claude: ${latestDecision.decision} · ${latest.author} · ${shortDate(latest.createdAt)}` }),
+          latestNote && noteLink(`Copy the ${guideFor(d.type).note.toLowerCase()}`, () => copyNote(latestNote))),
+        (d.pair.length === 2 || d.codes.length > 0) && h('div', { class: 'order-links' },
+          d.pair.length === 2 && h('div', {}, noteLink(`Compare ${d.pair[0]} with ${d.pair[1]} in Entry Assistant`, () => showEntry({ codes: d.pair, from: d.pairFrom }))),
+          d.codes.slice(0, 4).map(c => h('div', {}, noteLink(`Look up ${c.code}${c.from ? ` (made in ${regionName(c.from)})` : ''} in Entry Assistant`, () => showEntry({ codes: [c.code], from: c.from }))))),
+        !d.hasShipper && /HS_CODE|VALUE|DENIED/.test(d.type) && h('p', { class: 'hint', text: 'Open Parties and Items on the page before you send, so Claude gets the shipper and every line.' }),
+        !WORK_ORDER_GUIDES[d.type] && h('p', { class: 'hint warn', text: `No research guide for ${d.label} yet, so Claude gets the page with a general brief.` }));
+      const tokenHint = !GM_getValue(TOKEN_KEY, '') && h('p', { class: 'hint warn' },
+        "The HTS lookups for Claude's prompt are off until the Entry Assistant token is saved in ",
+        noteLink('Settings', () => setView('settings')), '.');
+
+      if (isOrder) {
+        rest.replaceChildren(...[orderSection, answerSection, tokenHint].filter(Boolean));
+      } else rest.replaceChildren(...[
         h('div', { class: 'section' },
           h('p', { class: 'label', text: 'Lines to research' }),
           inDispute.length > 0
@@ -2328,9 +2889,7 @@
         docsBlock,
         valueHint,
         answerSection,
-        !GM_getValue(TOKEN_KEY, '') && h('p', { class: 'hint warn' },
-          "The HTS lookups for Claude's prompt are off until the Entry Assistant token is saved in ",
-          noteLink('Settings', () => setView('settings')), '.'),
+        tokenHint,
       ].filter(Boolean));
 
       body.scrollTop = scroll;
@@ -2343,12 +2902,21 @@
     // Re-read the page right before building the prompt, so claims and download links are current,
     // then keep only the ticked lines (plus order-level documents)
     function freshData() {
+      if (state.data.kind === 'workOrder') {
+        const page = readWorkOrder();
+        return page && page.workOrderId === state.data.workOrderId && page.lines.length ? page : state.data;
+      }
       const page = extractDispute();
       const d = page && page.disputeId === state.data.disputeId && page.items.length ? page : state.data;
       const items = d.items.filter(i => i.inDispute && state.selected.has(i.line));
       if (!items.length) throw new Error('Tick at least one line to research.');
       return { ...d, items };
     }
+    const promptFor = (d, names) => (d.kind === 'workOrder' ? buildWorkOrderPrompt(d, state) : buildPrompt(d, state, names));
+    const copyNote = note => {
+      GM_setClipboard(note, 'text');
+      setStatus(`Note copied. Paste it into the note box on the page: "${note}"`, 'ok');
+    };
     const selectedDocs = d => [...d.items.flatMap(i => i.docs), ...d.orderDocs].filter(doc => state.checked[doc.name]);
 
     async function run(action) {
@@ -2374,7 +2942,7 @@
       await waitForFacts();
       const d = freshData();
       const names = selectedDocs(d).map(doc => doc.name);
-      GM_setClipboard(buildPrompt(d, state, names), 'text');
+      GM_setClipboard(promptFor(d, names), 'text');
       markSent(d.disputeId, d.items);
       render();
       const warning = lookupWarning();
@@ -2405,7 +2973,7 @@
           skipped.push(`${doc.name} (${e.message})`);
         }
       }
-      const prompt = buildPrompt(d, state, files.map(f => f.name));
+      const prompt = promptFor(d, files.map(f => f.name));
       const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
       const lines = d.items.map(i => i.line);
       GM_setValue(HANDOFF_PREFIX + id, { id, createdAt: Date.now(), disputeId: d.disputeId, lines, prompt, files });
@@ -2451,7 +3019,7 @@
     // While the site doesn't allow being shown in the dashboard, the click goes to the dashboard as before.
     window.addEventListener('click', e => {
       const button = e.target?.closest?.('button[title="Look up in the HTS"]');
-      if (!button || e.altKey || !DISPUTE_PATH.test(location.pathname)) return;
+      if (!button || e.altKey || !isCasePage()) return;
       if (entryFrameCheck?.result === false) {
         entryFrameable(); // asks again if it's been a minute, for the next click
         return;
@@ -2467,7 +3035,7 @@
       ui?.keepAttached();
       if (location.pathname === lastPath) return;
       lastPath = location.pathname;
-      if (DISPUTE_PATH.test(location.pathname)) {
+      if (isCasePage()) {
         entryFrameable(); // known by the time a code is clicked
         ui = ui || createPanel();
         ui.reset();
@@ -2534,7 +3102,7 @@
       if (!found || found.streaming || found.raw === lastRaw) return;
       lastRaw = found.raw;
       const text = htmlToMarkdown(found.el) || found.raw;
-      if (!VERDICT_RE.test(text)) return;
+      if (!VERDICT_RE.test(text) && !decisionOf(text)) return;
       GM_setValue(REPLY_PREFIX + handoff.disputeId, { handoffId: handoff.id, lines: handoff.lines || [], text, at: Date.now() });
     }, 3000);
   }

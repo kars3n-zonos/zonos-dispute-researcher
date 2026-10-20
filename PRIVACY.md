@@ -6,13 +6,14 @@ It has no ads and no analytics. It never sells data, and it never uses data for 
 
 ## What it reads
 
-- **The dispute page you have open** on brokerage.dashboard.zonos.com: the items, the merchant's claims, and the dispute's documents. When you click an HS code on the page, it reads that code to open it in the Entry Assistant tab.
+- **The dispute or Entry Writer Queue order you have open** on brokerage.dashboard.zonos.com: the items, the merchant's claims and the dispute's documents, or what the order page shows. When you click an HS code on the page, it reads that code to open it in the Entry Assistant tab.
 - **The merchant's website**, but only the site you enter in the panel. It fetches public pages and product search results, and never sends your cookies.
 - **claude.ai**, only in the tab that Open in Claude opens. It fills the message box there and keeps a copy of Claude's finished answer on your computer, so the panel can offer to save it. Nothing is shared until you click Save answer.
 
 ## Where data goes
 
 - **claude.ai.** Only when you click Open in Claude: the research prompt and the documents you leave ticked. They go into your own Claude chat and are not sent until you press Enter.
+  - For an Entry Writer Queue order, the prompt carries what the order page shows, except tracking numbers, the consignee, the activity log and staff names; the shipper only by company name, country and email domain. For a denied-party review that includes the screened party's name and address, since that's what is being checked.
 - **The Entry Assistant API** (entry.kars3n.com). For HTS lookups, it sends the HS codes and countries of origin on the dispute, using the token you enter under Settings.
 - **The Entry Assistant site** (entry.kars3n.com), shown in the panel's Entry Assistant tab. Its address carries the HS codes being looked up and the country of origin, and nothing else from the dispute. The dashboard's address isn't sent with it. To know whether the site can be shown inside the dashboard, the script also loads the site's home page once and reads its headers.
 - **The notes server** (notes.kars3n.com), which keeps the saved Claude answers for each dispute so coworkers can see them (and the notes written in the panel before it dropped its notes box):
