@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.8.0
+// @version      7.9.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -38,6 +38,11 @@
   // Any single dispute page; the list page (/duty-disputes) doesn't get the button
   const DISPUTE_PATH = /^\/duty-disputes\/[^/]+\/?$/i;
   const HANDOFF_PREFIX = 'zdr:handoff:';
+  // The case chat. Each turn runs in the asking person's own claude.ai; the thread is kept on the case in Notion
+  // (and on this computer), so anyone can see it and carry on in their own Claude.
+  const CHAT_URL_PREFIX = 'zdr:chaturl:';       // per case: this person's claude.ai chat for it
+  const CHAT_REPLY_PREFIX = 'zdr:chatreply:';   // per chat handoff: { caseId, text, chatUrl, at } or { failed }
+  const CHAT_LOG_PREFIX = 'zdr:chatlog:';       // per case: this computer's copy of the thread
   const SITE_PREFIX = 'zdr:site:';
   const PANEL_WIDTH_KEY = 'zdr:panelWidth';
   const HANDOFF_TTL_MS = 30 * 60 * 1000;
@@ -147,7 +152,7 @@
   const CONFIG_DEFAULTS = {
     entryUrl: TEAM.entryUrl || 'https://entry.kars3n.com',   // the Entry Assistant site
     projectsDs: TEAM.projectsDs || '', tasksDs: TEAM.tasksDs || '', notionUser: '',   // Notion case tracking
-    routineId: TEAM.routineId || '', routineToken: TEAM.routineToken || '',   // Claude Code cloud research
+    routineId: '', routineToken: '',        // Claude Code cloud research: each person's own routine, never the team's
     notesUrl: TEAM.notesUrl || '',                           // shared answers server
   };
   const cfg = () => {
@@ -2936,17 +2941,13 @@
       return { task, taskId: task.id, page: page.url, session: f.session, fireError: f.fireError, limited: f.limited };
     }
 
-    // The team copy's routine runs on its owner's Claude account, so its session pages open only for the owner:
-    // everyone else gets the answer in Notion and the panel, and no link they can't open
-    const sharedRoutine = () => !!TEAM.routineId && cfg().routineId === TEAM.routineId && !!TEAM.owner && D.myName !== TEAM.owner;
+    // Who's signed in to the portal, for the case chat's names
     setTimeout(() => portalName().then(n => { D.myName = n; changed(); }), 0);   // after the portal helpers exist
 
     // Starts the cloud research session for a research task; the session URL goes on the case as its Chat Link
     async function fireResearch(taskId, pageId, { openTab = true } = {}) {
       const { routineId, routineToken } = cfg();
       if (!routineId || !routineToken) return { fireError: 'no routine set up' };
-      D.myName = D.myName || await portalName();
-      if (sharedRoutine()) openTab = false;
       try {
         const r = await gmRequest({
           method: 'POST', url: `https://api.anthropic.com/v1/claude_code/routines/${routineId}/fire`, timeout: 30000,
@@ -2960,7 +2961,7 @@
             await notion('PATCH', `/pages/${pageId}`, { properties: { 'Chat Link': { url: j.claude_code_session_url } } }).catch(e => console.warn('[Dispute Desk]', e));
             await addLog(pageId, [{ text: `${stamp()} (portal): Cloud research session started.`, url: j.claude_code_session_url }]).catch(e => console.warn('[Dispute Desk]', e));
           }
-          return { session: sharedRoutine() ? '' : j.claude_code_session_url };
+          return { session: j.claude_code_session_url };
         }
         return { fireError: r.status === 429 ? 'the routine run limit was hit' : `the routine answered ${r.status}`, limited: r.status === 429 };
       } catch (e) { return { fireError: e.message }; }
@@ -3065,7 +3066,6 @@
           D.row && h('a', { href: D.row.url, target: '_blank', rel: 'noopener', text: 'Notion' }),
           // The Claude Code session for this case: its Chat Link in Notion, or the research session just started
           (() => {
-            if (sharedRoutine()) return null;   // the shared routine's sessions open only for its owner
             const chat = (D.links?.row === D.row?.id && D.links.chat) || D.row?.properties?.['Chat Link']?.url || (D.research || GM_getValue(`desk:research:${ent.id}`, null))?.session;
             return chat ? h('a', { href: chat, target: '_blank', rel: 'noopener', text: 'Claude chat' }) : null;
           })()),
@@ -3119,6 +3119,65 @@
       changed();
       return D.row;
     }
+    /* ---- the case chat: a "Case chat" toggle on the case page, one block per message:
+       "Q — <who> · <yyyy-mm-dd hh:mm>" or "A — Claude, in <who>'s chat · <…>", then the text */
+    const CHAT_TITLE = 'Case chat';
+    async function childrenOf(id) {
+      const out = [];
+      let cursor = '';
+      do {
+        const r = await notion('GET', `/blocks/${id}/children?page_size=100${cursor ? `&start_cursor=${cursor}` : ''}`);
+        out.push(...(r.results || []));
+        cursor = r.has_more ? r.next_cursor : '';
+      } while (cursor);
+      return out;
+    }
+    const plainOf = b => (b?.[b.type]?.rich_text || []).map(t => t.plain_text).join('');
+    async function chatToggle(pageId, create) {
+      const find = async () => (await childrenOf(pageId)).find(b => b.type === 'toggle' && plainOf(b).trim() === CHAT_TITLE);
+      let t = await find();
+      if (!t && create) {
+        await addAboveLog(pageId, [{ object: 'block', type: 'toggle', toggle: { rich_text: [{ type: 'text', text: { content: CHAT_TITLE }, annotations: { bold: true } }], color: 'blue_background' } }]);
+        t = await find();
+      }
+      return t || null;
+    }
+    const CHAT_HEAD = /^(Q|A) — (.+?) · (\d{4}-\d\d-\d\d \d\d:\d\d)\n?/;
+    // The thread on the case in Notion, oldest first; null when Notion isn't on or the case has no chat yet
+    async function loadChat() {
+      if (!enabled() || !D.row) return null;
+      const t = await chatToggle(D.row.id, false);
+      if (!t) return [];
+      return (await childrenOf(t.id)).map(plainOf).map(s => {
+        const m = CHAT_HEAD.exec(s);
+        return m && { role: m[1], who: m[2].replace(/^Claude, in (.+)'s chat$/, '$1'), at: m[3], text: s.slice(m[0].length).trim() };
+      }).filter(Boolean);
+    }
+    // Adds messages to the case's chat (the case and its chat are made if needed); false when Notion is off
+    async function appendChat(turns) {
+      if (!enabled() || !D.ent) return false;
+      if (!D.row) {
+        const ctx = caseContext(D.ent);
+        const page = await apply(ctx, { log: `Case started for a chat question in Tools (${midSentence(ctx.kind)} ${ctx.id}).`, create: true, explicit: true });
+        if (!page) return false;
+        D.row = page;
+        D.state = 'tracked';
+      }
+      const t = await chatToggle(D.row.id, true);
+      if (!t) return false;
+      const block = turn => {
+        const head = turn.role === 'Q' ? `Q — ${turn.who || 'someone'} · ${turn.at}` : `A — Claude, in ${turn.who || 'someone'}'s chat · ${turn.at}`;
+        const parts = chunks(turn.text || '', 1900).slice(0, 98);
+        return { object: 'block', type: turn.role === 'Q' ? 'paragraph' : 'quote', [turn.role === 'Q' ? 'paragraph' : 'quote']: { rich_text: [
+          { type: 'text', text: { content: `${head}\n` }, annotations: { bold: true, color: turn.role === 'Q' ? 'blue' : 'orange' } },
+          ...parts.map(p => ({ type: 'text', text: { content: p } })),
+        ] } };
+      };
+      await notion('PATCH', `/blocks/${t.id}/children`, { children: turns.map(block) });
+      changed();
+      return true;
+    }
+
     // The workspace's people, so Settings can offer "pick yourself" for Assigned
     async function people() {
       const r = await notion('GET', '/users?page_size=100');
@@ -3133,7 +3192,11 @@
         return txt('Final answer') || txt('Claude Final Answer');
       },
       finalIsOwn: () => !!(D.row?.properties?.['Final answer']?.rich_text || []).length,
-      setOwnAnswer,
+      setOwnAnswer, loadChat, appendChat,
+      hasRow: () => !!D.row,
+      myName: () => D.myName || '',
+      // The case in plain lines (the portal's own data), for a chat that starts without the research prompt
+      caseFacts: () => { try { return D.ent ? caseContext(D.ent).facts : []; } catch { return []; } },
       dryRun, testMode, onRoute, startCase, setPageData, onFacts, onSent, onAnswer, queueResearch, pollAnswers, card, testKey, people,
       subscribe: fn => listeners.add(fn),
       setImporter: fn => { importer = fn; },
@@ -4462,6 +4525,11 @@
     .setting-body { padding: 0 12px 12px; }
     .final-card { border: 2px solid var(--accent); background: var(--tint); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
     .final-text { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.4; }
+    .chat { display: grid; gap: 6px; margin-bottom: 8px; }
+    .chat-turn { border-radius: 8px; padding: 7px 10px; }
+    .chat-turn.q { background: var(--soft); margin-left: 24px; }
+    .chat-turn.a { border: 1px solid var(--line); margin-right: 12px; }
+    .chat-who { margin: 0 0 3px; font-size: 11px; color: var(--muted); }
     .tasks { display: grid; gap: 4px; margin-top: 8px; }
     .task-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 12.5px; }
     .form { display: grid; gap: 10px; }
@@ -5201,6 +5269,7 @@
     // While the panel is open, coworkers' answers are picked up every 15 seconds and when you come back to the tab
     const NOTES_POLL_MS = 15000;
     let pollTimer = null;
+    let chatTimer = null;
     // The panel is only redrawn when the answers changed, so reading or selecting text in an open answer
     // isn't interrupted every 15 seconds. The first sync also re-picks the lines to tick, since coworkers'
     // answers may have just arrived.
@@ -5242,10 +5311,13 @@
           desk.pollAnswers();
         }
       }, NOTES_POLL_MS);
+      // Chat replies come back faster than the shared answers sync
+      chatTimer = setInterval(() => { if (state && !panel.hidden) chatNews(); }, 3000);
     }
     function stopPolling() {
       clearInterval(pollTimer);
-      pollTimer = null;
+      clearInterval(chatTimer);
+      pollTimer = chatTimer = null;
     }
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && state && !panel.hidden) syncNow();
@@ -5267,8 +5339,10 @@
     // Coming back from the Claude tab: it may have filled the message box and kept Claude's answer
     window.addEventListener('focus', () => {
       if (!state || panel.hidden) return;
+      if (state.chat) state.chat.fromNotion = false;   // teammates may have added to the chat: read it again
       render();
       claudeTabNews();
+      chatNews();
     });
 
     const setStatus = (text, kind = '') => { status.textContent = text; status.className = `status ${kind}`; };
@@ -5742,10 +5816,34 @@
         "The HTS lookups for Claude's prompt are off until the Entry Assistant token is saved in ",
         noteLink('Settings', () => setView('settings')), '.');
 
+      // The case chat: the whole thread (from Notion once the case is there), and the next question, which goes
+      // to your own claude.ai. The thread loads again when the case turns up in Notion or you come back to the tab.
+      if (!s.chat || s.chat.id !== d.disputeId) {
+        s.chat = { id: d.disputeId, turns: GM_getValue(CHAT_LOG_PREFIX + d.disputeId, []), pending: {}, input: null };
+        loadCaseChat();
+      } else if (desk.hasRow() && !s.chat.fromNotion && !s.chat.loading) loadCaseChat();
+      const c = s.chat;
+      const chatInput = c.input || (c.input = h('textarea', { class: 'answer', rows: 3, 'aria-label': 'Your question for Claude', placeholder: 'Ask Claude about this case…',
+        onkeydown: e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(sendChat); } } }));
+      const shownTurns = c.showAll ? c.turns : c.turns.slice(-6);
+      const chatSection = h('div', { class: 'section' },
+        h('p', { class: 'label', text: 'Chat' }),
+        c.turns.length > shownTurns.length && noteLink(`Show all ${c.turns.length} messages`, () => { c.showAll = true; render(); }),
+        shownTurns.length
+          ? h('div', { class: 'chat' }, shownTurns.map(t => h('div', { class: `chat-turn ${t.role === 'Q' ? 'q' : 'a'}` },
+              h('p', { class: 'chat-who', text: t.role === 'Q' ? `${t.who} · ${t.at}` : `Claude, in ${t.who}'s chat · ${t.at}` }),
+              t.role === 'Q' ? h('p', { style: 'margin:0;white-space:pre-wrap', text: t.text }) : h('div', { class: 'md saved' }, renderMarkdown(t.text)))))
+          : h('p', { class: 'hint', text: c.loading ? 'Loading the chat…' : `No questions on this ${word} yet.` }),
+        Object.keys(c.pending).length > 0 && h('p', { class: 'hint', text: "Waiting for Claude's reply in your claude.ai tab…" }),
+        chatInput,
+        h('div', { class: 'row', style: 'margin-top:6px' },
+          h('button', { class: 'secondary', type: 'button', text: 'Send to my Claude', title: 'Ctrl+Enter', onclick: () => run(sendChat) })),
+        h('p', { class: 'hint', text: `Runs in your own claude.ai. ${desk.enabled() ? `The thread is saved to the case in Notion, so anyone on this ${word} can see it and carry on in their own Claude.` : 'Saved on this computer (Notion tracking is off).'}` }));
+
       desk.setPageData(d);
       const deskCard = desk.card(noteLink);
       if (isOrder) {
-        rest.replaceChildren(...[deskCard, orderSection, answerSection, tokenHint].filter(Boolean));
+        rest.replaceChildren(...[deskCard, orderSection, answerSection, chatSection, tokenHint].filter(Boolean));
       } else rest.replaceChildren(...[
         deskCard,
         h('div', { class: 'section' },
@@ -5765,6 +5863,7 @@
         docsBlock,
         valueHint,
         answerSection,
+        chatSection,
         tokenHint,
       ].filter(Boolean));
 
@@ -5894,6 +5993,97 @@
       const warning = lookupWarning();
       if (skipped.length) setStatus(`Opened Claude, but couldn't download: ${skipped.join('; ')}.${warning}`, 'warn');
       else setStatus(`Opened Claude in a new tab. The prompt and files go into its message box; nothing is sent until you press Enter there.${warning}`, warning ? 'warn' : 'ok');
+    }
+
+    /* ---- the case chat: each question runs in your own claude.ai (your seat, your login), and the thread is
+       kept on the case in Notion so anyone opening the case sees it and can carry on in their own Claude */
+    const chatStamp = () => new Date().toLocaleString('sv-SE', { hour12: false }).slice(0, 16);
+    const chatWho = () => desk.myName() || GM_getValue(AUTHOR_KEY, '') || 'Me';
+    const turnKey = t => `${t.role}|${t.at}|${(t.text || '').slice(0, 60)}`;
+    // Notion has everyone's turns; this computer may hold some Notion didn't take yet
+    function mergeTurns(remote, local) {
+      const seen = new Set(remote.map(turnKey));
+      return [...remote, ...local.filter(t => !seen.has(turnKey(t)))].sort((a, b) => a.at.localeCompare(b.at));
+    }
+    async function loadCaseChat() {
+      const s = state;
+      const c = s?.chat;
+      if (!c || c.loading) return;
+      c.loading = true;
+      try {
+        const remote = await desk.loadChat();
+        if (remote) {
+          c.turns = mergeTurns(remote, c.turns);
+          GM_setValue(CHAT_LOG_PREFIX + c.id, c.turns.slice(-200));
+        }
+      } catch (e) { console.warn('[Tools] case chat', e); }
+      c.fromNotion = desk.hasRow();
+      c.loading = false;
+      if (state === s) render();
+    }
+    // A new chat (yours, on this case) starts with what Claude needs: the case, the research answer and the
+    // thread so far. Party names and tracking numbers are left out, as in the research prompts.
+    function chatSeed(d, turns, question) {
+      const L = ["I'm a customs broker at Zonos, picking up a Claude chat about one case. You don't have the earlier conversation, so here's what you need.", '',
+        '## The case', `- ${d.kind === 'workOrder' ? d.label : 'Duty dispute'}`];
+      for (const f of desk.caseFacts().filter(f => !/^(consignee|receiver|sender|importer|buyer|tracking)/i.test(f)).slice(0, 40)) L.push(`- ${f}`);
+      const newest = visibleAnswers(loadNotes(d.disputeId))[0];
+      if (newest) L.push('', `## The research answer (${[newest.author, shortDate(newest.createdAt)].filter(Boolean).join(' · ')})`, newest.text.slice(0, 12000));
+      if (turns.length) {
+        L.push('', '## The chat so far');
+        for (const t of turns.slice(-30)) L.push('', t.role === 'Q' ? `**${t.who} asked (${t.at}):** ${t.text}` : `**Claude answered (${t.at}):** ${t.text.slice(0, 6000)}`);
+      }
+      L.push('', '## My question', question, '',
+        'Answer it directly. Check facts on the web and with the entry-assistant skill when they matter. If it calls for a decision, make one (never "waiting"), and give anything I need to paste into the portal as plain text.');
+      return L.join('\n');
+    }
+    async function sendChat() {
+      const s = state;
+      const c = s?.chat;
+      const question = (c?.input?.value || '').trim();
+      if (!question) return;
+      const chatUrl = GM_getValue(CHAT_URL_PREFIX + c.id, '');
+      const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      const prompt = chatUrl ? question : chatSeed(s.data, c.turns, question);
+      GM_setValue(HANDOFF_PREFIX + id, { id, createdAt: Date.now(), disputeId: c.id, lines: [], prompt, files: [], chat: true });
+      const turn = { role: 'Q', who: chatWho(), at: chatStamp(), text: question };
+      c.turns = [...c.turns, turn];
+      GM_setValue(CHAT_LOG_PREFIX + c.id, c.turns.slice(-200));
+      c.pending[id] = { at: Date.now() };
+      c.input.value = '';
+      GM_openInTab(`${chatUrl || 'https://claude.ai/new'}#zdr=${id}`, { active: true, insert: true, setParent: true });
+      setStatus(chatUrl ? 'Sent to your Claude chat for this case. The reply comes back here and onto the case in Notion.'
+        : 'Started your Claude chat for this case, with the case and the conversation so far. The reply comes back here and onto the case in Notion.', 'ok');
+      render();
+      desk.appendChat([turn]).catch(e => setStatus(`Asked, but Notion said: ${e.message}`, 'warn'));
+    }
+    // Replies the Claude tabs left for this case, and any question that couldn't be sent
+    function chatNews() {
+      const c = state?.chat;
+      if (!c || panel.hidden) return;
+      for (const key of GM_listValues()) {
+        if (!key.startsWith(CHAT_REPLY_PREFIX)) continue;
+        const r = GM_getValue(key, null);
+        if (!r || r.caseId !== c.id) continue;
+        GM_deleteValue(key);
+        delete c.pending[key.slice(CHAT_REPLY_PREFIX.length)];
+        if (r.failed) { setStatus(r.failed, 'warn'); continue; }
+        if (r.chatUrl) GM_setValue(CHAT_URL_PREFIX + c.id, r.chatUrl);
+        const turn = { role: 'A', who: chatWho(), at: chatStamp(), text: r.text };
+        c.turns = [...c.turns, turn];
+        GM_setValue(CHAT_LOG_PREFIX + c.id, c.turns.slice(-200));
+        desk.appendChat([turn]).catch(e => setStatus(`Claude replied, but Notion said: ${e.message}`, 'warn'));
+        render();
+      }
+      for (const [id, p] of Object.entries(c.pending)) {
+        const f = GM_getValue(FILL_PREFIX + id, null);
+        if (!f || p.told) continue;
+        if (f.login) { p.told = true; setStatus('Claude asked you to sign in. Once you have, your question goes in by itself; press Enter there if it isn\'t sent.', 'warn'); }
+        else if (f.sent === false) {
+          p.told = true;
+          setStatus(f.typed ? "Your question is in Claude's message box but wasn't sent: press Enter there. The reply still comes back here." : "Claude's message box couldn't be filled, so your question is on your clipboard: paste it there and press Enter.", 'warn');
+        } else if (f.sent) { p.told = true; GM_deleteValue(FILL_PREFIX + id); }
+      }
     }
 
     return {
@@ -6030,7 +6220,7 @@
   // Fill reports and kept answers go once the dashboard has used them, or after a week
   function purgeOldReports() {
     for (const key of GM_listValues()) {
-      if (!key.startsWith(FILL_PREFIX) && !key.startsWith(REPLY_PREFIX)) continue;
+      if (!key.startsWith(FILL_PREFIX) && !key.startsWith(REPLY_PREFIX) && !key.startsWith(CHAT_REPLY_PREFIX)) continue;
       const v = GM_getValue(key, null);
       if (!v || Date.now() - (v.at || 0) > REPORT_TTL_MS) GM_deleteValue(key);
     }
@@ -6039,12 +6229,14 @@
   // Claude's latest reply on the page, as Markdown. claude.ai's markup changes, so several markers are
   // tried, newest message first, and our own prompt is skipped.
   const ANSWER_SELECTORS = ['[data-is-streaming]', '.font-claude-response', '.font-claude-message', '[data-testid="assistant-message"]'];
-  function latestAnswer() {
+  // `minLength`: replies this short or shorter are skipped (a chat reply can be short); `own`: our own message
+  function latestAnswer(minLength = 40, own = '') {
+    const mine = own.trim().slice(0, 60);
     for (const sel of ANSWER_SELECTORS) {
       const els = document.querySelectorAll(sel);
       for (let i = els.length - 1; i >= 0; i--) {
         const raw = (els[i].textContent || '').trim();
-        if (raw.length <= 40 || raw.includes('## How to research') || raw.startsWith("I'm a customs broker at Zonos")) continue;
+        if (raw.length <= minLength || raw.includes('## How to research') || raw.startsWith("I'm a customs broker at Zonos") || (mine && raw.startsWith(mine))) continue;
         return { el: els[i], raw, streaming: !!els[i].closest('[data-is-streaming="true"]') };
       }
     }
@@ -6151,6 +6343,51 @@
     return true;
   }
 
+  // Presses claude.ai's send button (or Enter in the box) and says whether the message went
+  const SEND_SELECTORS = ['button[aria-label="Send message"]', 'button[aria-label*="Send" i]', 'fieldset button[type="submit"]'];
+  async function sendComposer() {
+    const button = await waitFor(() => SEND_SELECTORS.map(s => document.querySelector(s)).find(b => b && !b.disabled), { timeout: 8000 });
+    const before = (findComposer()?.innerText ?? findComposer()?.value ?? '').trim().length;
+    if (button) button.click();
+    else findComposer()?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, cancelable: true }));
+    await sleep(1500);
+    const after = (findComposer()?.innerText ?? findComposer()?.value ?? '').trim().length;
+    return before > 0 && after < before;
+  }
+
+  // The chat's own address, once claude.ai has given the new chat one, so this person's next question on the
+  // case goes to the same chat
+  function rememberChat(handoff) {
+    const end = Date.now() + 10 * 60 * 1000;
+    const timer = setInterval(() => {
+      if (/^\/chat\/[\w-]+/.test(location.pathname)) {
+        GM_setValue(CHAT_URL_PREFIX + handoff.disputeId, location.origin + location.pathname);
+        clearInterval(timer);
+      } else if (Date.now() > end) clearInterval(timer);
+    }, 2000);
+  }
+
+  // A chat question's answer: the first finished reply that wasn't on the page before it was sent
+  function catchChatReply(handoff, before) {
+    let last = '';
+    const end = Date.now() + 30 * 60 * 1000;
+    const timer = setInterval(() => {
+      if (Date.now() > end) {
+        clearInterval(timer);
+        GM_setValue(CHAT_REPLY_PREFIX + handoff.id, { caseId: handoff.disputeId, failed: 'No reply came back within 30 minutes.', at: Date.now() });
+        return;
+      }
+      const found = latestAnswer(0, handoff.prompt);
+      if (!found || found.streaming || found.raw === before) return;
+      if (found.raw !== last) { last = found.raw; return; }   // settled: the same text twice in a row
+      clearInterval(timer);
+      GM_setValue(CHAT_REPLY_PREFIX + handoff.id, {
+        caseId: handoff.disputeId, text: htmlToMarkdown(found.el) || found.raw, at: Date.now(),
+        chatUrl: /^\/chat\//.test(location.pathname) ? location.origin + location.pathname : '',
+      });
+    }, 2500);
+  }
+
   function initClaude() {
     purgeOldHandoffs();
     purgeOldReports();
@@ -6160,9 +6397,20 @@
     const handoff = id ? GM_getValue(HANDOFF_PREFIX + id, null) : null;
     tabPending.set(handoff ? id : '');
     if (!handoff) return;
-    fillFromHandoff(handoff).then(done => {
+    fillFromHandoff(handoff).then(async done => {
       if (!done) return;
       tabPending.set('');
+      if (handoff.disputeId) rememberChat(handoff);
+      // A chat question was written in Tools and sent from there, so it's sent here too, and its reply goes back.
+      // In an existing chat the old answers load first, so the newest one isn't taken for the reply.
+      if (handoff.chat) {
+        if (/^\/chat\//.test(location.pathname)) await waitFor(() => latestAnswer(0, handoff.prompt), { timeout: 15000 });
+        const before = latestAnswer(0, handoff.prompt)?.raw || '';
+        const sent = await sendComposer().catch(() => false);
+        GM_setValue(FILL_PREFIX + handoff.id, { ...GM_getValue(FILL_PREFIX + handoff.id, {}), sent, at: Date.now() });
+        catchChatReply(handoff, before);
+        return;
+      }
       if (handoff.disputeId) keepAnswers(handoff);
     });
   }
