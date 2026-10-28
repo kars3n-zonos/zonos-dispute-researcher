@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.6.0
+// @version      7.6.1
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -4350,8 +4350,8 @@
     window.addEventListener('resize', placeBubble);
     // The other launcher: an orange Tools button at the bottom of the portal's sidebar, above References.
     // It lives in the page, so it's put back whenever the portal redraws its sidebar.
-    const LAUNCHER_KEY = 'zt:launcher';   // 'bubble' | 'sidebar'
-    const launcherMode = () => GM_getValue(LAUNCHER_KEY, 'bubble');
+    const LAUNCHER_KEY = 'zt:launcher';   // 'sidebar' (the default) | 'bubble'
+    const launcherMode = () => GM_getValue(LAUNCHER_KEY, 'sidebar');
     const sideBtn = h('button', { type: 'button', id: 'zt-side-launch', 'aria-label': 'Open Tools', title: 'Tools (\\ to toggle)',
       class: 'flex w-full items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors',
       style: 'border-color:#f59e0b;color:#f59e0b;background:rgba(245,158,11,.10);font-weight:600;cursor:pointer',

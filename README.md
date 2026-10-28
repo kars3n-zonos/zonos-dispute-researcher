@@ -18,7 +18,7 @@ For the maintainer: raise `@version` with every change pushed to `main`, or Tamp
 
 ## Opening Tools
 
-- **The button:** an orange **⚒ Tools** bubble you can drag anywhere, or an orange **Tools** button in the sidebar above References. Pick one in Settings.
+- **The button:** an orange **Tools** button in the sidebar above References (the default), or an orange **⚒ Tools** bubble you can drag anywhere. Pick one in Settings.
 - **`\` key:** opens and closes it.
 - **Where it opens:** as an overlay beside the button. Drag the edge away from the button to resize it. The ◫ button docks it side by side with the page, and ⧉ floats it again.
 - **Header:**
