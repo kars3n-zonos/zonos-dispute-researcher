@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.9.0
+// @version      7.9.1
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -4762,8 +4762,12 @@
       say(backupNote, 'Copied, keys included. Keep it private: anyone with it can use your keys.', 'warn');
     };
     const importSetup = () => {
+      // The block can come with text around it (pasted from a note or a file): take the { … } in the middle
+      const raw = importBox.value;
+      const from = raw.indexOf('{');
+      const to = raw.lastIndexOf('}');
       let s;
-      try { s = JSON.parse(importBox.value); } catch { say(backupNote, "That isn't a setup block.", 'err'); return; }
+      try { s = JSON.parse(from >= 0 && to > from ? raw.slice(from, to + 1) : raw); } catch { say(backupNote, "That isn't a setup block. Copy everything from the first { to the last } and paste it again.", 'err'); return; }
       if (!s || s.zonosToolsSetup !== 1) { say(backupNote, "That isn't a setup block.", 'err'); return; }
       if (s.entryToken) GM_setValue(TOKEN_KEY, cleanToken(s.entryToken));
       if (s.notionKey) desk.key.set(clean(s.notionKey));
