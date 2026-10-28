@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.9.1
+// @version      7.9.2
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -2756,6 +2756,36 @@
       await notion('PATCH', `/pages/${page.id}`, { properties: { Resolution: { rich_text: resolutionText(text, await notionIdFor(name), name) } } });
       if (wo.resolutionNote) await addLog(page.id, [`${stamp()} (portal): Resolution note: ${wo.resolutionNote}`]);
     }
+    // A claimed case gets a "Work: …" task in Tasks under whoever claimed it (Assignee when they're in Notion,
+    // otherwise their portal name in Claimed by), due when the work order is. Claimed again by someone else, the
+    // same task moves to them; released, it goes back to Not started with nobody on it; resolved, closeTasks
+    // marks it Done. (Research requests are "Research: …" tasks; nothing that picks those up takes these.)
+    async function claimTask(page, ctx, wo, assign) {
+      if (!TASKS()) return;
+      const name = await portalName();
+      const me = await notionIdFor(name);
+      const open = ((await notion('POST', `/data_sources/${TASKS()}/query`, { filter: { and: [
+        { property: 'Project', relation: { contains: page.id } }, { property: 'Name', title: { starts_with: 'Work:' } },
+        { property: 'Status', status: { does_not_equal: 'Done' } }] }, page_size: 5 })).results || [])[0];
+      const who = assign === 'none' ? { Assignee: { people: [] }, 'Claimed by': { rich_text: [] } }
+        : me ? { Assignee: { people: [{ id: me }] }, 'Claimed by': { rich_text: [] } }
+        : { Assignee: { people: [] }, 'Claimed by': { rich_text: rt(name || 'Someone in the portal') } };
+      const status = { Status: { status: { name: assign === 'none' ? 'Not started' : 'In progress' } } };
+      if (open) {
+        await notion('PATCH', `/pages/${open.id}`, { properties: { ...who, ...status } });
+        return;
+      }
+      if (assign === 'none') return;
+      await notion('POST', '/pages', {
+        parent: { type: 'data_source_id', data_source_id: TASKS() },
+        properties: {
+          Name: { title: rt(`Work: ${titleOf(page) || ctx.name}${testMode() ? ' [test mode]' : ''}`) },
+          ...status, ...who,
+          'Due date': { date: { start: d10(wo?.dueDate) || new Date().toLocaleDateString('sv-SE') } },
+          Project: { relation: [{ id: page.id }] },
+        },
+      });
+    }
     // A finished case's open tasks (research requests, deadlines) are done too
     async function closeTasks(pageId) {
       if (!TASKS()) return;
@@ -2782,6 +2812,7 @@
         // Portal actions only update items that already exist, except a claim, which creates the case;
         // otherwise the Notion item is created by your button press
         const page = await apply(ctx, { status: a.status, hold: a.hold ? a.hold(vars, n) : '', log: describe(op, vars, ctx, n), withSnapshot: !!a.snapshot, create: !!a.create, assign: a.assign, resolution: a.resolution ? a.resolution(vars, n) : '' });
+        if (page && a.assign && !dryRun()) await claimTask(page, ctx, n, a.assign).catch(e => console.warn('[Dispute Desk]', e));
         if (page && a.status === 'Done' && !dryRun()) await closeTasks(page.id).catch(e => console.warn('[Dispute Desk]', e));
         if (page && op === 'BrokerageWorkOrderResolve' && ent.wo?.id && !(vars.note || n?.resolutionNote) && !dryRun()) refreshResolution(page, ent, ctx).catch(e => console.warn('[Dispute Desk]', e));
         if (D.ent?.id === ent.id) {
