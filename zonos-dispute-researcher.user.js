@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.6.2
+// @version      7.8.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -140,13 +140,21 @@
   // and ids under Settings (the cog in Tools); they're kept in Tampermonkey storage on that computer. Every part is
   // optional: what isn't set up is left out of the panel instead of failing.
   const CONFIG_KEY = 'zt:config';
+  // The private team copy fills this in (harness/portal/build-team.ps1): the team's Notion key and databases,
+  // Entry Assistant token and cloud routine. The shared file leaves it empty, so it holds no keys.
+  // Anything set under Settings still wins; a blank setting falls back to the team's.
+  const TEAM = {};
   const CONFIG_DEFAULTS = {
-    entryUrl: 'https://entry.kars3n.com',   // the Entry Assistant site (each person uses their own token)
-    projectsDs: '', tasksDs: '', notionUser: '',   // Notion case tracking
-    routineId: '', routineToken: '',        // Claude Code cloud research
-    notesUrl: '',                           // shared answers server
+    entryUrl: TEAM.entryUrl || 'https://entry.kars3n.com',   // the Entry Assistant site
+    projectsDs: TEAM.projectsDs || '', tasksDs: TEAM.tasksDs || '', notionUser: '',   // Notion case tracking
+    routineId: TEAM.routineId || '', routineToken: TEAM.routineToken || '',   // Claude Code cloud research
+    notesUrl: TEAM.notesUrl || '',                           // shared answers server
   };
-  const cfg = () => ({ ...CONFIG_DEFAULTS, ...GM_getValue(CONFIG_KEY, {}) });
+  const cfg = () => {
+    const c = { ...CONFIG_DEFAULTS, ...GM_getValue(CONFIG_KEY, {}) };
+    for (const k of Object.keys(CONFIG_DEFAULTS)) if (!c[k]) c[k] = CONFIG_DEFAULTS[k];
+    return c;
+  };
   const setCfg = patch => GM_setValue(CONFIG_KEY, { ...GM_getValue(CONFIG_KEY, {}), ...patch });
   const baseUrl = u => clean(u).replace(/\/+$/, '').replace(/\/api\/v1$/, '');
 
@@ -1020,7 +1028,7 @@
   const entryBase = () => baseUrl(cfg().entryUrl) || CONFIG_DEFAULTS.entryUrl;
   const TOKEN_KEY = 'zdr:entryToken';
 
-  const entryToken = () => GM_getValue(TOKEN_KEY, '');
+  const entryToken = () => GM_getValue(TOKEN_KEY, '') || TEAM.entryToken || '';
 
   async function entryApi(path, timeout = 30000) {
     const token = entryToken();
@@ -1601,10 +1609,13 @@
       "- Under Ask the merchant for, list the specific documents or facts that would settle what's still unproven, each with what it would prove. For example: a mill certificate or supplier declaration naming the countries where the aluminum was smelted and cast; a bill of materials with each component's origin and cost; the latest supplier invoice; a spec sheet showing the output. Only what the merchant can actually provide. Settle classification questions yourself.",
       "- The verdict must carry its proof. Don't just say what the item \"clearly\" is: say what shows it (which photo, document or listing, with its link) and which rule it meets or fails (the HTS heading or subheading text, the origin rule, the Section 232 heading). One or two sentences on one line.",
       `  An example of the level of proof wanted (not of the content): "The merchant's claim is somewhat substantiated because the item is a finished microphone, not a part: the merchant's own listing ([link]) sells it as a complete USB condenser mic and photo 2 shows it assembled with its cable, so heading 8518 is right but their subheading (parts of microphones) is not; it belongs with complete microphones in 8518.10."`,
+      "- Every line gets a verdict: never \"waiting\" or \"needs more info\" as the answer. If proof is missing, decide on what's there (without proof the higher-duty option stands), and put what would change it under Ask the merchant for.",
+      `- After the last block, under **For the portal**, give the text I'll paste for each line in this reply, one line per box the decision asks for (${(() => { const f = textFieldsOn(document.querySelector('main')); return f.length ? f.join(', ') : 'the decision note'; })()}): "Line N · <box>: <text>", plain text, one sentence up to one short paragraph, stating the decision and why. Only the lines in this request.`,
       '- End the whole reply (once, after the last block) with this line on its own: "Would you like me to draft an email?"',
       '- If I say yes, write a short, friendly email to the merchant contact: what the charge or code depends on, the requests as a numbered list, what happens once you have them, and the order number at the end. For example: "Hey Matt, I\'m looking at your dispute for the Section 232 duties. This charge depends on where the aluminum was smelted and cast, so we can remedy it once we have evidence that neither happened in Russia. Please send: 1. … Once we have these, we\'ll review the charge and recalculate the landed cost."');
     L.push(`- Start the whole reply with ${FINAL_LABEL} (once, before the first block): ${finalStyle('DUTY_DISPUTE')}`, '', `${FINAL_LABEL} <one sentence>`);
     items.forEach((item, i) => L.push('', ...replyBlock(item, s, { platformUnknown: platformUnknown && i === 0 })));
+    L.push('', '**For the portal**', ...items.map(i => `Line ${i.line} · <box>: <the text to paste>`));
     return L.filter(line => line !== false).join('\n');
   }
 
@@ -1702,7 +1713,7 @@
 
   // Safe-side rules shared by every class
   const ORDER_RULES = [
-    "- Nothing is filed or cleared on a guess. When the evidence doesn't settle it, say exactly what's missing, and pick the safe choice (hold, block or fix) over the one that lets it through.",
+    "- **Always decide.** Every order ends in a decision I can act on now: never \"Mark waiting\", \"Escalate\" or \"can't tell\". Make the call the evidence best supports, say how confident you are, and name what's missing. When it's close, choose the outcome that doesn't let a wrong entry through (in scope, true match, the higher-duty code, the corrected value) and say why.",
     '- Check everything the page says against the goods as they really are and the rules as they are today (the current HTS, CBP messages, the agency rules).',
   ];
 
@@ -2049,6 +2060,32 @@
     return text;
   }
 
+  // Collapsed sections (an AD/CVD review's item list, for one) aren't on the page until they're opened, so
+  // the prompt would say there's nothing there. They're opened for the read and closed again after.
+  // Activity, country pickers and menus are left alone.
+  const collapsedSections = main => [...main.querySelectorAll('button[aria-expanded="false"][aria-controls]')]
+    .filter(b => !/^activity$/i.test(clean(b.textContent)) && !b.getAttribute('aria-haspopup') && b.getAttribute('role') !== 'combobox' && !/\([A-Z]{2}\)$/.test(clean(b.textContent)));
+  async function readWorkOrderOpen() {
+    const main = document.querySelector('main');
+    const opened = main ? collapsedSections(main) : [];
+    for (const b of opened) b.click();
+    if (opened.length) await sleep(450);
+    try { return readWorkOrder(); } finally { for (const b of opened) if (b.isConnected && b.getAttribute('aria-expanded') === 'true') b.click(); }
+  }
+
+  // The text boxes the page asks you to fill in (a note, a reason, a resolution note…), by their label, so
+  // Claude's reply can give the text for each. Search boxes and the Tools panel's own boxes are left out.
+  function textFieldsOn(main, activity) {
+    const names = [];
+    for (const el of main?.querySelectorAll('textarea, input[type="text"]:not([role="combobox"])') || []) {
+      if (activity?.contains(el) || el.closest('[role="search"], [role="dialog"][aria-label*="Tools" i]') || /search|filter/i.test(el.placeholder || el.name || '')) continue;
+      const byFor = el.id && main.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      const name = clean(el.getAttribute('aria-label') || byFor?.textContent || el.closest('label')?.textContent || el.placeholder || el.previousElementSibling?.textContent || '');
+      if (name && name.length < 60 && !/hs code|tracking|^\d/i.test(name) && !names.includes(name)) names.push(name);
+    }
+    return names.slice(0, 8);
+  }
+
   function readWorkOrder() {
     const m = WORK_ORDER_PATH.exec(location.pathname);
     const main = document.querySelector('main');
@@ -2102,6 +2139,7 @@
         .map(re => lines.find(l => l.length > 15 && !/^#|^\|/.test(l) && re.test(l))).find(Boolean) || '',
       lines,
       choices: choicesOn(main, activity),
+      textFields: textFieldsOn(main, activity),
       codes: codes.slice(0, 8),
       current,
       pair: current && second ? [current, second] : [],
@@ -2149,6 +2187,10 @@
     L.push('', '## What the page shows', g.showParties
       ? '(Read from the dashboard. Tracking numbers and staff notes are left out; the parties are shown in full, since the screened party is what this review is about.)'
       : '(Read from the dashboard. Tracking numbers, the consignee and staff notes are left out; the shipper only by company name, country and email domain.)', ...d.lines);
+    // The order's items from the portal's own data, so nothing in a collapsed section is missed
+    const pi = desk.portalItems();
+    if (pi.length) L.push('', '## Items on the order (from the portal\'s data)', '(Description | HS code | country of origin | quantity | value, for every line on the shipment, including any the page keeps folded away.)', ...pi.map(l => `- ${l}`));
+    if (d.type === 'DUTY_DISPUTE_REVIEW') L.push(...programLines());
     if (d.type === 'DENIED_PARTY_REVIEW') {
       const sl = desk.screeningLines();
       if (sl.length) L.push('', '## Screening data (from the portal)', '(The screening service\'s own record of the hit: scores from 0 to 100%, "no match / partial / exact" per field, and the listed record as the screening list holds it.)', ...sl);
@@ -2166,18 +2208,23 @@
       !d.hasShipper && /HS_CODE|VALUE|DENIED/.test(d.type) && "The shipper isn't shown (the Parties section was closed); if the goods or the party can't be pinned down without it, say so.",
       ORDER_SKILL_STEP,
       "Collect every red flag: anything on the page or in your research that contradicts the entry or itself, or that's missing when it should be there.",
-      'Then decide, using one of the choices on the page.',
+      'Then decide, using one of the choices on the page that settles the order (never waiting or escalating).',
     ].filter(Boolean);
     L.push('', '## How to research', ...steps.map((step, i) => `${i + 1}. ${step}`));
     L.push('', 'Use as many searches as it takes. A thorough answer matters more than a fast one.');
-    const choiceList = d.choices.length ? d.choices.map(c => c.label).join(' | ') : 'what to do';
+    // Waiting and escalating don't settle an order, so they aren't offered as the decision
+    const settling = d.choices.filter(c => !/wait|escalat|hold for|later/i.test(c.label));
+    const choiceList = settling.length ? settling.map(c => c.label).join(' | ') : 'what to do';
+    // Every text box on the page gets its text in the reply; the class's note box always does
+    // (the class's note last, since "Copy note" takes the last note line)
+    const fields = [...(d.textFields || []).filter(f => f.toLowerCase() !== g.note.toLowerCase()), g.note];
     L.push('', '## Reply',
       'Fill in this template:',
       '- Copy the headings and labels, in this order. Replace each <…> with what you found and drop the angle brackets. Write "Not found" where you looked and found nothing.',
       '- Keep it short: one line per bullet, no paragraphs, no greeting. Write only the final reply: no progress notes, no list of the steps or searches, and no mention of the Entry Assistant API or the skill.',
       '- Put HTS and Chapter 99 codes in backticks, and link a source for every fact.',
       '- The decision is one of the choices on the page, written exactly as the page writes it; for a correction, give the new value too. It must carry its proof: what shows it (which source, with its link) and which rule it meets or fails.',
-      `- The ${g.note.toLowerCase()} is what I'll paste into the page's note box: one or two plain sentences, no Markdown, that say why.`,
+      `- End with the text for each box on the page (${fields.join(', ')}): what I'll paste in, plain text, no Markdown, one sentence up to one short paragraph, stating the decision and why. Never "waiting" or "needs more info".`,
       `- ${FINAL_LABEL} comes first: ${finalStyle(d.type)}`,
       '',
       `${FINAL_LABEL} <one sentence>`,
@@ -2201,7 +2248,7 @@
         : '**Missing to be sure:** <facts that would change the decision; or "Nothing">',
       '',
       `**Decision:** <${choiceList}> because <the proof>.`,
-      `**${g.note}:** <one or two plain sentences for the note box>`);
+      ...fields.map(f => `**${f}:** <the text to paste, one sentence up to one short paragraph>`));
     return L.join('\n');
   }
 
@@ -2243,16 +2290,21 @@
     // The portal's own actions (POST /api/graphql/brokerage/<Operation>) and what each means for the case.
     // v = the request's variables when caught, n = the work order or dispute the portal sent back.
     const ACTIONS = {
-      BrokerageWorkOrderClaim: { ev: 'claimed', status: 'In progress', hold: () => 'Just claimed in the broker portal.' },
+      // A claim is the one portal action that puts a case in Notion by itself, assigned to whoever claimed it
+      BrokerageWorkOrderClaim: { ev: 'claimed', status: 'In progress', create: true, assign: 'me', hold: () => 'Just claimed in the broker portal.' },
       BrokerageWorkOrderResume: { ev: 'resumed', status: 'In progress' },
-      BrokerageWorkOrderResolve: { ev: 'resolved', status: 'Done', snapshot: true,
-        hold: (v, n) => { const r = v.resolution || n?.resolution; const note = v.note || n?.resolutionNote; return `Resolved in the broker portal${r ? ` (${human(r)})` : ''}.${note ? ` ${note}` : ''}`; } },
-      BrokerageDutyDisputeComplete: { ev: 'completed', status: 'Done', snapshot: true, hold: () => 'Completed in the broker portal.' },
+      // `resolution`: what the person decided, in their words, for the case's Resolution column
+      // Resolving or completing saves the case even if nobody claimed it with the script, so no resolution is lost
+      BrokerageWorkOrderResolve: { ev: 'resolved', status: 'Done', snapshot: true, create: true,
+        hold: (v, n) => { const r = v.resolution || n?.resolution; const note = v.note || n?.resolutionNote; return `Resolved in the broker portal${r ? ` (${human(r)})` : ''}.${note ? ` ${note}` : ''}`; },
+        resolution: (v, n) => [human(v.resolution || n?.resolution), v.note || n?.resolutionNote].filter(Boolean).join(': ') || 'Resolved' },
+      BrokerageDutyDisputeComplete: { ev: 'completed', status: 'Done', snapshot: true, create: true, hold: () => 'Completed in the broker portal.',
+        resolution: (v, n) => [n?.outcome ? `Dispute ${human(n.outcome)}` : 'Dispute completed', n?.review?.summary].filter(Boolean).join(': ') },
       BrokerageWorkOrderEscalate: { ev: 'escalated', hold: (v, n) => `Escalated to ${human(v.target || n?.escalatedTo) || 'review'} in the broker portal: ${v.note || n?.escalationNote || ''}` },
       BrokerageWorkOrderWait: { ev: 'marked waiting', hold: v => `Marked waiting in the broker portal${v.note ? `: ${v.note}` : '.'}` },
-      BrokerageWorkOrderRelease: { ev: 'released', status: 'Not started', noCreate: true, hold: () => 'Released back to the queue in the broker portal.' },
-      BrokerageWorkOrderUnassign: { ev: 'unassigned', noCreate: true },
-      BrokerageWorkOrderAssign: { ev: 'assigned', noCreate: true },
+      BrokerageWorkOrderRelease: { ev: 'released', status: 'Unclaimed', noCreate: true, assign: 'none', hold: () => 'Released back to the queue in the broker portal.' },
+      BrokerageWorkOrderUnassign: { ev: 'unassigned', noCreate: true, assign: 'none' },
+      BrokerageWorkOrderAssign: { ev: 'assigned', noCreate: true, assign: 'me' },
       BrokerageWorkOrderNote: { ev: 'note added' },
       // AD/CVD review, "out of scope": re-quotes the manifest line without the AD/CVD check so it files
       ManifestLineAdcvdRequote: { ev: 're-quoted as out of scope', hold: () => 'Out of scope: re-quoted in the broker portal without the AD/CVD check, so it files.' },
@@ -2269,7 +2321,7 @@
       ConsolidationRetryFiling: { ev: 'consolidation filing retried' },
     };
 
-    const notionKey = () => GM_getValue(KEY, '');
+    const notionKey = () => GM_getValue(KEY, '') || TEAM.notionKey || '';
     const enabled = () => onDashboard && !!notionKey() && !!DS();
     // Research in Claude Code needs the Tasks database (the request lives there) and the cloud routine
     const researchOn = () => enabled() && !!TASKS() && !!cfg().routineId && !!cfg().routineToken;
@@ -2587,8 +2639,33 @@
 
     // The one write path for the case row. Automatic tracking in test mode is a dry run that only says what
     // it would have written; your own clicks (`explicit`) always write, and a test-mode case is named "[TEST] …".
-    async function apply(ctx, { status, hold, log, withSnapshot, create, extra, explicit }) {
-      const logLine = `${stamp()} (portal${testMode() ? ', test mode' : ''}): ${log}`;
+    // Who is working: someone in Notion (their user id saved under Settings) is tagged in Assigned; anyone not in
+    // Notion yet goes by their portal name in "Claimed by". `assign`: 'me' claims the case, 'none' clears both.
+    const portalName = () => { try { return onDashboard ? portal.me().then(s => s.name || '').catch(() => '') : Promise.resolve(''); } catch { return Promise.resolve(''); } };
+    // Portal names match Notion names, so the person signed in to the portal is found in Notion by name
+    // (Settings' "Find me" overrides it). The workspace's people are read at most every 10 minutes.
+    let peopleCache = { at: 0, list: [] };
+    async function notionIdFor(name) {
+      if (cfg().notionUser) return cfg().notionUser;
+      const key = s => clean(s).toLowerCase();
+      if (!name) return '';
+      if (Date.now() - peopleCache.at > 10 * 60 * 1000) peopleCache = { at: Date.now(), list: await people().catch(() => []) };
+      return peopleCache.list.find(p => key(p.name) === key(name))?.id || '';
+    }
+    function claimProps(assign, me, name) {
+      if (assign === 'none') return { Assigned: { people: [] }, 'Claimed by': { rich_text: [] } };
+      if (assign !== 'me') return {};
+      if (me) return { Assigned: { people: [{ id: me }] }, 'Claimed by': { rich_text: [] } };
+      return name ? { 'Claimed by': { rich_text: rt(name) } } : {};
+    }
+    // "<what they decided> — <who>, <date>": a Notion mention when they're in Notion, else their portal name
+    const resolutionText = (text, me, name) => [...rt(`${text} — `),
+      ...(me ? [{ type: 'mention', mention: { type: 'user', user: { id: me } } }] : rt(name || 'portal user')), ...rt(`, ${stamp().slice(0, 10)}`)];
+
+    async function apply(ctx, { status, hold, log, withSnapshot, create, extra, explicit, assign, resolution }) {
+      const name = await portalName();
+      const me = await notionIdFor(name);
+      const logLine = `${stamp()} (portal${testMode() ? ', test mode' : ''}${name ? `, ${name}` : ''}): ${log}`;
       if (dryRun() && !explicit) {
         const page = await findRow(ctx).catch(() => null);
         D.preview = { action: page ? 'update' : create ? 'create' : 'skip', row: page ? titleOf(page) : ctx.name, status, hold, log: logLine, summary: page ? '' : ctx.summary, extra: (extra || []).length };
@@ -2598,17 +2675,17 @@
       let page = await findRow(ctx);
       if (!page) {
         if (!create) return null;
-        const isDispute = ctx.type === 'DUTY_DISPUTE' || ctx.type === 'DUTY_DISPUTE_REVIEW';
         page = await notion('POST', '/pages', {
           parent: { type: 'data_source_id', data_source_id: DS() },
           properties: {
             Name: { title: rt(testMode() ? `[TEST] ${ctx.name}` : ctx.name) },
             Status: { status: { name: status || 'In progress' } },
-            
-            Tags: { multi_select: [{ name: 'Broker Portal' }, ...(isDispute ? [{ name: 'Dispute' }] : [])] },
+            ...claimProps(assign === 'none' ? '' : 'me', me, name),
+            ...(resolution ? { Resolution: { rich_text: resolutionText(resolution, me, name) } } : {}),
+            Source: { select: { name: 'Broker Portal' } },
             Type: { select: { name: ctx.kind } },
             Dashboard: { url: ctx.url },
-            'Holding?': { rich_text: rt(hold || 'Working it in the broker portal.') },
+            'Latest update': { rich_text: rt(hold || 'Working it in the broker portal.') },
           },
           children: [para(ctx.summary), snapshot(ctx), ...(extra || []), logToggle([logLine])],
         });
@@ -2619,8 +2696,10 @@
       }
       const props = {};
       if (status && statusOf(page) !== status) props.Status = { status: { name: status } };
-      if (hold) props['Holding?'] = { rich_text: rt(hold) };
+      if (hold) props['Latest update'] = { rich_text: rt(hold) };
       if (!page.properties.Dashboard?.url) props.Dashboard = { url: ctx.url };
+      Object.assign(props, claimProps(assign, me, name));
+      if (resolution) props.Resolution = { rich_text: resolutionText(resolution, me, name) };
       if (Object.keys(props).length) page = await notion('PATCH', `/pages/${page.id}`, { properties: props });
       await addAboveLog(page.id, [...(withSnapshot ? [snapshot(ctx)] : []), ...(extra || [])]);
       await addLog(page.id, [logLine]);
@@ -2656,6 +2735,22 @@
         : '';
       return `${cap(ACTIONS[op].ev)} ${midSentence(ctx.kind)} ${ctx.id}${extra}`;
     }
+    // The portal's own Resolve button sends its request through a fetch the script can't see, so the note
+    // typed there can be missing from what was captured: read the resolved work order back from the portal
+    // and save its resolution and note
+    async function refreshResolution(page, ent, ctx) {
+      await sleep(2500);
+      let wo = null;
+      for (const q of [ent.wo.id, ...ctx.tracking.slice(0, 2)]) {
+        wo = (await portal.search(q, 25).catch(() => [])).find(o => o.id === ent.wo.id);
+        if (wo) break;
+      }
+      if (!wo?.resolution && !wo?.resolutionNote) return;
+      const text = [human(wo.resolution), wo.resolutionNote].filter(Boolean).join(': ');
+      const name = await portalName();
+      await notion('PATCH', `/pages/${page.id}`, { properties: { Resolution: { rich_text: resolutionText(text, await notionIdFor(name), name) } } });
+      if (wo.resolutionNote) await addLog(page.id, [`${stamp()} (portal): Resolution note: ${wo.resolutionNote}`]);
+    }
     // A finished case's open tasks (research requests, deadlines) are done too
     async function closeTasks(pageId) {
       if (!TASKS()) return;
@@ -2679,9 +2774,11 @@
         const ctx = caseContext(ent);
         const n = ent.wo || ent.dd || null;
         if (a.status === 'Done' && ent.wo?.id) GM_setValue(`desk:resolved:${ent.wo.id}`, Date.now());   // handled once
-        // Portal actions only update items that already exist; the Notion item is created by your button press
-        const page = await apply(ctx, { status: a.status, hold: a.hold ? a.hold(vars, n) : '', log: describe(op, vars, ctx, n), withSnapshot: !!a.snapshot, create: false });
+        // Portal actions only update items that already exist, except a claim, which creates the case;
+        // otherwise the Notion item is created by your button press
+        const page = await apply(ctx, { status: a.status, hold: a.hold ? a.hold(vars, n) : '', log: describe(op, vars, ctx, n), withSnapshot: !!a.snapshot, create: !!a.create, assign: a.assign, resolution: a.resolution ? a.resolution(vars, n) : '' });
         if (page && a.status === 'Done' && !dryRun()) await closeTasks(page.id).catch(e => console.warn('[Dispute Desk]', e));
+        if (page && op === 'BrokerageWorkOrderResolve' && ent.wo?.id && !(vars.note || n?.resolutionNote) && !dryRun()) refreshResolution(page, ent, ctx).catch(e => console.warn('[Dispute Desk]', e));
         if (D.ent?.id === ent.id) {
           if (page) { D.row = page; D.state = 'tracked'; }
           else if (dryRun()) D.state = 'tracked';
@@ -2820,7 +2917,11 @@
           Status: { status: { name: 'Not started' } },
           'Due date': { date: { start: new Date().toLocaleDateString('sv-SE') } },
           Project: { relation: [{ id: page.id }] },
-          ...(cfg().notionUser ? { Assignee: { people: [{ id: cfg().notionUser }] } } : {}),
+          ...(await (async () => {
+            const name = await portalName();
+            const id = await notionIdFor(name);
+            return id ? { Assignee: { people: [{ id }] } } : name ? { 'Claimed by': { rich_text: rt(name) } } : {};
+          })()),
         },
         children: body.slice(0, 100),
       });
@@ -2835,10 +2936,17 @@
       return { task, taskId: task.id, page: page.url, session: f.session, fireError: f.fireError, limited: f.limited };
     }
 
+    // The team copy's routine runs on its owner's Claude account, so its session pages open only for the owner:
+    // everyone else gets the answer in Notion and the panel, and no link they can't open
+    const sharedRoutine = () => !!TEAM.routineId && cfg().routineId === TEAM.routineId && !!TEAM.owner && D.myName !== TEAM.owner;
+    setTimeout(() => portalName().then(n => { D.myName = n; changed(); }), 0);   // after the portal helpers exist
+
     // Starts the cloud research session for a research task; the session URL goes on the case as its Chat Link
     async function fireResearch(taskId, pageId, { openTab = true } = {}) {
       const { routineId, routineToken } = cfg();
       if (!routineId || !routineToken) return { fireError: 'no routine set up' };
+      D.myName = D.myName || await portalName();
+      if (sharedRoutine()) openTab = false;
       try {
         const r = await gmRequest({
           method: 'POST', url: `https://api.anthropic.com/v1/claude_code/routines/${routineId}/fire`, timeout: 30000,
@@ -2852,7 +2960,7 @@
             await notion('PATCH', `/pages/${pageId}`, { properties: { 'Chat Link': { url: j.claude_code_session_url } } }).catch(e => console.warn('[Dispute Desk]', e));
             await addLog(pageId, [{ text: `${stamp()} (portal): Cloud research session started.`, url: j.claude_code_session_url }]).catch(e => console.warn('[Dispute Desk]', e));
           }
-          return { session: j.claude_code_session_url };
+          return { session: sharedRoutine() ? '' : j.claude_code_session_url };
         }
         return { fireError: r.status === 429 ? 'the routine run limit was hit' : `the routine answered ${r.status}`, limited: r.status === 429 };
       } catch (e) { return { fireError: e.message }; }
@@ -2957,6 +3065,7 @@
           D.row && h('a', { href: D.row.url, target: '_blank', rel: 'noopener', text: 'Notion' }),
           // The Claude Code session for this case: its Chat Link in Notion, or the research session just started
           (() => {
+            if (sharedRoutine()) return null;   // the shared routine's sessions open only for its owner
             const chat = (D.links?.row === D.row?.id && D.links.chat) || D.row?.properties?.['Chat Link']?.url || (D.research || GM_getValue(`desk:research:${ent.id}`, null))?.session;
             return chat ? h('a', { href: chat, target: '_blank', rel: 'noopener', text: 'Claude chat' }) : null;
           })()),
@@ -2996,15 +3105,43 @@
       }
       return msg;
     }
+    // Your own answer for the case (overriding Claude's, or without Claude at all): the case's "Final answer"
+    // in Notion, with who and when. The case is created if it isn't in Notion yet.
+    async function setOwnAnswer(text) {
+      if (!enabled() || !D.ent) return null;
+      const ctx = caseContext(D.ent);
+      const page = D.row || await apply(ctx, { log: `Case started for an answer written in Tools (${midSentence(ctx.kind)} ${ctx.id}).`, create: true, explicit: true });
+      if (!page) return null;
+      const name = await portalName();
+      D.row = await notion('PATCH', `/pages/${page.id}`, { properties: { 'Final answer': { rich_text: resolutionText(text, await notionIdFor(name), name) } } });
+      await addLog(page.id, [`${stamp()} (portal${name ? `, ${name}` : ''}): Own answer saved: ${text}`]);
+      D.state = 'tracked';
+      changed();
+      return D.row;
+    }
+    // The workspace's people, so Settings can offer "pick yourself" for Assigned
+    async function people() {
+      const r = await notion('GET', '/users?page_size=100');
+      return (r.results || []).filter(u => u.type === 'person').sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    }
 
     return {
-      enabled, researchOn, finalAnswer: () => (D.row?.properties?.['Claude Final Answer']?.rich_text || []).map(t => t.plain_text).join('').trim(),
-      dryRun, testMode, onRoute, startCase, setPageData, onFacts, onSent, onAnswer, queueResearch, pollAnswers, card, testKey,
+      enabled, researchOn,
+      // The case's answer: someone's own "Final answer" overrides Claude's
+      finalAnswer: () => {
+        const txt = p => (D.row?.properties?.[p]?.rich_text || []).map(t => t.plain_text).join('').trim();
+        return txt('Final answer') || txt('Claude Final Answer');
+      },
+      finalIsOwn: () => !!(D.row?.properties?.['Final answer']?.rich_text || []).length,
+      setOwnAnswer,
+      dryRun, testMode, onRoute, startCase, setPageData, onFacts, onSent, onAnswer, queueResearch, pollAnswers, card, testKey, people,
       subscribe: fn => listeners.add(fn),
       setImporter: fn => { importer = fn; },
       key: { get: notionKey, set: v => (v ? GM_setValue(KEY, v) : GM_deleteValue(KEY)) },
       writeInTest: { get: () => GM_getValue(WRITE_IN_TEST, false), set: v => GM_setValue(WRITE_IN_TEST, !!v) },
       screeningLines, fireResearch, researchState, openResearch,
+      // "Item n: …" lines for the open order, from the portal's data (not the page)
+      portalItems: () => { try { const e = D.ent || currentEntity(); return e ? caseContext(e).facts.filter(f => /^Item \d+:/.test(f)) : []; } catch { return []; } },
       debug: () => ({ caseContext, currentEntity, captured, describe, entityFromWorkOrder, chunks, screenings, D }),
     };
   })();
@@ -4024,27 +4161,47 @@
   // (the same data the portal loads, asked for on behalf of the order's company) has the program's name,
   // type and code, and each question with the merchant's answer. Shown next to the id on the page, and put
   // into the research prompt.
-  const programs = new Map();   // program id -> { name, code, type, authority, qa: [[question, answer]] }
+  const programs = new Map();   // program id -> { name, code, type, authority, qa: [[question, answer]] } (for the page)
+  // For the prompt: each disputed line that has a questionnaire, with its own programs and answers
+  // ({ line, item, programs: [{ id, ...program, qa }] }). Kept per line, since two lines can claim the same
+  // program with different answers.
+  let questionnaires = [];
   let programsFor = '';
   const PROGRAMS_KEY = 'zt:programs';   // show them on the page (Settings; off by default)
+  // An answer can be a choice (label), free text (value) or several of either
+  const answerText = a => (Array.isArray(a) ? a.map(answerText).filter(Boolean).join('; ') : clean(a?.label || a?.value || (typeof a === 'string' ? a : '')));
   async function loadPrograms(disputeId) {
     programsFor = disputeId;
+    programs.clear();
+    questionnaires = [];
     try {
-      const d = (await portal.gql('BrokerageDutyDispute', 'query BrokerageDutyDispute($id: ID!) { brokerageDutyDispute(id: $id) { id organizationId items { questionnaireSessionId } } }', { id: disputeId })).brokerageDutyDispute;
-      const sessions = [...new Set((d?.items || []).map(i => i.questionnaireSessionId).filter(Boolean))];
-      for (const id of sessions) {
-        const s = (await portal.gql('QuestionnaireSessionForDutyDispute', `query QuestionnaireSessionForDutyDispute($id: ID!) { questionnaireSession(id: $id) {
+      const q = fields => `query BrokerageDutyDispute($id: ID!) { brokerageDutyDispute(id: $id) { id organizationId items { questionnaireSessionId ${fields} } } }`;
+      // The item's description and code if the portal gives them; the bare session ids otherwise
+      const d = (await portal.gql('BrokerageDutyDispute', q('original { description hsCode countryOfOrigin }'), { id: disputeId })
+        .catch(() => portal.gql('BrokerageDutyDispute', q(''), { id: disputeId }))).brokerageDutyDispute;
+      const sessions = new Map();
+      for (const s of await Promise.all([...new Set((d?.items || []).map(i => i.questionnaireSessionId).filter(Boolean))].map(id =>
+        portal.gql('QuestionnaireSessionForDutyDispute', `query QuestionnaireSessionForDutyDispute($id: ID!) { questionnaireSession(id: $id) {
           id lines { programId program { id code name programType authority }
-            visibleQuestions { question { prompt displayOrder } answer { value label } } } } }`, { id }, { 'x-act-as-org': d.organizationId })).questionnaireSession;
-        for (const l of s?.lines || []) {
+            visibleQuestions { question { prompt displayOrder } answer { value label } } } } }`, { id }, { 'x-act-as-org': d.organizationId })
+          .then(r => r.questionnaireSession).catch(e => { console.warn('[Tools] questionnaire session', id, e); return null; })))) if (s) sessions.set(s.id, s);
+      (d?.items || []).forEach((it, n) => {
+        const s = sessions.get(it.questionnaireSessionId);
+        if (!s) return;
+        const o = it.original || {};
+        const entry = { line: n + 1, item: [o.description, o.hsCode && `HS ${o.hsCode}`, o.countryOfOrigin && `origin ${o.countryOfOrigin}`].filter(Boolean).join(' · '), programs: [] };
+        for (const l of s.lines || []) {
           const p = l.program || {};
-          programs.set(l.programId || p.id, {
-            name: p.name || '', code: p.code || '', type: p.programType || '', authority: p.authority || '',
+          const prog = {
+            id: l.programId || p.id, name: p.name || '', code: p.code || '', type: p.programType || '', authority: p.authority || '',
             qa: (l.visibleQuestions || []).slice().sort((a, b) => (a.question?.displayOrder ?? 0) - (b.question?.displayOrder ?? 0))
-              .map(v => [clean(v.question?.prompt), clean(v.answer?.label || v.answer?.value || '') || '(no answer)']),
-          });
+              .map(v => [clean(v.question?.prompt), answerText(v.answer) || '(no answer)']),
+          };
+          entry.programs.push(prog);
+          if (!programs.has(prog.id)) programs.set(prog.id, prog);
         }
-      }
+        if (entry.programs.length) questionnaires.push(entry);
+      });
       showPrograms();
     } catch (e) { console.warn('[Tools] questionnaire programs', e); }
   }
@@ -4085,11 +4242,16 @@
   }
   // For the research prompt: each program claimed on this dispute, with its questions and answers
   function programLines() {
-    if (!programs.size || !DISPUTE_PATH.test(location.pathname)) return [];
-    const L = ['', '## Questionnaire programs claimed', '(What the "Disputed program" ids on the page are, from the dispute\'s questionnaire session. The answers are the merchant\'s claims: check each one against the documents and the real listing, and say which are matched, contradicted or unsupported.)'];
-    for (const [id, p] of programs) {
-      L.push(`- ${programLabel(p)} (${id})${p.authority ? `, authority ${p.authority}` : ''}`);
-      for (const [q, a] of p.qa) L.push(`  - Q: ${q}`, `    A: ${a}`);
+    const here = location.pathname.split('/').filter(Boolean).pop();
+    if (!questionnaires.length || programsFor !== here) return [];
+    const L = ['', '## Questionnaire answers, by disputed line', '(From the dispute\'s questionnaire sessions: which program each line claims (what the "Disputed program" ids on the page are) and the merchant\'s answer to each question. The answers are the merchant\'s claims, not proof: check each one against the documents, the photos and the real listing, and say per line which answers are matched, contradicted or unsupported.)'];
+    for (const qn of questionnaires) {
+      L.push(`- Line ${qn.line}${qn.item ? `: ${qn.item}` : ''}`);
+      for (const p of qn.programs) {
+        L.push(`  - Program: ${programLabel(p) || p.id} (${p.id})${p.authority ? `, authority ${p.authority}` : ''}`);
+        if (!p.qa.length) L.push('    - (no questions answered)');
+        for (const [q, a] of p.qa) L.push(`    - Q: ${q}`, `      A: ${a}`);
+      }
     }
     return L;
   }
@@ -4468,8 +4630,20 @@
     const notionKeyInput = secretField(() => !!desk.key.get(), 'Notion integration key (ntn_…)');
     const projectsInput = textField('projectsDs', 'Projects data source id', 'Projects data source id');
     const tasksInput = textField('tasksDs', 'Tasks data source id (optional)', 'Tasks data source id');
-    const userInput = textField('notionUser', 'Your Notion user id (optional, for task Assignee)', 'Notion user id');
+    const userInput = textField('notionUser', 'Your Notion user id (cases you claim are assigned to you)', 'Notion user id');
     const notionNote = note();
+    // "Find me": lists the workspace's people (needs the key saved) so nobody has to dig out their user id
+    const pickRow = h('div', { class: 'row', style: 'margin-top:6px' });
+    const findMe = async () => {
+      if (!desk.key.get()) { say(notionNote, 'Save the Notion key first, then press Find me.', 'err'); return; }
+      say(notionNote, 'Loading people…');
+      try {
+        const ps = await desk.people();
+        pickRow.replaceChildren(h('select', { 'aria-label': 'Pick yourself', onchange: e => { userInput.value = e.target.value; say(notionNote, 'Picked. Press Save and test.'); } },
+          h('option', { value: '', text: 'Pick yourself' }), ...ps.map(p => h('option', { value: p.id, text: p.name || p.id }))));
+        say(notionNote, ps.length ? '' : 'No people found. Ask Karsen to invite you to the Zonos Notion workspace.', ps.length ? '' : 'err');
+      } catch (err) { say(notionNote, err.message, 'err'); }
+    };
     const saveNotion = async () => {
       const k = clean(notionKeyInput.value);
       if (k) desk.key.set(k);
@@ -4547,7 +4721,8 @@
         h('div', { class: 'row' }, notionKeyInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, projectsInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, tasksInput),
-        h('div', { class: 'row', style: 'margin-top:6px' }, userInput),
+        h('div', { class: 'row', style: 'margin-top:6px' }, userInput, btn('Find me', findMe)),
+        pickRow,
         h('div', { class: 'row', style: 'margin-top:6px' }, btn('Save and test', saveNotion), btn('Turn off', clearNotion)),
         notionNote,
         h('label', { class: 'doc', style: 'margin-top:6px' },
@@ -5280,7 +5455,10 @@
       body.replaceChildren(h('p', { class: 'muted', text: 'Reading the order…' }));
       await waitFor(() => document.querySelector('main section h2, main h1, main button[title="Look up in the HTS"]'));
       if (path !== location.pathname) return;
-      const data = readWorkOrder();
+      const data = await readWorkOrderOpen();
+      // A duty dispute review from the queue is a dispute too: load its questionnaire answers for the prompt
+      if (data?.type === 'DUTY_DISPUTE_REVIEW' && /^duty_dispute_/.test(data.workOrderId) && programsFor !== data.workOrderId) await loadPrograms(data.workOrderId);
+      if (path !== location.pathname) return;
       if (!data || !data.lines.length) {
         body.replaceChildren(h('p', { class: 'err', text: "Couldn't read this order. Wait for the page to finish loading, then close and reopen this panel." }));
         return;
@@ -5497,13 +5675,37 @@
       const finalText = fromNotion || (newest && finalSentence(newest.text));
       const finalCard = finalText && h('div', { class: 'final-card' },
         h('p', { class: 'final-text', text: finalText }),
-        h('p', { class: 'hint', style: 'margin:4px 0 0', text: fromNotion ? 'From the case in Notion' : `From the answer saved ${shortDate(newest.createdAt)}` }));
+        h('p', { class: 'hint', style: 'margin:4px 0 0', text: fromNotion ? (desk.finalIsOwn() ? 'Your team\'s own answer, from the case in Notion (overrides Claude\'s)' : 'Claude\'s, from the case in Notion') : `From the answer saved ${shortDate(newest.createdAt)}` }));
+      // Your own answer, overriding Claude's or without Claude: saved like any answer (newest wins, shared with
+      // everyone) and as the case's Final answer in Notion
+      // Made once per page, so redraws (lookups finishing) don't clear what you're typing
+      const ownInput = s.ownInput || (s.ownInput = h('textarea', { class: 'answer', rows: 4, placeholder: isOrder ? 'Your decision and why, one sentence to one paragraph (as you\'d put it on the page)' : 'Your answer for the lines you ticked, one sentence to one paragraph', 'aria-label': 'Your own answer' }));
+      const ownNote = isOrder && (s.ownNote || (s.ownNote = h('textarea', { class: 'answer', rows: 2, placeholder: `${guideFor(d.type).note} to paste on the page (optional)`, 'aria-label': 'Your note' })));
+      const saveOwn = async () => {
+        const text = clean(ownInput.value);
+        if (!text) return;
+        const note = ownNote ? clean(ownNote.value) : '';
+        const md = [`${FINAL_LABEL} ${text}`, isOrder && `**Decision:** ${text}`, isOrder && note && `**${guideFor(d.type).note}:** ${note}`].filter(Boolean).join('\n\n');
+        s.ownOpen = false;
+        ownInput.value = '';
+        if (ownNote) ownNote.value = '';
+        storeAnswer(md, isOrder ? [] : picked.length ? picked.map(i => i.line) : inDispute.map(i => i.line));
+        try { if (await desk.setOwnAnswer(text)) setStatus('Your answer is saved and is now the case\'s Final answer in Notion.', 'ok'); } catch (e) { setStatus(`Saved here, but Notion said: ${e.message}`, 'warn'); }
+        render();
+      };
+      const ownBlock = s.ownOpen
+        ? h('div', { style: 'margin-top:8px' }, ownInput, ownNote,
+            h('div', { class: 'row', style: 'margin-top:6px' },
+              h('button', { class: 'primary', type: 'button', text: 'Save my answer', onclick: () => run(saveOwn) }),
+              h('button', { class: 'secondary', type: 'button', text: 'Cancel', onclick: () => { s.ownOpen = false; render(); } })))
+        : h('button', { class: 'secondary', type: 'button', text: finalText ? 'Use my own answer instead' : 'Write my own answer', title: "Overrides Claude's answer for everyone, or answers without Claude.", onclick: () => { s.ownOpen = true; s.answerOpen = false; render(); ownInput.focus(); } });
       const answerSection = (isOrder || inDispute.length > 0) && h('div', { class: 'section' },
-        h('p', { class: 'label', text: "Claude's answer" }),
+        h('p', { class: 'label', text: 'Answer' }),
         finalCard,
         syncState,
         replyBlock,
         newest && h('div', { class: 'answers' }, answerCard(newest)),
+        ownBlock,
         s.answerOpen
           ? h('div', {},
               answerInput,
@@ -5529,7 +5731,7 @@
           d.question && h('p', { class: 'order-q', text: d.question }),
           d.summary && h('p', { class: 'hint', style: 'margin:0', text: d.summary }),
           d.choices.length > 0 && h('p', { class: 'hint', text: `Choices on the page: ${d.choices.map(c => c.label).join(' · ')}` }),
-          latestDecision && h('p', { class: 'verdict', style: 'margin-top:8px', text: `Claude: ${latestDecision.decision} · ${latest.author} · ${shortDate(latest.createdAt)}` }),
+          latestDecision && h('p', { class: 'verdict', style: 'margin-top:8px', text: `Decision: ${latestDecision.decision} · ${latest.author} · ${shortDate(latest.createdAt)}` }),
           latestNote && noteLink(`Copy the ${guideFor(d.type).note.toLowerCase()}`, () => copyNote(latestNote))),
         (d.pair.length === 2 || d.codes.length > 0) && h('div', { class: 'order-links' },
           d.pair.length === 2 && h('div', {}, noteLink(`Compare ${d.pair[0]} with ${d.pair[1]} in Entry Assistant`, () => showEntry({ codes: d.pair, from: d.pairFrom }))),
@@ -5575,9 +5777,9 @@
 
     // Re-read the page right before building the prompt, so claims and download links are current,
     // then keep only the ticked lines (plus order-level documents)
-    function freshData() {
+    async function freshData() {
       if (state.data.kind === 'workOrder') {
-        const page = readWorkOrder();
+        const page = await readWorkOrderOpen();
         return page && page.workOrderId === state.data.workOrderId && page.lines.length ? page : state.data;
       }
       const page = extractDispute();
@@ -5610,7 +5812,7 @@
     // the case page, which this panel picks up and saves with the shared answers.
     // Sent right away: the cloud session runs its own Entry Assistant lookups, so the panel's aren't waited for
     async function sendToClaudeCode({ openTab = true } = {}) {
-      const d = freshData();
+      const d = await freshData();
       const docs = selectedDocs(d);
       const prompt = promptFor(d, docs.map(x => x.name));
       const lines = d.kind === 'workOrder' ? [] : d.items.map(i => i.line);
@@ -5645,7 +5847,7 @@
 
     async function copyPrompt() {
       await waitForFacts();
-      const d = freshData();
+      const d = await freshData();
       const names = selectedDocs(d).map(doc => doc.name);
       GM_setClipboard(promptFor(d, names), 'text');
       markSent(d.disputeId, d.items);
@@ -5667,7 +5869,7 @@
     async function handoff() {
       purgeOldHandoffs();
       await waitForFacts();
-      const d = freshData();
+      const d = await freshData();
       const docs = selectedDocs(d);
       const files = [];
       const skipped = [];
