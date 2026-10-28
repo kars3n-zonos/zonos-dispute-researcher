@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.6.1
+// @version      7.6.2
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1613,7 +1613,7 @@
   const FINAL_LABEL = '**Final answer:**';
   function finalStyle(type) {
     const how = {
-      ADCVD_REVIEW: '"It is in scope because …" or "It is out of scope because …"',
+      ADCVD_REVIEW: 'exactly this shape: "It’s in scope because the item that hit is <origin> <item>, and the order’s written scope covers <what it covers>, while nothing on the page shows <each exclusion or scope test it would need to fail>" or "It’s out of scope because the item that hit is <origin> <item>, and the order’s written scope <covers only … / excludes …>, which <why this item falls outside>". For example: "It’s in scope because the item that hit is the Chinese notebook, and the order’s written scope covers notebooks on lined paper, while nothing on the page shows it’s unlined, has fewer than 10 sheets, has pages outside 6–15 × 8¾–15 in or is case-bound."',
       DENIED_PARTY_REVIEW: '"It is a false positive because …" or "It is a true match because …"',
       HS_CODE_REVIEW: '"The current code is right because …" or "The code should be `<code>` because …"',
       VALUE_REVIEW: '"The declared value is believable because …" or "The value should be <amount> because …"',
@@ -1631,7 +1631,7 @@
     if (scope) {
       const p = plainText(scope);
       const why = p.split(/\s+[—–-]\s+/).slice(1).join(' — ');
-      return `It is ${/^in scope/i.test(p) ? 'in' : 'out of'} scope${why ? ` because ${why.replace(/^because\s+/i, '').replace(/^./, c => c.toLowerCase())}` : '.'}`;
+      return `It’s ${/^in scope/i.test(p) ? 'in' : 'out of'} scope${why ? ` because ${why.replace(/^because\s+/i, '').replace(/^./, c => c.toLowerCase())}` : '.'}`;
     }
     const decision = decisionOf(t);
     if (decision) return decision.sentence;
