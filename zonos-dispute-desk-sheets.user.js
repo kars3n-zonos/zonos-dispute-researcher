@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.11.0
-// @description  Sheets edition: cases go to the team Google Sheet, each with a Google Doc of its answers and decisions. Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
+// @version      7.11.1
+// @description  Sheets edition: cases go to the team Google Sheet, each with a Google Doc of its answers and decisions. Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
 // @updateURL    https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-desk-sheets.user.js
@@ -2423,9 +2423,13 @@
     function entityFromWorkOrder(wo) {
       const sid = subjectId(wo);
       if (!sid) return null;
+      // A duty dispute review opens on the dispute's own page, as in the queue (queueRow)
+      if (wo.type === 'DUTY_DISPUTE_REVIEW' && /^duty_dispute_/.test(sid)) return { type: wo.type, id: sid, url: `${location.origin}/duty-disputes/${sid}`, wo };
       const q = wo.consignment?.id ? `?consignment=${wo.consignment.id}` : '';
       return { type: wo.type, id: sid, url: `${location.origin}/entry-writer-queue/${wo.type}/${sid}${q}`, wo };
     }
+    // Before 7.11.1 a dispute claimed from the queue got an Entry Writer Queue link, which doesn't open; those are replaced
+    const badPortalLink = u => /\/entry-writer-queue\/DUTY_DISPUTE_REVIEW\/duty_dispute_/.test(u || '');
     function* walk(node, depth = 0) {
       if (!node || typeof node !== 'object' || depth > 14) return;
       yield node;
@@ -2707,7 +2711,7 @@
       const props = {};
       if (status && statusOf(page) !== status) props.Status = { status: { name: status } };
       if (hold) props['Latest update'] = { rich_text: rt(hold) };
-      if (!page.properties.Dashboard?.url) props.Dashboard = { url: ctx.url };
+      if (!page.properties.Dashboard?.url || (badPortalLink(page.properties.Dashboard.url) && !badPortalLink(ctx.url))) props.Dashboard = { url: ctx.url };
       Object.assign(props, claimProps(assign, me, name));
       if (resolution) props.Resolution = { rich_text: resolutionText(resolution, me, name) };
       if (Object.keys(props).length) page = await notion('PATCH', `/pages/${page.id}`, { properties: props });

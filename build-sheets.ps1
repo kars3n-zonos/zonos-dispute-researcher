@@ -22,6 +22,9 @@ $code = $code -replace "(?m)^// @name(\s+).*$", "// @name`$1Zonos Dispute Desk (
 $code = $code -replace "(?m)^// @namespace(\s+).*$", "// @namespace`$1zonos-brokerage-sheets"
 $code = $code -replace "(?m)^// @(update|download)URL(\s+).*$", "// @`$1URL`$2$raw"
 $code = $code -replace "(?m)^(// @description\s+)Tools for the Zonos broker portal:", '$1Sheets edition: cases go to the team Google Sheet, each with a Google Doc of its answers and decisions. Tools for the Zonos broker portal:'
+# Notion tracking and Claude Code research (which needs Notion Tasks) are off in this edition, so the description doesn't offer them.
+if ($code -notmatch "(?m)^// @description.*Notion case tracking, Claude Code cloud research,") { throw "Couldn't find the Notion options in the @description line." }
+$code = $code -replace "(?m)^(// @description.*)Notion case tracking, Claude Code cloud research,", '$1Google Sheet case tracking,'
 if ($code -match 'ntn_[A-Za-z0-9]{20,}|sk-ant-') { throw 'A key ended up in the Sheets edition. Not written.' }
 [IO.File]::WriteAllText($out, $code, (New-Object Text.UTF8Encoding($false)))
 Write-Host "Wrote $out"
