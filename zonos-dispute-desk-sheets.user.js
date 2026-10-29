@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @updateURL    https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-desk-sheets.user.js
-// @downloadURL  https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-desk-sheets.user.js
 // @version      7.11.0
 // @description  Sheets edition: cases go to the team Google Sheet, each with a Google Doc of its answers and decisions. Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
+// @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
+// @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
+// @updateURL    https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-desk-sheets.user.js
+// @downloadURL  https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-desk-sheets.user.js
 // @match        https://brokerage.dashboard.zonos.com/*
 // @match        https://claude.ai/*
 // @run-at       document-start

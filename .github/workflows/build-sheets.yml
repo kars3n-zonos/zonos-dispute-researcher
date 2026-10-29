@@ -1,0 +1,43 @@
+# Builds the Sheets edition (zonos-dispute-desk-sheets.user.js) from the Notion edition (zonos-dispute-researcher.user.js)
+# on every push that changes either script or the build, and commits it if it changed. Edit only the Notion edition.
+name: Build Sheets edition
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - zonos-dispute-researcher.user.js
+      - zonos-dispute-desk-sheets.user.js
+      - build-sheets.ps1
+      - .github/workflows/build-sheets.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-sheets
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        shell: pwsh
+        run: ./build-sheets.ps1
+
+      - name: Commit if it changed
+        run: |
+          if git diff --quiet -- zonos-dispute-desk-sheets.user.js; then
+            echo "Sheets edition already up to date."
+            exit 0
+          fi
+          version=$(grep -m1 -oP '^// @version\s+\K\S+' zonos-dispute-researcher.user.js)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add zonos-dispute-desk-sheets.user.js
+          git commit -m "v$version: Sheets edition built from the Notion edition"
+          git push

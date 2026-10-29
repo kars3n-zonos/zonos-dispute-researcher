@@ -10,11 +10,15 @@ A Tampermonkey script for the Zonos broker portal (brokerage.dashboard.zonos.com
 2. Go to `chrome://extensions`, open Tampermonkey's **Details**, and turn on **Allow User Scripts**. On older Chrome versions, turn on **Developer mode** instead.
 3. Open the install link and click **Install** (or **Update**, if you have the old Dispute Researcher):
    **https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js**
+   For the **Sheets edition** (cases go to the team Google Sheet, each with a Google Doc, instead of Notion), use this link instead:
+   **https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-desk-sheets.user.js**
 4. When Tampermonkey asks to allow a connection, choose **Always allow domain**.
 
 Updates install automatically: Tampermonkey checks this repo about once a day. To update right away, use Tampermonkey's **Check for userscript updates**.
 
-For the maintainer: raise `@version` with every change pushed to `main`, or Tampermonkey won't install it.
+For the maintainer:
+- Edit only `zonos-dispute-researcher.user.js` (the Notion edition). On every push to `main`, a GitHub Action runs `build-sheets.ps1` and commits the Sheets edition, which differs only in `EDITION` and its header.
+- Raise `@version` with every change pushed to `main`, or Tampermonkey won't install it.
 
 ## Opening Tools
 
