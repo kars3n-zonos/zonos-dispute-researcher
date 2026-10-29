@@ -52,7 +52,8 @@ For the maintainer:
   - Bulk Claim, Release, Wait, Resume, Escalate, Note, Assign and Resolve. Each shows what will happen, and in which mode (LIVE / TEST), before anything is sent.
   - The view picker switches back to the portal's own queue, or to **Portal+**.
 - **Portal+** (optional): the portal's own queue as you know it, without its limits: one list that loads as you scroll, sortable columns, search on anything, one-click Claim, details at once, select and bulk actions, and your place kept when you come back from an order.
-- **Batch work** (behind an access code in Settings): claim every unclaimed order of one class, then decide identical orders together.
+- **Batch work** (behind an access code in Settings): claim every unclaimed order of one class, then decide identical orders together. Orders are only grouped within one company, and disputes only when every disputed line's HS code, description, origin, claims, merchant reasons and questionnaire answers match exactly.
+  - **Work as one** opens one dispute of an identical group in the portal. Decisions you save there are copied to the rest, and when you press Submit you're asked whether to submit the rest too. Each copy is read again first and left alone if it no longer matches.
 
 ## Settings (⚙)
 
