@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.16.0
-// @description  Sheets edition: cases go to the team Google Sheet, each with a Google Doc of its answers and decisions. Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
+// @version      7.17.0
+// @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
 // @updateURL    https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-desk-sheets.user.js
@@ -25,6 +25,8 @@
 // @connect      entry.kars3n.com
 // @connect      api.notion.com
 // @connect      api.anthropic.com
+// @connect      script.google.com
+// @connect      script.googleusercontent.com
 // @connect      *
 // ==/UserScript==
 
@@ -158,9 +160,11 @@
   // Entry Assistant token and cloud routine. The shared file leaves it empty, so it holds no keys.
   // Anything set under Settings still wins; a blank setting falls back to the team's.
   const TEAM = {};
-  // Which edition this file is: 'notion' tracks cases in Notion; 'sheets' (built by build-sheets.ps1) tracks them in
-  // the team's Google Sheet, one row per case with a Google Doc of its answers and decisions, and leaves Notion off
+  // Which edition this file is: 'sheets' (since 7.17.0) tracks cases in the team's Google Sheet, one row per case with
+  // a Google Doc of its answers and decisions, plus its comments, prompts and Claude Code research. 'notion' (the
+  // retired Notion tracking, kept in the code but no longer shipped) tracked them in Notion and leaves the sheet off.
   const EDITION = 'sheets';
+  const trackedIn = EDITION === 'sheets' ? 'the Google Sheet' : 'Notion';   // where cases are tracked, for the panel's wording
   const CONFIG_DEFAULTS = {
     entryUrl: TEAM.entryUrl || 'https://entry.kars3n.com',   // the Entry Assistant site
     projectsDs: TEAM.projectsDs || '', tasksDs: TEAM.tasksDs || '', notionUser: '',   // Notion case tracking
@@ -2550,11 +2554,13 @@
     const enabled = () => EDITION !== 'sheets' && onDashboard && !!notionKey() && !!DS();
     const sheetsOn = () => EDITION === 'sheets' && onDashboard && !!cfg().sheetsUrl && !!cfg().sheetsSecret;
     // Research in Claude Code needs the Tasks database (the request lives there) and the cloud routine
-    const researchOn = () => enabled() && !!TASKS() && !!cfg().routineId && !!cfg().routineToken;
+    // (the Sheets edition keeps the request in the sheet's Research tab instead)
+    const researchOn = () => (EDITION === 'sheets' ? sheetsOn() : enabled() && !!TASKS()) && !!cfg().routineId && !!cfg().routineToken;
     // What "Research in Claude Code" still needs, in words (empty when it's ready)
     const researchMissing = () => [
-      !(notionKey() && DS()) && 'Notion case tracking (the key and the Projects id)',
-      !TASKS() && 'the Tasks data source id (under Notion case tracking)',
+      EDITION === 'sheets' && !sheetsOn() && 'the Google Sheet (its web app address and secret)',
+      EDITION !== 'sheets' && !(notionKey() && DS()) && 'Notion case tracking (the key and the Projects id)',
+      EDITION !== 'sheets' && !TASKS() && 'the Tasks data source id (under Notion case tracking)',
       !cfg().routineId && 'the routine id', !cfg().routineToken && 'the routine API token',
     ].filter(Boolean);
     // The portal's mode switch: cookie (and localStorage) "broker-portal-mode" = "test" | "live"
@@ -3036,15 +3042,19 @@
     }
     /* ---- the Sheets edition: the team's Google Sheet (one row per case) and a Google Doc per case for its answers
        and decisions, through the sheet's Apps Script web app (harness/google/OctoberDisputes.gs) */
+    // ctx: the case (null for the calls about the whole sheet, like the prompts)
     async function sheetsCall(action, ctx, extra = {}) {
       const r = await gmRequest({
         method: 'POST', url: cfg().sheetsUrl, timeout: 40000, headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        data: JSON.stringify({ secret: cfg().sheetsSecret, action, case: { id: ctx.id, name: ctx.name, type: ctx.kind, dashboard: ctx.url }, ...extra }),
+        data: JSON.stringify({ secret: cfg().sheetsSecret, action, ...(ctx ? { case: { id: ctx.id, name: ctx.name, type: ctx.kind, dashboard: ctx.url } } : {}), ...extra }),
       });
       let j = null;
       try { j = JSON.parse(r.responseText); } catch { /* not JSON */ }
+      // Comments, prompts and research came with the sheet's 2026-10-30 script: an older one doesn't know them
+      // (and asks for a case for the calls that have none)
+      if (!j?.ok && (/^Unknown action/.test(j?.error || '') || (!ctx && j?.error === 'No case id.'))) throw new Error("Google Sheet: the sheet's script is older than this. Karsen needs to update it (OctoberDisputes.gs, then Deploy > Manage deployments > New version).");
       if (!j?.ok) throw new Error(`Google Sheet: ${j?.error || `the web app answered ${r.status}`}`);
-      if (j.doc) { D.sheetCase = { id: ctx.id, doc: j.doc, sheet: j.sheet, links: j.links || {} }; changed(); }
+      if (j.doc && ctx) { D.sheetCase = { id: ctx.id, doc: j.doc, sheet: j.sheet, links: j.links || {} }; changed(); }
       return j;
     }
     // A portal action, for the sheet: claim and release set who's on it; wait, escalate and resume set Status;
@@ -3132,6 +3142,7 @@
       if (ent && sheetsOn()) {
         await sleep(3000);
         if (D.ent === ent) await sheetsCall('find', caseContext(ent)).catch(e => console.warn('[Dispute Desk] sheet', e));
+        if (D.ent === ent) pollAnswers(true);   // an answer that came in while you were away
         return;
       }
       if (!ent || !enabled()) { if (ent) D.state = 'off'; changed(); return; }
@@ -3257,6 +3268,7 @@
       if (!researchOn()) throw new Error(`Research in Claude Code still needs ${researchMissing().join(', ')}. Add it under Settings (the cog in Tools).`);
       const ctx = caseContext(D.ent);
       const what = lines.length ? `line${lines.length > 1 ? 's' : ''} ${lines.join(', ')}` : label;
+      if (EDITION === 'sheets') return queueSheetResearch(ctx, { prompt, docs, lines, label, openTab, what });
       // Always written, test mode included: it's your click, and Claude Code needs the case to answer on
       const page = D.row || await apply(ctx, { status: 'In progress', hold: 'Research sent to Claude Code.', log: `Created from the broker portal by "Research in Claude Code" (${midSentence(ctx.kind)} ${ctx.id}).`, withSnapshot: true, create: true, explicit: true });
       if (!page) throw new Error("Couldn't create the case in Notion, so the research wasn't sent.");
@@ -3306,15 +3318,43 @@
       try { if (onDashboard) portal.me().then(s => { if (s.id && s.id !== D.me) { D.me = s.id; GM_setValue('desk:me', s.id); } }).catch(() => {}); } catch { /* not on the portal */ }
     }, 0);   // after the portal helpers exist
 
-    // Starts the cloud research session for a research task; the session URL goes on the case as its Chat Link
-    async function fireResearch(taskId, pageId, { openTab = true } = {}) {
+    // Sheets edition: the request goes in the sheet's Research tab, and the cloud session is told how to read it and
+    // send its answer back, with that one request's own token (never the sheet's secret)
+    async function queueSheetResearch(ctx, { prompt, docs, lines, label, openTab, what }) {
+      const ent = D.ent;
+      const who = GM_getValue(AUTHOR_KEY, '') || (await portalName()) || '';
+      const r = await sheetsCall('research', ctx, { request: {
+        prompt, lines, what, who, label: `${label}${testMode() ? ' [test mode]' : ''}`,
+        docs: docs.map(x => ({ name: x.name, url: /^https?:/.test(x.url || '') ? x.url : '' })),
+      } });
+      const research = { at: Date.now(), what, requestId: r.requestId };
+      const f = await fireResearch(null, null, { openTab, text: sheetResearchText(r.requestId, r.token) });
+      if (f.session) await sheetsCall('session', ctx, { requestId: r.requestId, session: f.session }).catch(e => console.warn('[Dispute Desk] sheet', e));
+      // No session means nobody will answer it: the request is marked failed, not left waiting
+      else await sheetsCall('fail', null, { requestId: r.requestId, reason: `The cloud session didn't start: ${f.fireError || 'no reason given'}.` }).catch(e => console.warn('[Dispute Desk] sheet', e));
+      Object.assign(research, f);
+      GM_setValue(`desk:research:${ent.id}`, research);
+      if (D.ent === ent) { D.research = research; changed(); }
+      return { requestId: r.requestId, session: f.session, fireError: f.fireError, limited: f.limited };
+    }
+    // What the cloud session is told (its worker, dispute-desk-cloud's worker.py, takes Google Sheet requests too):
+    // the request id, that request's own token and the sheet's web app address
+    const sheetResearchText = (id, token) => [
+      `Research request (Google Sheet): ${id}`,
+      `Before anything else run: python3 worker.py sheet ${id} ${token} ${cfg().sheetsUrl}`,
+      `Then work it exactly as CLAUDE.md says for any request, with ${id} in place of the task id.`,
+    ].join('\n');
+
+    // Starts the cloud research session for a research task; the session URL goes on the case as its Chat Link.
+    // `text` replaces the Notion task line (the Sheets edition's request).
+    async function fireResearch(taskId, pageId, { openTab = true, text = '' } = {}) {
       const { routineId, routineToken } = cfg();
       if (!routineId || !routineToken) return { fireError: 'no routine set up' };
       try {
         const r = await gmRequest({
           method: 'POST', url: `https://api.anthropic.com/v1/claude_code/routines/${routineId}/fire`, timeout: 30000,
           headers: { Authorization: `Bearer ${routineToken}`, 'anthropic-version': '2026-10-21', 'Content-Type': 'application/json' },
-          data: JSON.stringify({ text: `Research request (Notion task id): ${taskId}` }),
+          data: JSON.stringify({ text: text || `Research request (Notion task id): ${taskId}` }),
         });
         const j = (() => { try { return JSON.parse(r.responseText); } catch { return null; } })();
         if (r.status >= 200 && r.status < 300 && j?.claude_code_session_url) {
@@ -3386,8 +3426,39 @@
     // Every 30 seconds while research is out (sent to Claude Code, or a research task not Done), otherwise every
     // 2 minutes. The page's blocks are listed only when the page changed since the last look.
     let lastSeenEdit = { row: '', at: '' };
+    // Sheets edition: while a request for this case is out, its Research rows are read every 30 seconds; each answer
+    // is handed to the panel once (the sheet's script has already put it in the case doc)
+    async function pollSheetAnswers(force) {
+      const ent = D.ent;
+      const out = ent && (D.research || GM_getValue(`desk:research:${ent.id}`, null));
+      if (!sheetsOn() || !out || !importer || (!force && Date.now() - lastPoll < POLL_MS)) return;
+      lastPoll = Date.now();
+      try {
+        const { requests = [] } = await sheetsCall('researchStatus', caseContext(ent));
+        if (D.ent !== ent) return;
+        const done = GM_getValue(IMPORTED, {});
+        let news = false;
+        for (const q of requests) {
+          if (done[q.id] || (q.status !== 'Done' && q.status !== 'Failed')) continue;
+          done[q.id] = Date.now();
+          news = true;
+          if (q.status === 'Done' && q.answer) {
+            importer({ text: q.answer, lines: q.lines.split(/[,\s]+/).filter(Boolean).map(Number), title: `Claude Code answer · ${q.id}` });
+            D.msg = 'Claude Code answered. Its answer is saved below and in the case doc.';
+          } else D.msg = `Claude Code couldn't finish the research: ${q.answer || 'no reason given'}`;
+        }
+        if (news) GM_setValue(IMPORTED, done);
+        if (!requests.some(q => q.status === 'Waiting' || q.status === 'Researching')) {
+          D.research = null;
+          GM_deleteValue(`desk:research:${ent.id}`);
+          news = true;
+        }
+        if (news) changed();
+      } catch (e) { console.warn('[Dispute Desk] checking for Claude Code answers', e); }
+    }
     async function pollAnswers(force) {
-      const waiting = !!(D.research || GM_getValue(`desk:research:${D.ent?.id}`, null) || D.links?.tasks?.some(t => t.status !== 'Done'));
+      if (EDITION === 'sheets') return pollSheetAnswers(force);
+      const waiting =!!(D.research || GM_getValue(`desk:research:${D.ent?.id}`, null) || D.links?.tasks?.some(t => t.status !== 'Done'));
       if (!enabled() || !D.row || !importer || (!force && Date.now() - lastPoll < (waiting ? POLL_MS : 4 * POLL_MS))) return;
       lastPoll = Date.now();
       await refreshLinks();
@@ -3435,7 +3506,15 @@
         return h('div', { class: 'section' }, h('p', { class: 'label', text: `Case · ${kindOf(ent.type)}` }),
           h('div', { class: 'order-card' },
             h('p', { class: 'hint', style: 'margin:0', text: sc ? 'In the Google Sheet.' : 'Not in the Google Sheet yet: claiming it adds it.' }),
-            sc && h('div', { class: 'row', style: 'gap:12px;margin-top:6px' }, sc.sheet && a(sc.sheet, 'Sheet'), sc.doc && a(sc.doc, 'Case doc')),
+            sc && h('div', { class: 'row', style: 'gap:12px;margin-top:6px' }, sc.sheet && a(sc.sheet, 'Sheet'), sc.doc && a(sc.doc, 'Case doc'), sc.links?.chat && a(sc.links.chat, 'Claude chat')),
+            // Research out with Claude Code: when, its session, and whether the session started
+            (() => {
+              const r = D.research || GM_getValue(`desk:research:${ent.id}`, null);
+              if (!r) return null;
+              return h('p', { class: 'hint' }, `Research for Claude Code (${r.what}) sent ${shortDate(r.at)}. Its answer shows up below by itself. `,
+                r.session && a(r.session, 'Open the research session'),
+                r.fireError && h('span', { class: 'warn', text: `The cloud session didn't start (${r.fireError}). Press Research in Claude Code to try again.` }));
+            })(),
             D.msg && h('p', { class: `hint ${D.state === 'error' ? 'err' : 'ok'}`, text: D.msg })));
       }
       if (!enabled() || !ent) return null;   // Notion tracking is optional (Settings (the cog in Tools))
@@ -3526,6 +3605,17 @@
     }
     // The team's texts into PROMPTS_KEY, when they're older than 10 minutes (or now, with force)
     async function loadPrompts(force) {
+      // Sheets edition: the Prompts tab of the team's sheet
+      if (EDITION === 'sheets') {
+        if (!sheetsOn()) { GM_deleteValue(PROMPTS_KEY); return null; }
+        const from = cfg().sheetsUrl;
+        const have = GM_getValue(PROMPTS_KEY, null);
+        if (!force && have?.from === from && Date.now() - have.at < 10 * 60000) return have;
+        const { texts = {} } = await sheetsCall('prompts', null);
+        const v = { at: Date.now(), from, texts };
+        GM_setValue(PROMPTS_KEY, v);
+        return v;
+      }
       const ds = PROMPTS();
       if (!notionKey() || !ds) { GM_deleteValue(PROMPTS_KEY); return null; }
       const have = GM_getValue(PROMPTS_KEY, null);
@@ -3539,6 +3629,13 @@
     // Makes the Prompts database next to Projects (when there isn't one yet) and adds a row, with the built-in
     // text, for every piece it doesn't have. Rows already there are left as the team wrote them.
     async function setupPrompts(say = () => {}) {
+      if (EDITION === 'sheets') {
+        if (!sheetsOn()) throw new Error('Set up the Google Sheet first (its web app address and secret, above).');
+        say('Adding the prompts to the Prompts tab of the Google Sheet…');
+        const r = await sheetsCall('setupPrompts', null, { pieces: promptPieces() });
+        await loadPrompts(true);
+        return { made: r.made, added: r.added, url: r.url };
+      }
       if (!notionKey() || !DS()) throw new Error('Set up Notion case tracking first (the key and Projects).');
       let ds = PROMPTS();
       let made = false;
@@ -3626,9 +3723,27 @@
       };
     }
     // The open case's comments: { id (the case), row, state: off | loading | ready | error, list (oldest first) }
+    // Sheets edition: who you are in the Comments tab ("Your name" in Settings, else your portal name)
+    const sheetName = async () => GM_getValue(AUTHOR_KEY, '') || D.myName || (await portalName()) || 'Someone';
+    async function loadSheetComments(ent) {
+      if (!sheetsOn()) { D.comments = { id: ent.id, state: 'off', list: [] }; changed(); return; }
+      D.comments = { id: ent.id, row: '', state: 'loading', list: [] };
+      changed();
+      try {
+        const me = await sheetName();
+        const { comments = [] } = await sheetsCall('comments', caseContext(ent));
+        if (D.ent !== ent) return;
+        D.comments = { id: ent.id, row: '', state: 'ready', list: comments.map((c, i) => ({ id: String(i), who: c.who, at: c.at, time: c.at, text: c.text, mine: c.who === me })) };
+      } catch (e) {
+        if (D.ent !== ent) return;
+        D.comments = { id: ent.id, row: '', state: 'error', list: [], error: e.message };
+      }
+      changed();
+    }
     async function loadComments() {
       const ent = D.ent;
       if (!ent) return;
+      if (EDITION === 'sheets') return loadSheetComments(ent);
       if (!enabled()) { D.comments = { id: ent.id, state: 'off', list: [] }; changed(); return; }
       const row = D.row?.id || '';
       D.comments = { id: ent.id, row, state: row ? 'loading' : 'ready', list: [] };
@@ -3657,6 +3772,7 @@
     // Posts a new comment on the case (the case is made if it isn't in Notion yet). It's your click, so like
     // the other buttons it writes in test mode too, on a [TEST] case.
     async function postComment(text) {
+      if (EDITION === 'sheets') return postSheetComment(text);
       if (!enabled() || !D.ent) throw new Error('Set up Notion case tracking first (Settings).');
       text = String(text || '').trim();
       if (!text) throw new Error('Write the comment first.');
@@ -3682,6 +3798,24 @@
       }
       changed();
       return c;
+    }
+
+    // Sheets edition: a row in the sheet's Comments tab (the case's row is made if it's new) and a line in its doc.
+    // Like the sheet's other writes, nothing is written in the portal's test mode.
+    async function postSheetComment(text) {
+      if (!sheetsOn() || !D.ent) throw new Error('Set up the Google Sheet first (Settings).');
+      if (dryRun()) throw new Error("the portal is in test mode, so nothing is written to the team's sheet.");
+      text = String(text || '').trim();
+      if (!text) throw new Error('Write the comment first.');
+      const ent = D.ent;
+      const who = await sheetName();
+      const { comment } = await sheetsCall('comment', caseContext(ent), { who, text });
+      if (D.ent === ent) {
+        const cm = D.comments?.id === ent.id && D.comments.state !== 'error' ? D.comments : { id: ent.id, row: '', state: 'ready', list: [] };
+        D.comments = { ...cm, state: 'ready', list: [...cm.list, { id: String(cm.list.length), who, at: comment?.at || stamp(), time: comment?.at || '', text, mine: true }] };
+      }
+      changed();
+      return comment;
     }
 
     /* ---- the case chat: a "Case chat" toggle on the case page, one block per message:
@@ -3791,6 +3925,8 @@
       },
       finalIsOwn: () => !!(D.row?.properties?.['Final answer']?.rich_text || []).length,
       setOwnAnswer, loadChat, appendChat, sheetsOn, saveCaseDetails,
+      // Cases are tracked somewhere (the Google Sheet, or Notion in the retired Notion edition)
+      tracking: () => (EDITION === 'sheets' ? sheetsOn() : enabled()),
       loadPrompts, setupPrompts, promptsInfo, commentsFor, loadComments, postComment,
       // The open case's Front, Slack and AI chat links, where they're known (the sheet row or the Notion case)
       caseLinks: () => {
@@ -6091,21 +6227,33 @@
     const promptsNote = note();
     const showPromptsInfo = () => {
       const i = desk.promptsInfo();
+      if (EDITION === 'sheets') {
+        say(promptsNote, !desk.sheetsOn() ? 'Set up the Google Sheet above first. Until then the research prompts use the built-in text.'
+          : i?.rows ? `Using the team's prompts from the Prompts tab (read ${shortDate(i.at)}): ${i.edited} of the pieces differ from the built-in text.`
+          : i ? 'The sheet has no Prompts tab yet, so the built-in text is used. Press Set up Prompts to add it.' : 'Not read from the sheet yet. Press Refresh.');
+        return;
+      }
       say(promptsNote, !cfg().promptsDs ? 'Research prompts use the built-in text. Press Set up Prompts to make them editable in Notion.'
         : i ? `Using the team's prompts from Notion (read ${shortDate(i.at)}): ${i.edited} of the pieces differ from the built-in text.` : 'Not read from Notion yet. Press Refresh.');
     };
     const setUpPrompts = async () => {
-      setCfg({ promptsDs: clean(promptsInput.value) });
+      if (EDITION !== 'sheets') setCfg({ promptsDs: clean(promptsInput.value) });
       try {
         const r = await desk.setupPrompts(t => say(promptsNote, t));
-        promptsInput.value = cfg().promptsDs;
-        say(promptsNote, `${r.made ? 'Made the Prompts database next to Projects in Notion' : 'Prompts is set up'}${r.added ? ` and added ${r.added} piece${r.added === 1 ? '' : 's'} with the built-in text` : ': every piece is already there'}. Edit the Text column in Notion; a blank Text uses the built-in text. Share the data source id with the team (Copy my setup includes it).`, 'ok');
+        if (EDITION === 'sheets') {
+          promptsNote.replaceChildren(`${r.made ? 'Made the Prompts tab in the Google Sheet' : 'The Prompts tab is set up'}${r.added ? ` and added ${r.added} piece${r.added === 1 ? '' : 's'} with the built-in text` : ': every piece is already there'}. Edit the Text column there; a blank Text uses the built-in text. Everyone using the sheet gets the changes within 10 minutes. `,
+            r.url ? h('a', { href: r.url, target: '_blank', rel: 'noopener', text: 'Open the Prompts tab' }) : '');
+          promptsNote.className = 'hint ok';
+        } else {
+          promptsInput.value = cfg().promptsDs;
+          say(promptsNote, `${r.made ? 'Made the Prompts database next to Projects in Notion' : 'Prompts is set up'}${r.added ? ` and added ${r.added} piece${r.added === 1 ? '' : 's'} with the built-in text` : ': every piece is already there'}. Edit the Text column in Notion; a blank Text uses the built-in text. Share the data source id with the team (Copy my setup includes it).`, 'ok');
+        }
         afterSetup();
       } catch (err) { say(promptsNote, err.message, 'err'); }
     };
     const refreshPrompts = async () => {
-      setCfg({ promptsDs: clean(promptsInput.value) });
-      say(promptsNote, 'Reading the prompts from Notion…');
+      if (EDITION !== 'sheets') setCfg({ promptsDs: clean(promptsInput.value) });
+      say(promptsNote, `Reading the prompts from ${trackedIn}…`);
       try { await desk.loadPrompts(true); showPromptsInfo(); } catch (err) { say(promptsNote, err.message, 'err'); }
     };
     // "Find me": lists the workspace's people (needs the key saved) so nobody has to dig out their user id
@@ -6239,7 +6387,7 @@
         h('div', { class: 'row' }, entryUrlInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, tokenInput, btn('Save', saveEntry), btn('Test', () => testConnection())),
         tokenNote),
-      EDITION === 'sheets' && group('Google Sheet', 'Each case you claim gets a row in the team sheet and its own Google Doc with the answers and decisions. Both values come in the setup block from Karsen.',
+      EDITION === 'sheets' && group('Google Sheet', "Each case you claim gets a row in the team sheet and its own Google Doc with the answers, decisions and comments. The sheet also holds the team's research prompts and the Claude Code research requests. Both values come in the setup block from Karsen.",
         h('div', { class: 'row' }, sheetsUrlInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, sheetsSecretInput, btn('Save and test', saveSheets)),
         sheetsNote),
@@ -6254,11 +6402,13 @@
         h('label', { class: 'doc', style: 'margin-top:6px' },
           h('input', { type: 'checkbox', checked: desk.writeInTest.get(), onchange: e => desk.writeInTest.set(e.target.checked) }),
           h('span', { text: 'Write to Notion in test mode too (normally test mode is a dry run)' }))),
-      EDITION !== 'sheets' && group('Prompts', "The research prompts' fixed text (the brief, rules, research steps, claim checks, reply rules and each queue class's guide), editable by the team in a Prompts database in Notion. The parts built from the case itself stay as they are.",
-        h('div', { class: 'row' }, promptsInput),
+      group('Prompts', `The research prompts' fixed text (the brief, rules, research steps, claim checks, reply rules and each queue class's guide), editable by the team in ${EDITION === 'sheets' ? 'the Prompts tab of the Google Sheet' : 'a Prompts database in Notion'}. The parts built from the case itself stay as they are.`,
+        EDITION !== 'sheets' && h('div', { class: 'row' }, promptsInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, btn('Set up Prompts', () => setUpPrompts()), btn('Refresh', () => refreshPrompts())),
         (showPromptsInfo(), promptsNote)),
-      EDITION !== 'sheets' && group('Claude Code research', 'Adds "Research in Claude Code" beside Open in claude.ai on the Research tab: the request goes to your Notion Tasks and starts your cloud routine, and the answer comes back to the panel by itself.',
+      group('Claude Code research', EDITION === 'sheets'
+        ? 'Adds "Research in Claude Code" beside Open in claude.ai on the Research tab: the request goes in the Research tab of the Google Sheet and starts your cloud routine, which reads it, researches, and sends its answer back to the sheet. The answer then shows up in the panel and the case doc by itself. The routine needs to be able to reach script.google.com.'
+        : 'Adds "Research in Claude Code" beside Open in claude.ai on the Research tab: the request goes to your Notion Tasks and starts your cloud routine, and the answer comes back to the panel by itself.',
         h('div', { class: 'row' }, routineIdInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, routineTokenInput, btn('Save', saveRoutine)),
         routineNote),
@@ -6555,8 +6705,8 @@
       const idle = !isCasePage();
       if (idle) researchIdle.replaceChildren(
         h('p', { class: 'muted', text: 'Open a dispute or a work order to research it here. Classify and Quote work on any page.' }),
-        !entryToken() && !desk.enabled()
-          ? h('p', { class: 'hint' }, 'To add HTS facts, Notion tracking or Claude Code research, open ', h('button', { class: 'linkish', type: 'button', text: 'Settings', onclick: () => setView('settings') }), ' (the cog).')
+        !entryToken() && !desk.tracking()
+          ? h('p', { class: 'hint' }, `To add HTS facts, ${EDITION === 'sheets' ? 'Google Sheet' : 'Notion'} tracking or Claude Code research, open `, h('button', { class: 'linkish', type: 'button', text: 'Settings', onclick: () => setView('settings') }), ' (the cog).')
           : null);
       researchIdle.hidden = !idle;
       body.hidden = idle;
@@ -7333,10 +7483,10 @@
         h('div', { class: 'row' }, frontIn),
         h('div', { class: 'row', style: 'margin-top:6px' }, slackIn),
         h('div', { class: 'row', style: 'margin-top:6px' }, chatIn),
-        s.linksMsg.textContent ? s.linksMsg : h('p', { class: 'hint', text: desk.enabled() ? 'Saved to the case in Notion as soon as you paste one.' : 'Saved to the case once Notion is set up (Settings).' }));
+        s.linksMsg.textContent ? s.linksMsg : h('p', { class: 'hint', text: desk.tracking() ? `Saved to the case in ${trackedIn} as soon as you paste one.` : `Saved to the case once ${trackedIn} is set up (Settings).` }));
 
-      // Comments: everyone's comments on the case in Notion (oldest first), and a box to post yours. A post is a
-      // new comment, @mentioning you and signed with your name; what you're writing is kept here until it's posted.
+      // Comments: everyone's comments on the case (the sheet's Comments tab, or Notion), oldest first, and a box to post
+      // yours, signed with your name; what you're writing is kept here until it's posted.
       const comments = desk.commentsFor();
       const draftKey = `desk:commentDraft:${d.disputeId}`;
       const post = async () => {
@@ -7349,7 +7499,7 @@
           await desk.postComment(text);
           s.commentIn.value = '';
           GM_deleteValue(draftKey);
-          s.commentNote.textContent = `Posted to the case in Notion${desk.testMode() ? ' (test mode: on the [TEST] case)' : ''}.`;
+          s.commentNote.textContent = EDITION === 'sheets' ? 'Posted to the Google Sheet (Comments) and the case doc.' : `Posted to the case in Notion${desk.testMode() ? ' (test mode: on the [TEST] case)' : ''}.`;
           s.commentNote.className = 'hint ok';
         } catch (err) { s.commentNote.textContent = `Not posted: ${err.message}`; s.commentNote.className = 'hint err'; }
         s.postBtn.disabled = false;
@@ -7367,15 +7517,15 @@
       const commentSection = h('div', { class: 'section' },
         h('div', { class: 'row', style: 'align-items:baseline' },
           h('p', { class: 'label', style: 'margin:0', text: `Comments${list.length ? ` (${list.length})` : ''}` }),
-          desk.enabled() && h('span', { style: 'margin-left:auto' }, noteLink('Refresh', () => desk.loadComments()))),
+          desk.tracking() && h('span', { style: 'margin-left:auto' }, noteLink('Refresh', () => desk.loadComments()))),
         comments?.state === 'loading' ? h('p', { class: 'hint', text: 'Loading the comments on this case…' })
           : comments?.state === 'error' ? h('p', { class: 'hint err', text: `Couldn't read the comments: ${comments.error}` })
-          : comments?.state === 'off' ? h('p', { class: 'hint', text: 'Set up Notion case tracking (Settings) to see and post comments on the case.' })
-          : !list.length ? h('p', { class: 'hint', text: desk.hasRow() ? 'No comments on this case yet.' : 'This case isn\'t in Notion yet: posting a comment adds it.' })
+          : comments?.state === 'off' ? h('p', { class: 'hint', text: `Set up ${EDITION === 'sheets' ? 'the Google Sheet' : 'Notion case tracking'} (Settings) to see and post comments on the case.` })
+          : !list.length ? h('p', { class: 'hint', text: EDITION === 'sheets' || desk.hasRow() ? 'No comments on this case yet.' : 'This case isn\'t in Notion yet: posting a comment adds it.' })
           : h('div', { class: 'tasks' }, list.map(c => h('div', { style: 'margin-top:8px' },
             h('p', { class: 'hint', style: 'margin:0', text: `${c.mine ? 'You' : c.who} · ${c.at}` }),
             h('p', { style: 'margin:2px 0 0;white-space:pre-wrap', text: c.text })))),
-        desk.enabled() && [
+        desk.tracking() && [
           h('div', { style: 'margin-top:8px' }, s.commentIn),
           h('div', { class: 'row', style: 'margin-top:6px' }, s.postBtn),
           s.commentNote.textContent && s.commentNote,
@@ -7389,14 +7539,15 @@
         storeAnswer(`${FINAL_LABEL} ${answer}`, isOrder ? [] : picked.length ? picked.map(i => i.line) : inDispute.map(i => i.line), true);
         foundIn.value = '';
         const where = await desk.saveCaseDetails({ answer });
-        setStatus(where ? `Saved to ${where}.` : 'Saved on this computer (Notion isn\'t set up).', 'ok');
+        setStatus(where ? `Saved to ${where}.` : `Saved on this computer (${trackedIn} isn't set up).`, 'ok');
         render();
       };
       const detailsSection = h('div', { class: 'section' },
         h('p', { class: 'label', text: 'The answer we found' }),
         foundIn,
         h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => run(saveDetails) })),
-        h('p', { class: 'hint', text: desk.enabled() ? "It becomes the case's Final answer in Notion, with your name." : 'Saved on this computer.' }));
+        h('p', { class: 'hint', text: !desk.tracking() ? 'Saved on this computer.'
+          : EDITION === 'sheets' ? "It goes in the case's Answer cell in the Google Sheet and in its doc, with your name." : "It becomes the case's Final answer in Notion, with your name." }));
 
       desk.setPageData(d);
       const deskCard = desk.card(noteLink);
@@ -7480,7 +7631,8 @@
       markSent(d.disputeId, d.items);
       render();
       setStatus(r.dry ? 'Test mode: the research request was not written (see the case card). Tick "Write to Notion in test mode" under Settings (the cog in Tools) to try it for real.'
-        : r.session ? 'Sent to Claude Code. Its research session opened in a new tab; the answer shows up here and on the case in Notion when it finishes.'
+        : r.session ? `Sent to Claude Code. Its research session opened in a new tab; the answer shows up here and ${EDITION === 'sheets' ? "in the case doc" : 'on the case in Notion'} when it finishes.`
+        : EDITION === 'sheets' ? `The cloud session didn't start${r.fireError ? ` (${r.fireError})` : ''}, so nothing is researching it. Press Research in Claude Code to try again.`
         : `Sent to Claude Code, but the cloud session didn't start right away${r.fireError ? ` (${r.fireError})` : ''}. The hourly sweep will pick it up; the answer shows up here and on the case in Notion.`, r.dry || !r.session ? 'warn' : 'ok');
       return r;
     }
