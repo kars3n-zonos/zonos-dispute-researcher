@@ -10,15 +10,18 @@ A Tampermonkey script for the Zonos broker portal (brokerage.dashboard.zonos.com
 2. Go to `chrome://extensions`, open Tampermonkey's **Details**, and turn on **Allow User Scripts**. On older Chrome versions, turn on **Developer mode** instead.
 3. Open the install link and click **Install** (or **Update**, if you have the old Dispute Researcher):
    **https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js**
-   For the **Sheets edition** (cases go to the team Google Sheet, each with a Google Doc, instead of Notion), use this link instead:
-   **https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-desk-sheets.user.js**
+   (If you installed "Zonos Dispute Desk (Sheets)" from `zonos-dispute-desk-sheets.user.js`, keep it: since 7.17.0 it's the same script. Install only one of the two.)
 4. When Tampermonkey asks to allow a connection, choose **Always allow domain**.
+5. Under Settings (⚙) > Back up or move your setup, paste the setup block from Karsen and press **Import**. It connects you to the team's Google Sheet.
 
 Updates install automatically: Tampermonkey checks this repo about once a day. To update right away, use Tampermonkey's **Check for userscript updates**.
 
+Cases are tracked in the team's **Google Sheet** (since 7.17.0): one row per case, a Google Doc per case, and Comments, Prompts and Research tabs. Notion tracking is retired; its code is still in the script but off.
+
 For the maintainer:
-- Edit only `zonos-dispute-researcher.user.js` (the Notion edition). On every push to `main`, a GitHub Action runs `build-sheets.ps1` and commits the Sheets edition, which differs only in `EDITION` and its header.
+- Edit only `zonos-dispute-researcher.user.js`. On every push to `main`, a GitHub Action runs `build-sheets.ps1` and commits `zonos-dispute-desk-sheets.user.js`, the same script under its own name and update address.
 - Raise `@version` with every change pushed to `main`, or Tampermonkey won't install it.
+- The sheet's web app is `OctoberDisputes.gs` (kept outside this repo, since it holds the sheet's secret). After changing it: Deploy > Manage deployments > edit > Version: New version > Deploy.
 
 ## Opening Tools
 
@@ -47,7 +50,9 @@ For the maintainer:
   - Mine / Unclaimed / Waiting / Escalated / All open.
   - Filters, sorting, grouping, summary counts and saved views.
   - Bulk Claim, Release, Wait, Resume, Escalate, Note, Assign and Resolve. Each shows what will happen, and in which mode (LIVE / TEST), before anything is sent.
-  - **Portal view** switches back.
+  - The view picker switches back to the portal's own queue, or to **Portal+**.
+- **Portal+** (optional): the portal's own queue as you know it, without its limits: one list that loads as you scroll, sortable columns, search on anything, one-click Claim, details at once, select and bulk actions, and your place kept when you come back from an order.
+- **Batch work** (behind an access code in Settings): claim every unclaimed order of one class, then decide identical orders together.
 
 ## Settings (⚙)
 
@@ -63,8 +68,10 @@ Every section folds open:
   - questionnaire program ids replaced with what they are
   - keyboard shortcuts
 - **Entry Assistant:** your own token, for the HTS facts in research prompts.
-- **Notion case tracking** (optional): tracks each dispute and order you work as a row in your Notion database.
-- **Claude Code research** (optional): a "Research in Claude Code" button that files the request in Notion Tasks and starts your cloud routine. It needs Notion with a Tasks database.
+- **Google Sheet:** the team sheet's web app address and secret (from the setup block). Each case you claim gets a row and a Google Doc; the Research tab shows the case's comments, and you can post your own.
+- **Prompts:** the research prompts' fixed text, editable by the team in the sheet's Prompts tab (**Set up Prompts** adds it).
+- **Claude Code research** (optional): a "Research in Claude Code" button that puts the request in the sheet's Research tab and starts your cloud routine; the answer comes back to the panel and the case doc.
+- **Access code:** unlocks Batch work for the people given the code.
 - **Shared answers** (optional): a notes server address for sharing saved answers.
 - **Back up or move your setup:** **Copy my setup** and **Import**. That text includes your keys, so keep it private.
 
