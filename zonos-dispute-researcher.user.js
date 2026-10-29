@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.13.0
+// @version      7.13.1
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -2777,11 +2777,15 @@
     }
 
     const rowCache = GM_getValue(ROWS, {});
+    // The case's row as last found on this computer (one call, no search), or null
+    async function cachedRow(id) {
+      if (!rowCache[id]) return null;
+      const p = await notion('GET', `/pages/${rowCache[id]}`).catch(() => null);
+      return p && !p.in_trash && !p.archived ? p : null;
+    }
     async function findRow(ctx) {
-      if (rowCache[ctx.id]) {
-        const p = await notion('GET', `/pages/${rowCache[ctx.id]}`).catch(() => null);
-        if (p && !p.in_trash && !p.archived) return p;
-      }
+      const known = await cachedRow(ctx.id);
+      if (known) return known;
       const q = filter => notion('POST', `/data_sources/${DS()}/query`, { filter, page_size: 3 }).then(r => r.results || []);
       let rows = await q({ property: 'Dashboard', url: { contains: ctx.id } });
       for (const t of ctx.tracking.slice(0, 2)) {
@@ -2856,8 +2860,11 @@
       Object.assign(props, claimProps(assign, me, name));
       if (resolution) props.Resolution = { rich_text: resolutionText(resolution, me, name) };
       if (Object.keys(props).length) page = await notion('PATCH', `/pages/${page.id}`, { properties: props });
-      await addAboveLog(page.id, [...(withSnapshot ? [snapshot(ctx)] : []), ...(extra || [])]);
-      await addLog(page.id, [logLine]);
+      // One read of the page's blocks for both: new blocks go just above the Case log, the line goes inside it
+      const { log: logId, prev } = await pageLayout(page.id);
+      const above = [...(withSnapshot ? [snapshot(ctx)] : []), ...(extra || [])];
+      if (above.length) await notion('PATCH', `/blocks/${page.id}/children`, prev ? { after: prev, children: above } : { position: { type: 'start' }, children: above });
+      await notion('PATCH', `/blocks/${logId}/children`, { children: [logItem(logLine)] });
       return page;
     }
 
@@ -3010,22 +3017,35 @@
         return;
       }
       if (!ent || !enabled()) { if (ent) D.state = 'off'; changed(); return; }
-      await sleep(3000);   // let the portal load its data
-      if (D.ent !== ent) return;
       try {
-        const ctx = caseContext(ent);
-        const page = await findRow(ctx);
+        // A case seen before on this computer is found straight away by its saved row. A new one is searched for
+        // by its link and tracking numbers, which needs the portal's data, so that waits for the portal to load.
+        let page = await cachedRow(ent.id);
         if (D.ent !== ent) return;
+        if (!page) {
+          await sleep(3000);
+          if (D.ent !== ent) return;
+          page = await findRow(caseContext(ent));
+          if (D.ent !== ent) return;
+        }
         if (page) {
           D.row = page;
           D.state = 'tracked';
+          changed();   // the card and the comments show now; the rest happens behind them
+          pollAnswers(true);
           const k = `desk:opened:${ent.id}`;
           if (Date.now() - GM_getValue(k, 0) > OPEN_LOG_THROTTLE_MS) {
             GM_setValue(k, Date.now());
-            await apply(ctx, { log: `Opened ${midSentence(ctx.kind)} ${ent.id}.`, withSnapshot: true });
-            D.msg = dryRun() ? 'Test mode: would log this visit' : 'Visit logged in Notion';
+            // The visit's portal snapshot needs the portal's data
+            sleep(3000)
+              .then(() => {
+                if (D.ent !== ent) return null;
+                const ctx = caseContext(ent);
+                return apply(ctx, { log: `Opened ${midSentence(ctx.kind)} ${ent.id}.`, withSnapshot: true });
+              })
+              .then(p => { if (p && D.ent === ent) { D.msg = dryRun() ? 'Test mode: would log this visit' : 'Visit logged in Notion'; changed(); } })
+              .catch(e => console.warn('[Dispute Desk] logging the visit', e));
           }
-          pollAnswers(true);
         } else {
           // Not in Notion yet: nothing is created until you press "Research in Claude Code" (or "Start case now")
           D.state = 'untracked';
