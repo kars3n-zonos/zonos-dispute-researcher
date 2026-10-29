@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.14.0
+// @version      7.15.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -2546,6 +2546,12 @@
     const sheetsOn = () => EDITION === 'sheets' && onDashboard && !!cfg().sheetsUrl && !!cfg().sheetsSecret;
     // Research in Claude Code needs the Tasks database (the request lives there) and the cloud routine
     const researchOn = () => enabled() && !!TASKS() && !!cfg().routineId && !!cfg().routineToken;
+    // What "Research in Claude Code" still needs, in words (empty when it's ready)
+    const researchMissing = () => [
+      !(notionKey() && DS()) && 'Notion case tracking (the key and the Projects id)',
+      !TASKS() && 'the Tasks data source id (under Notion case tracking)',
+      !cfg().routineId && 'the routine id', !cfg().routineToken && 'the routine API token',
+    ].filter(Boolean);
     // The portal's mode switch: cookie (and localStorage) "broker-portal-mode" = "test" | "live"
     function portalMode() {
       const c = (document.cookie.match(/(?:^|;\s*)broker-portal-mode=([^;]*)/) || [])[1];
@@ -2566,6 +2572,12 @@
     const varsByOp = {};
     const opOf = url => (String(url || '').match(/\/api\/graphql\/[^/?#]+\/(\w+)/) || [])[1] || '';
     let captureSeq = 0;   // goes up with every reply kept, so what's worked out from them knows when to redo it
+    // Portal actions are recorded one after another, so hundreds at once (bulk and batch work) queue up instead of
+    // all hitting Notion's rate limit together
+    let actionChain = Promise.resolve();
+    const recordAction = (op, v, data) => {
+      actionChain = actionChain.then(() => handleAction(op, v, data)).catch(e => { D.state = 'error'; D.msg = e.message; changed(); });
+    };
     function onData(op, status, json) {
       captured.push({ op, at: Date.now(), json });
       captureSeq++;
@@ -2573,7 +2585,7 @@
       if (!(enabled() || sheetsOn()) || status >= 300 || !json?.data || json.errors?.length) return;
       if (ACTIONS[op]) {
         const v = varsByOp[op] && Date.now() - varsByOp[op].at < 15000 ? varsByOp[op].vars : {};
-        handleAction(op, v, json.data).catch(e => { D.state = 'error'; D.msg = e.message; changed(); });
+        recordAction(op, v, json.data);
         return;
       }
       // Some decisions (the AD/CVD review's in scope / out of scope) resolve the work order through their own
@@ -2586,7 +2598,7 @@
         if (GM_getValue(k, 0)) continue;
         GM_setValue(k, Date.now());
         console.info(`[Dispute Desk] ${op} resolved work order ${o.id}`);
-        handleAction('BrokerageWorkOrderResolve', {}, { workOrder: o }).catch(e => { D.state = 'error'; D.msg = e.message; changed(); });
+        recordAction('BrokerageWorkOrderResolve', {}, { workOrder: o });
       }
     }
     if (onDashboard) {
@@ -3236,7 +3248,8 @@
 
     /* ---- research for Claude Code: a Notion task with the prompt; the answer comes back on the case page */
     async function queueResearch({ prompt, docs, lines, label, openTab = true }) {
-      if (!researchOn() || !D.ent) throw new Error('Set up Notion (with the Tasks database) and the Claude Code routine under Settings (the cog in Tools) first.');
+      if (!D.ent) throw new Error('Open a dispute or a work order first.');
+      if (!researchOn()) throw new Error(`Research in Claude Code still needs ${researchMissing().join(', ')}. Add it under Settings (the cog in Tools).`);
       const ctx = caseContext(D.ent);
       const what = lines.length ? `line${lines.length > 1 ? 's' : ''} ${lines.join(', ')}` : label;
       // Always written, test mode included: it's your click, and Claude Code needs the case to answer on
@@ -3765,7 +3778,7 @@
     }
 
     return {
-      enabled, researchOn,
+      enabled, researchOn, researchMissing,
       // The case's answer: someone's own "Final answer" overrides Claude's
       finalAnswer: () => {
         const txt = p => (D.row?.properties?.[p]?.rich_text || []).map(t => t.plain_text).join('').trim();
@@ -5027,6 +5040,396 @@
     if (a.dataset.ztName) GM_setClipboard(a.dataset.ztName, 'text');
   }, true);
 
+  /* ------------------------------------------------- batch work (Settings, behind an access code) */
+
+  // Claims the unclaimed orders of one class (for one customer and up to a count, if given), then works the
+  // ones assigned to you in bulk. Only orders that are exactly the same are handled together: identical
+  // disputes (same lines, HS codes, descriptions, origins, claims, merchant reasons and questionnaire answers)
+  // show once, with how many copies there are, and whatever is decided for it is sent to every copy. Other
+  // classes are matched on their problem text. Saving decisions never completes anything: Complete and
+  // Resolve are their own buttons, and ask first.
+  const BATCH_KEY = 'zt:batch';
+  const BATCH_UNLOCK_KEY = 'zt:batch:unlocked';
+  const BATCH_CODE_SHA = '1d0973dcbe8d66da8205d85099c968fd82a34a0927474cd9a8ddf7f3f6aa052f';   // SHA-256 of the access code (the code itself isn't in the script)
+  const batchUnlocked = () => GM_getValue(BATCH_UNLOCK_KEY, '') === BATCH_CODE_SHA;
+  async function sha256(text) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  const DECIDABLE = new Set(['UNDER_REVIEW', 'SUBMITTED']);   // the dispute statuses the portal lets you decide in
+  const VERDICT_LABELS = { ACCEPTED: 'Accept', DENIED: 'Deny' };
+  const CLAIM_TYPE_LABELS = {
+    HS_CODE: 'HS code', COUNTRY_OF_ORIGIN: 'Country of origin', DECLARED_VALUE: 'Declared value', DESCRIPTION: 'Description',
+    TARIFF_LINE: 'Tariff line', DUTY_EXCLUSION: 'Duty exclusion', QUANTITY: 'Quantity', WEIGHT: 'Weight', QUESTIONNAIRE: 'Questionnaire',
+  };
+  const DISPUTE_FIELDS = `id status outcome organizationId
+    items { id disputed questionnaireSessionId original { hsCode description countryOfOrigin }
+      claims { id type justification
+        proposed { countryOfOrigin currencyCode declaredValue description dutyExclusion hsCode programId quantity quantityUnit tariffLineCode weight weightUnit }
+        review { verdict reasons suggestedFix } decision { verdict note } } }`;
+  const sameText = v => clean(String(v ?? '')).toLowerCase();
+  // The automated review's verdict: its own when it gave one, else the model's ("MODEL_VERDICT_DENIED")
+  const modelVerdict = c => (VERDICT_LABELS[c.review?.verdict] ? c.review.verdict
+    : (c.review?.reasons || []).map(r => (String(r).match(/^MODEL_VERDICT_(\w+)/) || [])[1]).find(v => VERDICT_LABELS[v]) || '');
+  // `programs`: program id -> name, from the questionnaire answers
+  const proposedText = (c, programs = {}) => {
+    const p = Object.entries(c.proposed || {}).filter(([k, v]) => v != null && v !== '' && !/Unit$|^currencyCode$|^programId$/.test(k)).map(([, v]) => String(v));
+    const prog = c.proposed?.programId;
+    return p.length ? p.join(' · ') : prog ? programs[prog] || 'questionnaire answers' : '';
+  };
+  // A dispute's shape: everything that has to match for two disputes to get the same answer, and its claims in
+  // a fixed order, so claim n of one copy is claim n of every other
+  function disputeShape(d, qa) {
+    const claimKey = c => [c.type, ...Object.entries(c.proposed || {}).filter(([, v]) => v != null && v !== '')
+      .sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${sameText(v)}`), `why=${sameText(c.justification)}`].join('|');
+    const items = (d.items || []).filter(i => i.disputed || i.claims?.length).map(i => {
+      const o = i.original || {};
+      const claims = (i.claims || []).map(c => ({ c, k: claimKey(c) })).sort((a, b) => a.k.localeCompare(b.k));
+      const head = [sameText(o.hsCode).replace(/\D/g, ''), sameText(o.description), sameText(o.countryOfOrigin), `qa=${i.questionnaireSessionId ? qa[i.questionnaireSessionId] ?? `?${i.questionnaireSessionId}` : ''}`];
+      return { i, k: [...head, ...claims.map(x => x.k)].join('§'), claims };
+    }).sort((a, b) => a.k.localeCompare(b.k));
+    return { key: items.map(x => x.k).join('¶'), slots: items.flatMap(x => x.claims.map(({ c }) => ({ claim: c, item: x.i }))) };
+  }
+  // Another class's order: its class, problem text (less the tracking and bill numbers, which every order has
+  // its own of) and CBP codes
+  const orderShape = r => [r.type, String(r.detail || '').split('\n').filter(l => !/^\s*tracking\b/i.test(l)).join('\n')
+    .replace(/\bmBOL:\S+\s*\|\s*hBOL:\S+?:\s*/gi, '').replace(/\s+/g, ' ').trim().toLowerCase(), [...r.codes].sort().join(',')].join('¶');
+
+  function batchTool({ group, note, say, btn }) {
+    const saved = { cls: 'DUTY_DISPUTE_REVIEW', customer: '', count: '', ...GM_getValue(BATCH_KEY, {}) };
+    // qa: questionnaire session id -> its answers as text (kept: answers don't change once sent); programs: id -> name
+    const S = { rows: [], me: null, busy: false, groups: [], qa: {}, programs: {} };
+    const remember = () => GM_setValue(BATCH_KEY, { cls: clsSelect.value, customer: clean(customerInput.value), count: countInput.value });
+    const changedInputs = () => { remember(); summarize(); };
+    const clsSelect = h('select', { class: 'field', 'aria-label': 'Class', onchange: changedInputs }, h('option', { value: saved.cls, text: classLabel(saved.cls) }));
+    const customers = h('datalist', { id: 'zt-batch-customers' });
+    const customerInput = h('input', { class: 'field', type: 'text', list: 'zt-batch-customers', placeholder: 'Customer (blank: every customer)', 'aria-label': 'Customer', autocomplete: 'off', value: saved.customer, onchange: changedInputs });
+    const countInput = h('input', { class: 'field', type: 'number', min: '1', placeholder: 'How many (blank: all)', 'aria-label': 'How many to claim', value: saved.count, onchange: changedInputs, oninput: () => summarize() });
+    const modeChip = h('span', { class: 'chip' });
+    const status = note();
+    const bar = h('div', { class: 'bt-progress', hidden: true }, h('div'));
+    const claimBtn = h('button', { class: 'primary', type: 'button', text: 'Claim', disabled: true, onclick: () => claim() });
+    const mineBtn = btn('Work mine', () => run(async () => { await loadRows(); await buildGroups(); return ''; }));
+    const reloadBtn = btn('↻', () => run(async () => { await loadRows(); return ''; }));
+    reloadBtn.title = 'Reload the queue';
+    // Saving and completing go one dispute at a time, so they can stop between two
+    const stopBtn = h('button', { class: 'secondary', type: 'button', text: 'Stop', hidden: true, onclick: () => { S.stop = true; stopBtn.disabled = true; } });
+    const list = h('div', { class: 'bt-list' });
+
+    const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+    const sameCustomer = r => { const want = sameText(customerInput.value); return !want || sameText(r.customer || r.consignee) === want; };
+    const wanted = () => S.rows.filter(r => r.type === clsSelect.value && sameCustomer(r));
+    const unclaimed = () => wanted().filter(r => r.status === 'OPEN' && !r.assigneeId).sort((a, b) => (a.dueMs ?? Infinity) - (b.dueMs ?? Infinity));
+    const mine = () => wanted().filter(r => S.me?.id && r.assigneeId === S.me.id);
+    const limit = () => { const n = parseInt(countInput.value, 10); return n > 0 ? n : Infinity; };
+    const progress = (d, n) => { bar.hidden = !n || d >= n; bar.firstChild.style.width = `${n ? Math.round(d / n * 100) : 0}%`; };
+    async function inBatches(items, size, fn) {
+      for (let i = 0; i < items.length; i += size) await Promise.all(items.slice(i, i + size).map(fn));
+    }
+
+    async function loadRows() {
+      say(status, 'Loading the queue…');
+      const [me, open, waiting] = await Promise.all([portal.me(), portal.workOrders({ status: 'OPEN' }), portal.workOrders({ status: 'WAITING' })]);
+      const rows = [...open, ...waiting].map(queueRow);
+      await portal.orgNames(rows.map(r => r.orgId).filter(Boolean));
+      for (const r of rows) r.customer = portal.orgs[r.orgId] || '';
+      S.me = me;
+      S.rows = rows;
+      const counts = new Map();
+      for (const r of rows) {
+        const c = counts.get(r.type) || { open: 0, mine: 0 };
+        if (r.status === 'OPEN' && !r.assigneeId) c.open++;
+        if (r.assigneeId && r.assigneeId === me.id) c.mine++;
+        counts.set(r.type, c);
+      }
+      const cur = clsSelect.value;
+      clsSelect.replaceChildren(...[...counts].sort((a, b) => classLabel(a[0]).localeCompare(classLabel(b[0])))
+        .map(([t, c]) => h('option', { value: t, text: `${classLabel(t)} · ${c.open} unclaimed · ${c.mine} yours`, selected: t === cur })));
+      if (!counts.has(cur)) clsSelect.append(h('option', { value: cur, text: `${classLabel(cur)} · none open`, selected: true }));
+      summarize();
+    }
+    function summarize() {
+      const mode = portal.mode();
+      modeChip.textContent = mode.toUpperCase();
+      modeChip.className = `chip mode-${mode}`;
+      customers.replaceChildren(...[...new Set(S.rows.filter(r => r.type === clsSelect.value).map(r => r.customer || r.consignee).filter(Boolean))].sort().map(n => h('option', { value: n })));
+      if (!S.rows.length) return;
+      const n = Math.min(unclaimed().length, limit());
+      claimBtn.textContent = `Claim ${n}`;
+      claimBtn.disabled = !n || S.busy;
+      const who = clean(customerInput.value);
+      say(status, `${classLabel(clsSelect.value)}${who ? ` for ${who}` : ''}: ${unclaimed().length} unclaimed, ${mine().length} yours.`);
+    }
+    function setBusy(on) {
+      S.busy = on;
+      list.classList.toggle('bt-busy', on);
+      mineBtn.disabled = reloadBtn.disabled = on;
+      stopBtn.hidden = !on;
+      if (on) { S.stop = false; stopBtn.disabled = false; }
+      if (on) claimBtn.disabled = true;
+      else summarize();
+    }
+    // Runs one step; what it returns (or the error) is shown under the buttons
+    async function run(fn) {
+      if (S.busy) return;
+      setBusy(true);
+      try {
+        const msg = await fn();
+        setBusy(false);
+        if (msg) say(status, msg.text || msg, msg.kind || 'ok');
+      } catch (e) {
+        setBusy(false);
+        say(status, e.message, 'err');
+        console.warn('[Tools] batch', e);
+      } finally {
+        progress(0, 0);
+        draw();
+      }
+    }
+    const result = (verb, done, failed) => ({
+      text: `${verb} ${done}.${failed.length ? ` ${failed.length} failed: ${failed.slice(0, 4).join('; ')}${failed.length > 4 ? '…' : ''}` : ''}`,
+      kind: failed.length ? 'warn' : 'ok',
+    });
+
+    async function claim() {
+      const take = unclaimed().slice(0, limit());
+      if (!take.length) return;
+      run(async () => {
+        say(status, `Claiming ${take.length} in ${portal.mode().toUpperCase()} mode…`);
+        const res = await portal.act('BrokerageWorkOrderClaim', take.map(r => r.id), {}, progress);
+        const byId = new Map(take.map(r => [r.id, r]));
+        await loadRows();
+        await buildGroups();
+        return result('Claimed', plural(res.done.length, 'order'), res.failed.map(f => `${byId.get(f.id)?.ref || f.id}: ${f.error}`));
+      });
+    }
+
+    // ---- your orders of the class, grouped by exact sameness
+    const fetchDispute = (id, org) => portal.gql('BrokerageDutyDispute', `query BrokerageDutyDispute($id: ID!) { brokerageDutyDispute(id: $id) { ${DISPUTE_FIELDS} } }`,
+      { id }, org ? { 'x-act-as-org': org } : {}).then(x => x.brokerageDutyDispute);
+    async function questionnaireText(id, org) {
+      const s = (await portal.gql('QuestionnaireSessionForDutyDispute', `query QuestionnaireSessionForDutyDispute($id: ID!) { questionnaireSession(id: $id) {
+        id lines { programId program { id name } visibleQuestions { question { prompt displayOrder } answer { value label } } } } }`, { id }, org ? { 'x-act-as-org': org } : {})).questionnaireSession;
+      for (const l of s?.lines || []) if (l.program?.name) S.programs[l.programId] = l.program.name;
+      return (s?.lines || []).map(l => `${l.programId}:${[...(l.visibleQuestions || [])].sort((a, b) => (a.question?.displayOrder ?? 0) - (b.question?.displayOrder ?? 0))
+        .map(q => `${sameText(q.question?.prompt)}=${sameText(answerText(q.answer))}`).join(';')}`).sort().join('|');
+    }
+    async function buildGroups() {
+      const rows = mine();
+      if (clsSelect.value !== 'DUTY_DISPUTE_REVIEW') {
+        const groups = new Map();
+        for (const r of rows) {
+          const key = orderShape(r);
+          if (!groups.has(key)) groups.set(key, { key, kind: 'order', members: [], note: '', resolution: '' });
+          groups.get(key).members.push({ r });
+        }
+        S.groups = [...groups.values()].sort((a, b) => b.members.length - a.members.length);
+        return;
+      }
+      const ds = new Map();
+      let n = 0;
+      await inBatches(rows, 10, async r => {
+        ds.set(r.id, await fetchDispute(r.sid, r.orgId).catch(e => ({ error: e.message })));
+        progress(++n, rows.length);
+        say(status, `Reading your disputes… ${n} of ${rows.length}`);
+      });
+      // Questionnaire answers are part of what has to match; one that can't be read keeps its dispute on its own
+      const sessions = new Map();
+      for (const d of ds.values()) for (const i of d?.items || []) if (i.questionnaireSessionId && !(i.questionnaireSessionId in S.qa)) sessions.set(i.questionnaireSessionId, d.organizationId);
+      n = 0;
+      await inBatches([...sessions], 10, async ([id, org]) => {
+        try { S.qa[id] = await questionnaireText(id, org); } catch { delete S.qa[id]; }
+        progress(++n, sessions.size);
+        say(status, `Reading questionnaire answers… ${n} of ${sessions.size}`);
+      });
+      const groups = new Map();
+      for (const r of rows) {
+        const d = ds.get(r.id);
+        if (!d?.id) { groups.set(`err:${r.id}`, { key: `err:${r.id}`, kind: 'dispute', members: [{ r, error: d?.error || "Couldn't read this dispute." }] }); continue; }
+        const shape = disputeShape(d, S.qa);
+        const key = shape.slots.length ? shape.key : `none:${d.id}`;
+        if (!groups.has(key)) groups.set(key, { key, kind: 'dispute', members: [] });
+        groups.get(key).members.push({ r, d, slots: shape.slots });
+      }
+      S.groups = [...groups.values()].map(startDrafts).sort((a, b) => b.members.length - a.members.length);
+    }
+    // What the boxes start with, per claim: the decision already saved on it, else the automated review's verdict
+    // and its reasoning as the note
+    function startDrafts(g) {
+      const m0 = g.members[0];
+      if (!m0.slots?.length) return g;
+      g.drafts = m0.slots.map(({ claim: c }) => {
+        if (VERDICT_LABELS[c.decision?.verdict]) return { verdict: c.decision.verdict, note: c.decision.note || '', from: 'saved' };
+        const v = modelVerdict(c);
+        return { verdict: v, note: v ? c.review?.suggestedFix || '' : '', from: v ? 'review' : '' };
+      });
+      return g;
+    }
+    const matches = (dec, dr) => !!dec && dec.verdict === dr.verdict && (dec.note || '') === dr.note.trim();
+    function disputeState(g) {
+      const open = g.members.filter(m => m.d && DECIDABLE.has(m.d.status));
+      const toSave = open.filter(m => m.slots.some((s, i) => !matches(s.claim.decision, g.drafts[i])));
+      return {
+        open, toSave, closed: g.members.length - open.length,
+        filled: g.drafts.every(d => d.verdict && d.note.trim()),
+        toComplete: toSave.length ? [] : open,
+      };
+    }
+    const refreshMember = (m, d) => { if (!d?.id) return; m.d = d; m.slots = disputeShape(d, S.qa).slots; };
+
+    // ---- the actions; each goes to every copy in the group, one at a time (so each is logged as its own case)
+    async function saveGroups(groups) {
+      const work = groups.flatMap(g => disputeState(g).toSave.map(m => ({ g, m })));
+      const failed = [];
+      let n = 0;
+      for (const { g, m } of work) {
+        if (S.stop) break;
+        say(status, `Saving decisions… ${n + 1} of ${work.length}`);
+        try {
+          refreshMember(m, (await portal.gql('BrokerageDutyDisputeClaimsDecide',
+            `mutation BrokerageDutyDisputeClaimsDecide($input: BrokerageDutyDisputeClaimsDecideInput!) { brokerageDutyDisputeClaimsDecide(input: $input) { ${DISPUTE_FIELDS} } }`,
+            { input: { id: m.d.id, claims: m.slots.map((s, i) => ({ claimId: s.claim.id, verdict: g.drafts[i].verdict, note: g.drafts[i].note.trim(), adjusted: null })) } },
+            { 'x-act-as-org': m.d.organizationId })).brokerageDutyDisputeClaimsDecide);
+        } catch (e) { failed.push(`${m.r.ref}: ${e.message}`); }
+        progress(++n, work.length);
+      }
+      return result(`${S.stop ? 'Stopped. ' : ''}Saved decisions on`, plural(n - failed.length, 'dispute'), failed);
+    }
+    function saveAll(groups) {
+      const ready = groups.filter(g => g.drafts && disputeState(g).toSave.length);
+      const unfilled = ready.filter(g => !disputeState(g).filled);
+      if (unfilled.length) { say(status, `Pick Accept or Deny and write a note for every claim first (${plural(unfilled.length, 'group')} still ${unfilled.length === 1 ? 'needs' : 'need'} it).`, 'err'); return; }
+      run(() => saveGroups(ready));
+    }
+    function completeAll(groups) {
+      const ms = groups.filter(g => g.drafts).flatMap(g => disputeState(g).toComplete);
+      if (!ms.length) return;
+      if (!confirm(`Complete ${plural(ms.length, 'dispute')} in ${portal.mode().toUpperCase()} mode?\n\nEach is completed with the decisions saved on it, the same as the portal's Complete button. This can't be undone from here.`)) return;
+      run(async () => {
+        const failed = [];
+        let n = 0;
+        for (const m of ms) {
+          if (S.stop) break;
+          say(status, `Completing… ${n + 1} of ${ms.length}`);
+          try {
+            refreshMember(m, (await portal.gql('BrokerageDutyDisputeComplete', `mutation BrokerageDutyDisputeComplete($id: ID!) { brokerageDutyDisputeComplete(id: $id) { ${DISPUTE_FIELDS} } }`,
+              { id: m.d.id }, { 'x-act-as-org': m.d.organizationId })).brokerageDutyDisputeComplete);
+          } catch (e) { failed.push(`${m.r.ref}: ${e.message}`); }
+          progress(++n, ms.length);
+        }
+        return result(`${S.stop ? 'Stopped. ' : ''}Completed`, plural(n - failed.length, 'dispute'), failed);
+      });
+    }
+    function noteGroup(g) {
+      const text = g.note.trim();
+      if (!text) { say(status, 'Write the note first.', 'err'); return; }
+      run(async () => {
+        const res = await portal.act('BrokerageWorkOrderNote', g.members.map(m => m.r.id), { note: text }, progress);
+        return result('Added the note to', plural(res.done.length, 'order'), res.failed.map(f => `${f.id}: ${f.error}`));
+      });
+    }
+    function resolveGroup(g) {
+      if (!g.resolution) { say(status, 'Pick a resolution first.', 'err'); return; }
+      const n = g.members.length;
+      if (!confirm(`Resolve ${plural(n, 'order')} as "${RESOLUTIONS[g.resolution]}" in ${portal.mode().toUpperCase()} mode?${g.note.trim() ? `\n\nNote: ${g.note.trim()}` : ''}`)) return;
+      run(async () => {
+        const res = await portal.act('BrokerageWorkOrderResolve', g.members.map(m => m.r.id), { resolution: g.resolution, ...(g.note.trim() ? { note: g.note.trim() } : {}) }, progress);
+        await loadRows();
+        await buildGroups();
+        return result('Resolved', plural(res.done.length, 'order'), res.failed.map(f => `${f.id}: ${f.error}`));
+      });
+    }
+
+    // ---- drawing
+    function membersOf(g) {
+      const m0 = g.members[0];
+      const link = m => h('a', { href: m.r.url, target: '_blank', rel: 'noopener', text: m.r.ref });
+      const n = g.members.length;
+      return [
+        h('div', { class: 'bt-head' }, n > 1 ? h('span', { class: 'chip bt-count', text: `×${n}`, title: `${n} orders exactly the same: what you do here is done to all ${n}` }) : null,
+          h('b', { text: m0.r.title }), h('span', { class: 'hint', style: 'margin:0', text: m0.r.customer || m0.r.consignee || '' })),
+        n > 1 ? h('details', { class: 'bt-members' }, h('summary', { class: 'hint', style: 'margin:0', text: `${n} identical: ${g.members.slice(0, 3).map(m => m.r.ref).join(', ')}${n > 3 ? '…' : ''}` }),
+          h('div', { class: 'bt-links' }, g.members.map(link)))
+          : h('div', { class: 'hint', style: 'margin:0' }, link(m0)),
+      ];
+    }
+    function disputeCard(g) {
+      const m0 = g.members[0];
+      if (!g.drafts) return h('div', { class: 'bt-card' }, membersOf(g), h('p', { class: 'hint err', text: m0.error || 'No claims to decide on this dispute.' }));
+      const n = g.members.length;
+      const stateEl = h('p', { class: 'hint', style: 'margin:0' });
+      const saveB = h('button', { class: 'secondary', type: 'button', onclick: () => saveAll([g]) });
+      const doneB = h('button', { class: 'secondary', type: 'button', onclick: () => completeAll([g]) });
+      const update = () => {
+        const st = disputeState(g);
+        saveB.textContent = `Save decisions${n > 1 ? ` (${st.toSave.length})` : ''}`;
+        saveB.disabled = !st.toSave.length || !st.filled;
+        doneB.textContent = `Complete${n > 1 ? ` ${st.toComplete.length}` : ''}…`;
+        doneB.disabled = !st.toComplete.length;
+        const parts = [];
+        if (st.toSave.length && !st.filled) parts.push('Pick Accept or Deny and write a note for every claim');
+        else if (st.toSave.length) parts.push(st.toSave.length === st.open.length ? 'Not saved yet' : `${st.toSave.length} of ${st.open.length} not saved yet`);
+        else if (st.open.length) parts.push('Saved, ready to complete');
+        if (st.closed) parts.push(`${st.closed} finished or not open to decisions (${[...new Set(g.members.filter(m => m.d && !DECIDABLE.has(m.d.status)).map(m => human2(m.d.status)))].join(', ')})`);
+        stateEl.textContent = parts.join(' · ');
+        stateEl.className = `hint ${st.toSave.length ? 'warn' : st.open.length ? 'ok' : ''}`;
+      };
+      const claims = m0.slots.map((s, i) => {
+        const c = s.claim;
+        const dr = g.drafts[i];
+        const o = s.item.original || {};
+        const v = modelVerdict(c);
+        const from = h('span', { class: 'hint', style: 'margin:0', text: dr.from === 'review' ? 'filled from the automated review' : dr.from === 'saved' ? 'saved decision' : '' });
+        const touched = () => { dr.from = ''; from.textContent = ''; update(); };
+        return h('div', { class: 'bt-claim' },
+          h('div', {}, h('b', { text: CLAIM_TYPE_LABELS[c.type] || human2(c.type) }), proposedText(c, S.programs) ? h('span', { text: ` → ${proposedText(c, S.programs)}` }) : null),
+          h('div', { class: 'hint', style: 'margin:0', text: [o.description, o.hsCode && `HS ${o.hsCode}`, o.countryOfOrigin].filter(Boolean).join(' · ') }),
+          c.justification ? h('div', { class: 'hint', style: 'margin:0', text: `Merchant: ${c.justification}` }) : null,
+          v ? h('div', { class: 'hint', style: 'margin:0', text: `Automated review: ${VERDICT_LABELS[v].toLowerCase()}${c.review?.suggestedFix ? `. ${c.review.suggestedFix}` : ''}` }) : null,
+          h('div', { class: 'row', style: 'align-items:center' },
+            h('select', { class: 'field', style: 'width:auto', 'aria-label': 'Decision', onchange: e => { dr.verdict = e.target.value; touched(); } },
+              h('option', { value: '', text: 'Decide…' }), Object.entries(VERDICT_LABELS).map(([k, t]) => h('option', { value: k, text: t, selected: dr.verdict === k }))),
+            from),
+          h('textarea', { class: 'field', rows: 2, placeholder: 'Note (required)', 'aria-label': 'Decision note', value: dr.note, oninput: e => { dr.note = e.target.value; touched(); } }));
+      });
+      update();
+      return h('div', { class: 'bt-card' }, membersOf(g), claims, stateEl, h('div', { class: 'row' }, saveB, doneB));
+    }
+    function orderCard(g) {
+      const m0 = g.members[0];
+      const n = g.members.length;
+      const all = n > 1 ? ` (${n})` : '';
+      return h('div', { class: 'bt-card' }, membersOf(g),
+        m0.r.problem ? h('p', { class: 'hint', style: 'margin:0', text: m0.r.problem }) : null,
+        h('textarea', { class: 'field', rows: 2, placeholder: 'Note', 'aria-label': 'Note', value: g.note, oninput: e => { g.note = e.target.value; } }),
+        h('div', { class: 'row' }, btn(`Add note${all}`, () => noteGroup(g)),
+          h('select', { class: 'field', 'aria-label': 'Resolution', onchange: e => { g.resolution = e.target.value; } },
+            h('option', { value: '', text: 'Resolution…' }), Object.entries(RESOLUTIONS).map(([k, t]) => h('option', { value: k, text: t, selected: g.resolution === k }))),
+          btn(`Resolve${all}…`, () => resolveGroup(g))));
+    }
+    function draw() {
+      if (!S.groups.length) { list.replaceChildren(); return; }
+      const n = S.groups.reduce((a, g) => a + g.members.length, 0);
+      const disputes = S.groups[0].kind === 'dispute';
+      list.replaceChildren(...[
+        h('p', { class: 'hint', style: 'margin:0', text: `${plural(n, 'order')} of yours in ${plural(S.groups.length, 'group')}. Orders that are exactly the same show once (×N), and what you do to it is done to all of them.` }),
+        disputes && h('div', { class: 'row' }, btn('Save all decisions', () => saveAll(S.groups)), btn('Complete all saved…', () => completeAll(S.groups))),
+        ...S.groups.map(g => (g.kind === 'dispute' ? disputeCard(g) : orderCard(g))),
+      ].filter(Boolean));
+    }
+
+    const el = group('Batch work', 'Claim every unclaimed order of one class (for one customer, up to a count), then decide them in bulk. Saving decisions never completes anything: Complete and Resolve are their own buttons, and ask first.',
+      h('div', { class: 'row', style: 'align-items:center' }, h('span', { class: 'hint', style: 'margin:0', text: 'Portal mode:' }), modeChip, h('span', { style: 'flex:1' }), reloadBtn),
+      h('div', { class: 'row' }, clsSelect),
+      h('div', { class: 'row' }, customerInput, customers),
+      h('div', { class: 'row' }, countInput),
+      h('div', { class: 'row' }, claimBtn, mineBtn, stopBtn),
+      bar, status, list);
+    el.addEventListener('toggle', () => { if (el.open && !S.rows.length && !S.busy) run(async () => { await loadRows(); return ''; }); });
+    summarize();
+    return el;
+  }
+
   /* ------------------------------------------------- dashboard: the panel */
 
   const PANEL_CSS = `
@@ -5193,6 +5596,18 @@
     .bar { height: 8px; background: var(--soft); border-radius: 4px; overflow: hidden; }
     .bar > span { display: block; height: 100%; background: var(--accent); }
     .bar-n { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+    .bt-list { display: grid; gap: 8px; margin-top: 10px; }
+    .bt-list.bt-busy { opacity: .6; pointer-events: none; }
+    .bt-card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: grid; gap: 6px; }
+    .bt-head { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+    .chip.bt-count { color: var(--accent); border-color: var(--accent); font-weight: 600; }
+    .bt-members > summary { cursor: pointer; }
+    .bt-links { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 12px; margin-top: 4px; }
+    .bt-claim { display: grid; gap: 4px; padding-top: 6px; border-top: 1px dashed var(--line); }
+    .bt-progress { height: 4px; background: var(--soft); border-radius: 2px; overflow: hidden; margin-top: 8px; }
+    .bt-progress > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+    .chip.mode-live { color: var(--err); border-color: currentColor; }
+    .chip.mode-test { color: var(--ok); border-color: currentColor; }
   `;
 
   function createPanel() {
@@ -5409,7 +5824,7 @@
       setCfg({ routineId: clean(routineIdInput.value), ...(t ? { routineToken: t } : {}), ...(clean(routineIdInput.value) ? {} : { routineToken: '' }) });
       routineTokenInput.value = '';
       routineTokenInput.placeholder = cfg().routineToken ? 'Saved (paste a new one to replace it)' : 'Routine API token';
-      say(routineNote, desk.researchOn() ? 'Saved. "Research in Claude Code" is on.' : cfg().routineId ? 'Saved. It also needs Notion with a Tasks database.' : 'Saved. Claude Code research is off.', desk.researchOn() ? 'ok' : '');
+      say(routineNote, desk.researchOn() ? 'Saved. "Research in Claude Code" is on.' : cfg().routineId ? `Saved. It still needs ${desk.researchMissing().join(', ')}.` : 'Saved. Claude Code research is off.', desk.researchOn() ? 'ok' : cfg().routineId ? 'warn' : '');
       afterSetup();
     };
 
@@ -5466,6 +5881,32 @@
       afterSetup();
     };
 
+    // Access code: features only some people should use (Batch work) stay hidden until it's typed on this computer
+    const codeInput = h('input', { type: 'password', placeholder: 'Access code', 'aria-label': 'Access code', autocomplete: 'off',
+      onkeydown: e => { if (e.key === 'Enter') unlock(); } });
+    const codeNote = note();
+    let batchGroup = null;
+    const accessGroup = group('Access code', 'Some features are only for the people given a code. Type it here to turn them on for this computer.',
+      h('div', { class: 'row' }, codeInput, btn('Unlock', () => unlock()), btn('Lock', () => lock())),
+      codeNote);
+    function showLocked() {
+      if (batchUnlocked() && !batchGroup) { batchGroup = batchTool({ group, note, say, btn }); accessGroup.after(batchGroup); }
+      if (!batchUnlocked() && batchGroup) { batchGroup.remove(); batchGroup = null; }
+      if (batchUnlocked()) say(codeNote, 'Unlocked on this computer: Batch work is below.', 'ok');
+    }
+    async function unlock() {
+      const hash = await sha256(clean(codeInput.value));
+      codeInput.value = '';
+      if (hash !== BATCH_CODE_SHA) { say(codeNote, "That code isn't right.", 'err'); return; }
+      GM_setValue(BATCH_UNLOCK_KEY, hash);
+      showLocked();
+    }
+    function lock() {
+      GM_deleteValue(BATCH_UNLOCK_KEY);
+      showLocked();
+      say(codeNote, 'Locked. Batch work is hidden again.');
+    }
+
     const settingsBody = h('div', { class: 'body' },
       h('p', { class: 'hint', style: 'margin:0 0 14px', text: "Tools works without any of this: the queue, Classify, Quote and research prompts need nothing. Each part below adds something, and what you save stays on this computer." }),
       group('Your name', '', h('div', { class: 'row' }, authorInput)),
@@ -5500,6 +5941,7 @@
         h('div', { class: 'row' }, notesUrlInput, btn('Save', saveNotesUrl)),
         h('div', { class: 'row', style: 'margin-top:6px' }, notesKeyInput, btn('Save key', () => saveNotesKey()), btn('Test', () => testNotesKey())),
         notesKeyNote),
+      accessGroup,
       group('Back up or move your setup', '',
         h('div', { class: 'row' }, btn('Copy my setup', exportSetup)),
         h('div', { style: 'margin-top:6px' }, importBox),
@@ -5747,8 +6189,9 @@
       prevBtn.disabled = !(i > 0);
       nextBtn.disabled = !(i >= 0 && i < items.length - 1) && !(i < 0 && items.length);
       posLabel.textContent = i >= 0 ? `${i + 1} of ${items.length}` : '';
-      // Research in Claude Code only when Notion and the cloud routine are set up; otherwise claude.ai leads
-      ccBtn.hidden = !desk.researchOn();
+      // Research in Claude Code once a cloud routine is saved (if something else is missing, pressing it says
+      // what); otherwise claude.ai leads
+      ccBtn.hidden = !desk.researchOn() && !cfg().routineId && !cfg().routineToken;
       openBtn.className = ccBtn.hidden ? 'primary' : 'secondary';
     }
 
@@ -5775,6 +6218,7 @@
           h('kbd', { text: '/' }), h('span', { text: 'Search the queue (Tools queue)' }),
           h('kbd', { text: 'j k x Enter o' }), h('span', { text: 'Move, select, open, new tab (Tools queue)' }))));
     settingsBody.insertBefore(prefsGroup, settingsBody.children[1]);
+    showLocked();
 
     // Off an order page there's nothing to research: the Research tab says so instead of showing stale content
     const researchIdle = h('div', { class: 'body', hidden: true });
