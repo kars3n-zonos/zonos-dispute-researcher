@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.12.0
+// @version      7.13.0
 // @description  Sheets edition: cases go to the team Google Sheet, each with a Google Doc of its answers and decisions. Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -2909,36 +2909,6 @@
       await notion('PATCH', `/pages/${page.id}`, { properties: { Resolution: { rich_text: resolutionText(text, await notionIdFor(name), name) } } });
       if (wo.resolutionNote) await addLog(page.id, [`${stamp()} (portal): Resolution note: ${wo.resolutionNote}`]);
     }
-    // A claimed case gets a "Work: …" task in Tasks under whoever claimed it (Assignee when they're in Notion,
-    // otherwise their portal name in Claimed by), due when the work order is. Claimed again by someone else, the
-    // same task moves to them; released, it goes back to Not started with nobody on it; resolved, closeTasks
-    // marks it Done. (Research requests are "Research: …" tasks; nothing that picks those up takes these.)
-    async function claimTask(page, ctx, wo, assign) {
-      if (!TASKS()) return;
-      const name = await portalName();
-      const me = await notionIdFor(name);
-      const open = ((await notion('POST', `/data_sources/${TASKS()}/query`, { filter: { and: [
-        { property: 'Project', relation: { contains: page.id } }, { property: 'Name', title: { starts_with: 'Work:' } },
-        { property: 'Status', status: { does_not_equal: 'Done' } }] }, page_size: 5 })).results || [])[0];
-      const who = assign === 'none' ? { Assignee: { people: [] }, 'Claimed by': { rich_text: [] } }
-        : me ? { Assignee: { people: [{ id: me }] }, 'Claimed by': { rich_text: [] } }
-        : { Assignee: { people: [] }, 'Claimed by': { rich_text: rt(name || 'Someone in the portal') } };
-      const status = { Status: { status: { name: assign === 'none' ? 'Not started' : 'In progress' } } };
-      if (open) {
-        await notion('PATCH', `/pages/${open.id}`, { properties: { ...who, ...status } });
-        return;
-      }
-      if (assign === 'none') return;
-      await notion('POST', '/pages', {
-        parent: { type: 'data_source_id', data_source_id: TASKS() },
-        properties: {
-          Name: { title: rt(`Work: ${titleOf(page) || ctx.name}${testMode() ? ' [test mode]' : ''}`) },
-          ...status, ...who,
-          'Due date': { date: { start: d10(wo?.dueDate) || new Date().toLocaleDateString('sv-SE') } },
-          Project: { relation: [{ id: page.id }] },
-        },
-      });
-    }
     /* ---- the Sheets edition: the team's Google Sheet (one row per case) and a Google Doc per case for its answers
        and decisions, through the sheet's Apps Script web app (harness/google/OctoberDisputes.gs) */
     async function sheetsCall(action, ctx, extra = {}) {
@@ -3011,7 +2981,6 @@
             .then(j => { if (shown && j) D.msg = `${cap(a.ev)} · saved to the Google Sheet`; })
             .catch(e => { if (shown) { D.state = 'error'; D.msg = e.message; } console.warn('[Dispute Desk]', e); });
         }
-        if (page && a.assign && !dryRun()) await claimTask(page, ctx, n, a.assign).catch(e => console.warn('[Dispute Desk]', e));
         if (page && a.status === 'Done' && !dryRun()) await closeTasks(page.id).catch(e => console.warn('[Dispute Desk]', e));
         if (page && op === 'BrokerageWorkOrderResolve' && ent.wo?.id && !(vars.note || n?.resolutionNote) && !dryRun()) refreshResolution(page, ent, ctx).catch(e => console.warn('[Dispute Desk]', e));
         if (enabled() && D.ent?.id === ent.id) {
@@ -3166,12 +3135,8 @@
           Name: { title: rt(`Research: ${titleOf(page) || ctx.name} (${what})${testMode() ? ' [test mode]' : ''}`) },
           Status: { status: { name: 'Not started' } },
           'Due date': { date: { start: new Date().toLocaleDateString('sv-SE') } },
+          // Not assigned to anyone: it's the routine's request, and the answer comes back on the case itself
           Project: { relation: [{ id: page.id }] },
-          ...(await (async () => {
-            const name = await portalName();
-            const id = await notionIdFor(name);
-            return id ? { Assignee: { people: [{ id }] } } : name ? { 'Claimed by': { rich_text: rt(name) } } : {};
-          })()),
         },
         children: body.slice(0, 100),
       });
@@ -3449,12 +3414,11 @@
       setInterval(refresh, 10 * 60000);
     }
 
-    /* ---- the scratchpad: each person's notes on the case, kept as one comment of theirs on the case page in
-       Notion, signed with their name and @mentioning their Notion user. It's made, edited and removed as they
-       type. The comment starts "@<name> · Scratchpad · <yyyy-mm-dd hh:mm>", then the notes. */
+    /* ---- comments on the case page in Notion: everyone's, read for the Research tab, and yours, posted from it.
+       A comment posted from Tools @mentions your Notion user and is signed with your name; it starts
+       "@<name> · <yyyy-mm-dd hh:mm>", then the text. (7.12.0's scratchpad comments say "· Scratchpad ·" too.) */
     const COMMENTS_API = '2026-03-11';
-    const SCRATCH_HEAD = /^@?(.+?) · Scratchpad · (\d{4}-\d\d-\d\d \d\d:\d\d)\n?/;
-    const scratchKey = pageId => `desk:scratch:${pageId}`;
+    const COMMENT_HEAD = /^@?(.+?) · (?:Scratchpad · )?(\d{4}-\d\d-\d\d \d\d:\d\d)\n?/;
     async function myNotionName() {
       const id = cfg().notionUser;
       if (id) {
@@ -3477,68 +3441,60 @@
       } while (cursor);
       return out;
     }
-    // A comment as { id, who, at, text, mine }: a scratchpad's own header gives who and when
-    function readComment(c, mineId) {
+    // A comment as { id, who, at, text, mine }: one posted from Tools names its author and time in its first line
+    function readComment(c) {
       const plain = plainRich(c.rich_text);
-      const m = SCRATCH_HEAD.exec(plain);
+      const m = COMMENT_HEAD.exec(plain);
       const first = c.rich_text?.[0];
-      const mine = c.id === mineId || (!!m && first?.type === 'mention' && !!cfg().notionUser && first.mention?.user?.id === cfg().notionUser);
+      const me = cfg().notionUser;
       return {
-        id: c.id, mine, scratch: !!m,
+        id: c.id,
+        mine: !!me && ((first?.type === 'mention' && first.mention?.user?.id === me) || c.created_by?.id === me),
         who: m ? m[1] : c.display_name?.resolved_name || 'Someone',
-        at: m ? m[2] : new Date(c.last_edited_time || c.created_time).toLocaleString('sv-SE', { hour12: false }).slice(0, 16),
+        at: m ? m[2] : new Date(c.created_time).toLocaleString('sv-SE', { hour12: false }).slice(0, 16),
+        time: c.created_time || '',
         text: (m ? plain.slice(m[0].length) : plain).trim(),
       };
     }
-    // The open case's scratchpads and comments: { id (the case), row, state: off | loading | ready | error, mine, others }
-    async function loadScratch() {
+    // The open case's comments: { id (the case), row, state: off | loading | ready | error, list (oldest first) }
+    async function loadComments() {
       const ent = D.ent;
       if (!ent) return;
-      if (!enabled()) { D.scratch = { id: ent.id, state: 'off', mine: null, others: [] }; changed(); return; }
+      if (!enabled()) { D.comments = { id: ent.id, state: 'off', list: [] }; changed(); return; }
       const row = D.row?.id || '';
-      D.scratch = { id: ent.id, row, state: row ? 'loading' : 'ready', mine: null, others: [] };
+      D.comments = { id: ent.id, row, state: row ? 'loading' : 'ready', list: [] };
       changed();
       if (!row) return;
       try {
-        const all = (await caseComments(row)).map(c => readComment(c, GM_getValue(scratchKey(row), '')));
+        const list = (await caseComments(row)).map(readComment).sort((x, y) => x.time.localeCompare(y.time));
         if (D.ent !== ent) return;
-        const mine = all.find(c => c.mine && c.scratch) || null;
-        D.scratch = { id: ent.id, row, state: 'ready', mine, others: all.filter(c => c !== mine) };
+        D.comments = { id: ent.id, row, state: 'ready', list };
       } catch (e) {
-        D.scratch = { id: ent.id, row, state: 'error', error: e.status === 403 ? "The Notion integration can't read comments: turn on Read comments and Insert comments in its capabilities." : e.message, mine: null, others: [] };
+        if (D.ent !== ent) return;
+        D.comments = { id: ent.id, row, state: 'error', list: [], error: e.status === 403 ? "the Notion integration can't read comments. Turn on Read comments and Insert comments in its Capabilities." : e.message };
       }
       changed();
     }
-    // For the Research tab: what's known for the open case, loading it when the case (or its Notion row) changed
-    function scratchFor() {
+    // For the Research tab: the open case's comments, loaded when the case (or its Notion row) changed
+    function commentsFor() {
       if (!D.ent) return null;
-      const sc = D.scratch;
-      if (!sc || sc.id !== D.ent.id || (sc.state !== 'off' && sc.row !== (D.row?.id || '') && sc.state !== 'loading')) {
-        D.scratch = { id: D.ent.id, row: D.row?.id || '', state: 'loading', mine: null, others: [] };
-        setTimeout(() => loadScratch(), 0);
+      const cm = D.comments;
+      if (!cm || cm.id !== D.ent.id || (cm.state !== 'off' && cm.state !== 'loading' && cm.row !== (D.row?.id || ''))) {
+        D.comments = { id: D.ent.id, row: D.row?.id || '', state: 'loading', list: [] };
+        setTimeout(() => loadComments(), 0);
       }
-      return D.scratch;
+      return D.comments;
     }
-    // Saves your scratchpad as your comment on the case (the case is made if it isn't in Notion yet); empty
-    // text removes the comment. Says where it went: 'notion', 'test' (test mode, not written) or 'local'.
-    async function saveScratch(text) {
-      if (!enabled() || !D.ent) return 'local';
-      if (dryRun()) return 'test';
-      const ent = D.ent;
+    // Posts a new comment on the case (the case is made if it isn't in Notion yet). It's your click, so like
+    // the other buttons it writes in test mode too, on a [TEST] case.
+    async function postComment(text) {
+      if (!enabled() || !D.ent) throw new Error('Set up Notion case tracking first (Settings).');
       text = String(text || '').trim();
-      const sc = D.scratch?.id === ent.id ? D.scratch : { id: ent.id, state: 'ready', mine: null, others: [] };
-      if (!text) {
-        if (sc.mine) {
-          await notion('DELETE', `/comments/${sc.mine.id}`, null, COMMENTS_API).catch(e => { if (e.status !== 404) throw e; });
-          if (D.row) GM_deleteValue(scratchKey(D.row.id));
-          sc.mine = null;
-          changed();
-        }
-        return 'notion';
-      }
+      if (!text) throw new Error('Write the comment first.');
+      const ent = D.ent;
       if (!D.row) {
         const ctx = caseContext(ent);
-        const page = await apply(ctx, { log: `Case started for a scratchpad note in Tools (${midSentence(ctx.kind)} ${ctx.id}).`, create: true, explicit: true });
+        const page = await apply(ctx, { log: `Case started for a comment in Tools (${midSentence(ctx.kind)} ${ctx.id}).`, create: true, explicit: true });
         if (!page) throw new Error("Couldn't create the case in Notion.");
         D.row = page;
         D.state = 'tracked';
@@ -3547,18 +3503,16 @@
       const who = cfg().notionUser
         ? { type: 'mention', mention: { type: 'user', user: { id: cfg().notionUser } } }
         : { type: 'text', text: { content: name }, annotations: { bold: true } };
-      const at = stamp();
-      const rich = [who, { type: 'text', text: { content: ` · Scratchpad · ${at}\n` }, annotations: { color: 'gray' } },
+      const rich = [who, { type: 'text', text: { content: ` · ${stamp()}\n` }, annotations: { color: 'gray' } },
         ...chunks(text, 1900).slice(0, 95).map(c => ({ type: 'text', text: { content: c } }))];
-      let c = null;
-      if (sc.mine) {
-        // Someone may have deleted it in Notion: then a new one is posted
-        c = await notion('PATCH', `/comments/${sc.mine.id}`, { rich_text: rich }, COMMENTS_API).catch(e => { if (e.status === 404) return null; throw e; });
+      const c = await notion('POST', '/comments', { parent: { type: 'page_id', page_id: D.row.id }, rich_text: rich, display_name: { type: 'custom', custom: { name } } }, COMMENTS_API)
+        .catch(e => { throw e.status === 403 ? new Error("The Notion integration can't post comments. Turn on Insert comments in its Capabilities.") : e; });
+      if (D.ent === ent) {
+        const cm = D.comments?.id === ent.id ? D.comments : { id: ent.id, state: 'ready', list: [] };
+        D.comments = { ...cm, row: D.row.id, state: cm.state === 'error' ? 'ready' : cm.state, list: [...cm.list, { ...readComment(c), mine: true, who: name }] };
       }
-      if (!c) c = await notion('POST', '/comments', { parent: { type: 'page_id', page_id: D.row.id }, rich_text: rich, display_name: { type: 'custom', custom: { name } } }, COMMENTS_API);
-      GM_setValue(scratchKey(D.row.id), c.id);
-      if (D.ent === ent) D.scratch = { ...sc, row: D.row.id, state: 'ready', mine: { id: c.id, who: name, at, text, mine: true, scratch: true } };
-      return 'notion';
+      changed();
+      return c;
     }
 
     /* ---- the case chat: a "Case chat" toggle on the case page, one block per message:
@@ -3668,7 +3622,7 @@
       },
       finalIsOwn: () => !!(D.row?.properties?.['Final answer']?.rich_text || []).length,
       setOwnAnswer, loadChat, appendChat, sheetsOn, saveCaseDetails,
-      loadPrompts, setupPrompts, promptsInfo, scratchFor, saveScratch,
+      loadPrompts, setupPrompts, promptsInfo, commentsFor, loadComments, postComment,
       // The open case's Front, Slack and AI chat links, where they're known (the sheet row or the Notion case)
       caseLinks: () => {
         if (sheetsOn()) return (D.sheetCase && D.ent && D.sheetCase.id === D.ent.id && D.sheetCase.links) || {};
@@ -5328,7 +5282,7 @@
         h('div', { class: 'row' }, sheetsUrlInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, sheetsSecretInput, btn('Save and test', saveSheets)),
         sheetsNote),
-      EDITION !== 'sheets' && group('Notion case tracking', 'Tracks each dispute and work order you work as a row in your Notion Projects database (needs a Notion integration with access to it). The Tasks database is needed only for Claude Code research. Your Notion user id signs your scratchpad comments; for those, the integration needs Read comments and Insert comments turned on (its Capabilities in Notion).',
+      EDITION !== 'sheets' && group('Notion case tracking', 'Tracks each dispute and work order you work as a row in your Notion Projects database (needs a Notion integration with access to it). The Tasks database is needed only for Claude Code research. Your Notion user id signs the comments you post from Tools; to see and post comments, the integration needs Read comments and Insert comments turned on (its Capabilities in Notion).',
         h('div', { class: 'row' }, notionKeyInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, projectsInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, tasksInput),
@@ -6398,49 +6352,51 @@
         h('div', { class: 'row', style: 'margin-top:6px' }, chatIn),
         s.linksMsg.textContent ? s.linksMsg : h('p', { class: 'hint', text: desk.enabled() ? 'Saved to the case in Notion as soon as you paste one.' : 'Saved to the case once Notion is set up (Settings).' }));
 
-      // Your scratchpad: your notes on the case, saved as your comment on the case in Notion a moment after you
-      // stop typing (and kept on this computer as you go). Everyone else's comments on the case show below it.
-      const scratch = desk.scratchFor();
-      const draftKey = `desk:scratchDraft:${d.disputeId}`;
-      const flushScratch = async () => {
-        clearTimeout(s.scratchTimer);
-        const text = s.scratchIn.value.trim();
-        if (text === (s.scratchSaved ?? '')) return;
-        s.scratchNote.textContent = 'Saving…';
-        s.scratchNote.className = 'hint';
+      // Comments: everyone's comments on the case in Notion (oldest first), and a box to post yours. A post is a
+      // new comment, @mentioning you and signed with your name; what you're writing is kept here until it's posted.
+      const comments = desk.commentsFor();
+      const draftKey = `desk:commentDraft:${d.disputeId}`;
+      const post = async () => {
+        const text = s.commentIn.value.trim();
+        if (!text) { s.commentNote.textContent = 'Write the comment first.'; s.commentNote.className = 'hint err'; return; }
+        s.postBtn.disabled = true;
+        s.commentNote.textContent = 'Posting…';
+        s.commentNote.className = 'hint';
         try {
-          const where = await desk.saveScratch(text);
-          if (where === 'notion') { s.scratchSaved = text; GM_deleteValue(draftKey); }
-          s.scratchNote.textContent = where === 'notion' ? (text ? `Saved to Notion ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` : 'Cleared: your comment is removed from the case.')
-            : where === 'test' ? 'Test mode: kept on this computer, not saved to Notion.' : 'Kept on this computer (Notion isn\'t set up).';
-          s.scratchNote.className = where === 'notion' ? 'hint ok' : 'hint';
-        } catch (err) { s.scratchNote.textContent = `Not saved to Notion: ${err.message}`; s.scratchNote.className = 'hint err'; }
+          await desk.postComment(text);
+          s.commentIn.value = '';
+          GM_deleteValue(draftKey);
+          s.commentNote.textContent = `Posted to the case in Notion${desk.testMode() ? ' (test mode: on the [TEST] case)' : ''}.`;
+          s.commentNote.className = 'hint ok';
+        } catch (err) { s.commentNote.textContent = `Not posted: ${err.message}`; s.commentNote.className = 'hint err'; }
+        s.postBtn.disabled = false;
+        render();
       };
-      if (!s.scratchIn) {
-        s.scratchIn = h('textarea', { class: 'answer', rows: 3, 'aria-label': 'Your scratchpad', placeholder: 'Your scratchpad: notes on this case (saved as your comment in Notion)',
-          oninput: () => { GM_setValue(draftKey, s.scratchIn.value); clearTimeout(s.scratchTimer); s.scratchTimer = setTimeout(() => flushScratch(), 2000); },
-          onblur: () => flushScratch() });
-        s.scratchNote = h('p', { class: 'hint' });
-        const draft = GM_getValue(draftKey, '');
-        if (draft) { s.scratchIn.value = draft; s.scratchTyped = true; }
+      if (!s.commentIn) {
+        s.commentIn = h('textarea', { class: 'answer', rows: 3, 'aria-label': 'Your comment', placeholder: 'Write a comment on this case (Ctrl+Enter posts it)',
+          oninput: () => GM_setValue(draftKey, s.commentIn.value),
+          onkeydown: e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); post(); } } });
+        s.commentIn.value = GM_getValue(draftKey, '');
+        s.postBtn = h('button', { class: 'secondary', type: 'button', text: 'Post comment', onclick: () => post() });
+        s.commentNote = h('p', { class: 'hint' });
       }
-      // Your comment from Notion fills the box once it's loaded, unless you've started typing
-      if (scratch?.state === 'ready' && !s.scratchTyped && s.scratchSaved === undefined) {
-        s.scratchSaved = scratch.mine?.text || '';
-        if (root.activeElement !== s.scratchIn) s.scratchIn.value = s.scratchSaved;
-      }
-      if (root.activeElement === s.scratchIn) s.scratchTyped = true;
-      const others = scratch?.others || [];
-      const scratchSection = h('div', { class: 'section' },
-        h('p', { class: 'label', text: 'Scratchpad' }),
-        s.scratchIn,
-        s.scratchNote.textContent ? s.scratchNote
-          : h('p', { class: `hint${scratch?.state === 'error' ? ' err' : ''}`, text: scratch?.state === 'error' ? `Couldn't read the case's comments: ${scratch.error}`
-            : scratch?.state === 'loading' ? 'Loading the comments on this case…'
-            : desk.enabled() ? (desk.dryRun() ? 'Test mode: kept on this computer, not saved to Notion.' : 'Saved as your comment on the case in Notion, under your name.') : 'Kept on this computer. Set up Notion (Settings) to share it on the case.' }),
-        others.length > 0 && h('div', { class: 'tasks' }, others.map(o => h('div', { style: 'margin-top:6px' },
-          h('p', { class: 'hint', style: 'margin:0', text: `${o.who} · ${o.at}${o.scratch ? ' · scratchpad' : ''}` }),
-          h('p', { style: 'margin:2px 0 0;white-space:pre-wrap', text: o.text })))));
+      const list = comments?.list || [];
+      const commentSection = h('div', { class: 'section' },
+        h('div', { class: 'row', style: 'align-items:baseline' },
+          h('p', { class: 'label', style: 'margin:0', text: `Comments${list.length ? ` (${list.length})` : ''}` }),
+          desk.enabled() && h('span', { style: 'margin-left:auto' }, noteLink('Refresh', () => desk.loadComments()))),
+        comments?.state === 'loading' ? h('p', { class: 'hint', text: 'Loading the comments on this case…' })
+          : comments?.state === 'error' ? h('p', { class: 'hint err', text: `Couldn't read the comments: ${comments.error}` })
+          : comments?.state === 'off' ? h('p', { class: 'hint', text: 'Set up Notion case tracking (Settings) to see and post comments on the case.' })
+          : !list.length ? h('p', { class: 'hint', text: desk.hasRow() ? 'No comments on this case yet.' : 'This case isn\'t in Notion yet: posting a comment adds it.' })
+          : h('div', { class: 'tasks' }, list.map(c => h('div', { style: 'margin-top:8px' },
+            h('p', { class: 'hint', style: 'margin:0', text: `${c.mine ? 'You' : c.who} · ${c.at}` }),
+            h('p', { style: 'margin:2px 0 0;white-space:pre-wrap', text: c.text })))),
+        desk.enabled() && [
+          h('div', { style: 'margin-top:8px' }, s.commentIn),
+          h('div', { class: 'row', style: 'margin-top:6px' }, s.postBtn),
+          s.commentNote.textContent && s.commentNote,
+        ]);
 
       // The answer we found: the case's Final answer in Notion, with your name
       const foundIn = s.foundIn || (s.foundIn = h('textarea', { class: 'answer', rows: 4, 'aria-label': 'The answer we found', placeholder: 'The answer we found: the decision and why, one sentence up to a paragraph' }));
@@ -6462,11 +6418,11 @@
       desk.setPageData(d);
       const deskCard = desk.card(noteLink);
       if (isOrder) {
-        rest.replaceChildren(...[deskCard, linksSection, scratchSection, orderSection, answerSection, detailsSection, tokenHint].filter(Boolean));
+        rest.replaceChildren(...[deskCard, linksSection, commentSection, orderSection, answerSection, detailsSection, tokenHint].filter(Boolean));
       } else rest.replaceChildren(...[
         deskCard,
         linksSection,
-        scratchSection,
+        commentSection,
         h('div', { class: 'section' },
           h('p', { class: 'label', text: 'Lines to research' }),
           inDispute.length > 0
