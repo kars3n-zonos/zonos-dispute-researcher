@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.15.0
+// @version      7.16.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -132,6 +132,11 @@
   });
 
   function pageIsDark() {
+    // The portal marks its theme on <html> ("light" / "dark"): read that first, since while the page is still
+    // loading nothing has a background yet to go by
+    const cls = document.documentElement.classList;
+    if (cls.contains('dark')) return true;
+    if (cls.contains('light')) return false;
     for (const el of [document.body, document.documentElement]) {
       const m = getComputedStyle(el).backgroundColor.match(/[\d.]+/g);
       if (m && (m.length < 4 || +m[3] > 0)) return (m[0] * 299 + m[1] * 587 + m[2] * 114) / 1000 < 128;
@@ -3955,9 +3960,18 @@
   /* ------------------------------------------------- dashboard: the work queue */
 
   const QUEUE_PATH = '/entry-writer-queue';
-  // Which queue the Entry Writer Queue page shows: the portal's own (the default) or the Tools queue
+  // Which queue the Entry Writer Queue page shows: the portal's own (the default), Portal+ (the portal's look,
+  // without its limits) or the Tools queue (dense, with summaries and saved views)
   const QUEUE_VIEW_KEY = 'zt:queueView';
-  const toolsQueueOn = () => GM_getValue(QUEUE_VIEW_KEY, 'portal') === 'tools';
+  const QUEUE_LAST_KEY = 'zt:queueViewLast';   // the last of ours used, for the switch on the portal's own queue
+  const QUEUE_VIEWS = { portal: "Portal's own", classic: 'Portal+', tools: 'Tools queue' };
+  const queueView = () => { const v = GM_getValue(QUEUE_VIEW_KEY, 'portal'); return v in QUEUE_VIEWS ? v : 'portal'; };
+  const toolsQueueOn = () => queueView() !== 'portal';
+  function setQueueView(v) {
+    GM_setValue(QUEUE_VIEW_KEY, v);
+    if (v !== 'portal') GM_setValue(QUEUE_LAST_KEY, v);
+    queueCtl?.refreshView();
+  }
   let queueCtl = null;   // set once the queue exists, so Tools can switch views
   const onQueuePage = () => location.pathname.replace(/\/$/, '') === QUEUE_PATH;
   const NAV_KEY = 'zt:queue:nav';        // the queue as last shown: the order of Prev / Next and each order's summary
@@ -3998,17 +4012,21 @@
     const due = n.dueDate || n.subject?.deadline?.expiresAt || '';
     const codes = (n.rejections || []).map(r => r.sourceCbpEvent?.cbpCode).filter(Boolean);
     const problem = lines[0] && lines[0] !== title ? lines[0] : (n.rejections?.[0]?.detail || '');
+    // A dispute's claims, the way the portal sums them up: "HS code ×3 · Description ×3"
+    const claimCounts = new Map();
+    for (const i of n.subject?.items || []) for (const c of i.claims || []) claimCounts.set(c.type, (claimCounts.get(c.type) || 0) + 1);
+    const claims = [...claimCounts].map(([t, k]) => `${CLAIM_TYPE_LABELS[t] || human2(t)}${k > 1 ? ` ×${k}` : ''}`).join(' · ');
     return {
       id: n.id, type: n.type, label: classLabel(n.type), status: n.status, assigneeId: n.assigneeId || '', assigneeName: n.assigneeName || '',
       claimedAt: n.claimedAt, createdMs: Date.parse(n.createdAt) || 0, dueMs: Date.parse(due) || null, stream: n.stream || '',
       escalatedTo: n.escalatedTo || '', escalationNote: n.escalationNote || '', resolution: n.resolution || '', detail: n.detail || '', problem: clean(problem).slice(0, 160),
       title: clean(title).slice(0, 120), items, tracking, entryNo, mbol, ref: tracking || entryNo || mbol || sid, sid, url, orgId, customer: '', consignee,
-      codes, groupKey: n.groupKey || '',
+      codes, groupKey: n.groupKey || '', claims,
     };
   }
   // The text a search looks through, built once per row (and again when its customer name arrives)
   const hay = r => r._hay || (r._hay = [r.label, r.status, r.title, r.problem, r.detail, r.tracking, r.entryNo, r.mbol, r.sid, r.id, r.customer, r.consignee,
-    r.assigneeName, r.stream, r.escalatedTo, r.escalationNote, ...r.items, ...r.codes].join(' \u0001 ').toLowerCase());
+    r.assigneeName, r.stream, r.escalatedTo, r.escalationNote, r.claims, ...r.items, ...r.codes].join(' \u0001 ').toLowerCase());
 
   // One date formatter for every row (making one per call was the queue's slowest step), and today's start and
   // each row's due day worked out once instead of on every test, sort and render
@@ -4185,21 +4203,137 @@
   ];
   const GROUPS = { '': 'No grouping', customer: 'Customer', type: 'Class', assignee: 'Assignee', status: 'Status', due: 'Due' };
 
+  // ---- Portal+: the portal's own queue as people know it (its tabs, filters, columns and look), without its limits:
+  // every order in one list instead of pages of 50, sortable columns, search on anything, every customer in the
+  // customer filter, rows that open in a new tab with Ctrl-click, details that open at once, claim in one click,
+  // select and act on many, and your place (tab, filters, sort, scroll) kept when you come back from an order
+  const CLASSIC_SCOPES = [
+    { key: 'mine', label: 'Mine', test: (r, me) => !!me && r.assigneeId === me, desc: 'assigned to you' },
+    { key: 'waiting', label: 'Waiting', test: r => r.status === 'WAITING', desc: 'waiting on an answer' },
+    { key: 'unclaimed', label: 'Unclaimed', test: r => r.status === 'OPEN' && !r.assigneeId, desc: 'unclaimed, across all customers' },
+    { key: 'all', label: 'Everyone', test: () => true, desc: "open or waiting, everyone's" },
+  ];
+  const CREATED = {
+    today: { label: 'Today', test: r => r.createdMs >= today() },
+    week: { label: 'Last 7 days', test: r => r.createdMs >= today() - 6 * DAY },
+    month: { label: 'Last 30 days', test: r => r.createdMs >= today() - 29 * DAY },
+    older: { label: 'Older than 30 days', test: r => r.createdMs && r.createdMs < today() - 29 * DAY },
+  };
+  const filterOf = key => FILTERS.find(f => f.key === key);
+  const CLASSIC_FILTERS = [
+    { ...filterOf('type'), label: 'Problem class' }, filterOf('stream'), filterOf('status'), filterOf('customer'),
+    { key: 'created', label: 'Created', val: r => Object.values(CREATED).filter(c => c.test(r)).map(c => c.label) },
+    filterOf('due'), filterOf('assignee'),
+  ];
+  const CLASSIC_COLS = [
+    { key: 'type', label: 'Class', width: 168 }, { key: 'status', label: 'Status', width: 104 }, { key: 'title', label: 'Problem' },
+    { key: 'ref', label: 'Subject', width: 164 }, { key: 'customer', label: 'Customer', width: 166 }, { key: 'due', label: 'Due', width: 128 },
+    { key: 'age', label: 'Age', width: 56 }, { key: 'assignee', label: 'Assignee', width: 180 },
+  ].map(c => ({ ...COLS.find(x => x.key === c.key), ...c }));
+  // Due dates as the portal writes them (it shows the UTC day)
+  const CLASSIC_DUE = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  const initials = name => clean(name).split(' ').filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase() || '?';
+  // The portal's own palette (zinc, with blue class and amber waiting pills), light and dark
+  const CLASSIC_CSS = `
+    :host([data-skin="classic"]) { --bg:#ffffff; --fg:#09090b; --muted:#56565d; --line:#e4e4e7; --soft:#f4f4f5; --tint:#f4f4f5; --accent:#18181b; --accent-fg:#fafafa; --sel:#eff6ff; --ok:#15803d; --warn:#b45309; --err:#dc2626;
+      --blue:#1d4ed8; --blue-bg:rgba(59,130,246,.1); --blue-line:rgba(59,130,246,.4); --amber:#b45309; --amber-bg:rgba(245,158,11,.1); --amber-line:rgba(245,158,11,.4); --red-bg:rgba(239,68,68,.1); --red-line:rgba(239,68,68,.4); }
+    :host([data-skin="classic"][data-theme="dark"]) { --bg:#09090b; --fg:#fafafa; --muted:#c4c4ca; --line:#27272a; --soft:#18181b; --tint:#18181b; --accent:#fafafa; --accent-fg:#18181b; --sel:#172033; --ok:#4ade80; --warn:#fbbf24; --err:#f87171;
+      --blue:#93c5fd; --amber:#fbbf24; }
+    .cq { font: 14px/1.45 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: var(--fg); font-variant-numeric: tabular-nums; }
+    .cq-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+    .cq-eyebrow { font-size: 11.5px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .cq h1 { margin: 10px 0 0; font-size: 22px; font-weight: 700; line-height: 1.5; }
+    .cq-sub { font-size: 13.5px; color: var(--muted); }
+    .cq-right { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+    .cq-icon { background: none; border: 0; padding: 2px 4px; color: var(--muted); font-size: 15px; line-height: 1; }
+    .cq-icon:hover { color: var(--fg); }
+    .cq-view { height: 30px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); padding: 0 8px; font-size: 12.5px; font-weight: 500; }
+    .cq-tabs { display: flex; flex-wrap: wrap; gap: 0 24px; margin-top: 18px; border-bottom: 1px solid var(--line); }
+    .cq-tab { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 9px 4px 11px; font-size: 13.5px; font-weight: 500; color: var(--muted); white-space: nowrap; }
+    .cq-tab:hover { color: var(--fg); }
+    .cq-tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--fg); }
+    .cq-n { margin-left: 6px; padding: 1px 6px; border-radius: 999px; font-size: 11px; background: var(--soft); color: var(--muted); }
+    .cq-tab[aria-selected="true"] .cq-n { background: var(--fg); color: var(--bg); }
+    .cq-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 18px; }
+    .cq-bar .filter > button { width: auto; height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); font-size: 13px; font-weight: 500; }
+    .cq-bar .filter > button:hover { background: var(--soft); }
+    .cq-bar .filter > button.on { border-color: var(--fg); color: var(--fg); background: var(--soft); }
+    .cq-search { display: flex; align-items: center; gap: 6px; height: 32px; border: 1px solid var(--line); border-radius: 6px; padding: 0 10px; flex: 0 1 340px; min-width: 220px; background: var(--bg); }
+    .cq-search input { border: 0; background: transparent; outline: none; flex: 1; min-width: 0; font-size: 14px; }
+    .cq-clear { margin-left: auto; background: none; border: 0; font-size: 13px; color: var(--muted); }
+    .cq-clear:hover { color: var(--fg); }
+    .cq-note { margin-top: 14px; font-size: 12.5px; color: var(--muted); }
+    .cq-note b { color: var(--fg); font-weight: 500; }
+    .cq-bulk { position: sticky; top: 0; z-index: 5; margin-top: 12px; }
+    .cq .bulk { border-color: var(--line); background: var(--bg); box-shadow: 0 4px 14px rgba(0,0,0,.08); }
+    .cq-table { margin-top: 10px; overflow-x: auto; }
+    table.cq-t { min-width: 1150px; }
+    .cq-t th { height: 44px; padding: 0 12px; font-size: 13.5px; font-weight: 500; color: var(--muted); border-bottom: 1px solid var(--line); background: var(--bg); z-index: 2; vertical-align: middle; }
+    .cq-t th.sortable:hover { color: var(--fg); }
+    .cq-t th .arrow { color: var(--fg); }
+    .cq-t td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; font-size: 14px; }
+    .cq-t tr.row td { height: 60px; }
+    .cq-t td.cb, .cq-t th.cb { padding: 0 0 0 8px; }
+    .cq-t td.cb input, .cq-t th.cb input { accent-color: var(--fg); }
+    .cq-t tr.row.sel td { background: var(--sel); }
+    .cq-t tr.row.focus td:first-child { box-shadow: inset 3px 0 0 var(--fg); }
+    .cq-pill { display: inline-block; max-width: 100%; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+    .cq-class, .cq-st-OPEN { color: var(--blue); background: var(--blue-bg); border-color: var(--blue-line); }
+    .cq-st-OPEN { font-weight: 500; }
+    .cq-st-WAITING { color: var(--amber); background: var(--amber-bg); border-color: var(--amber-line); font-weight: 500; }
+    .cq-esc { color: var(--err); background: var(--red-bg); border-color: var(--red-line); font-weight: 500; margin-left: 4px; }
+    .cq-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cq-line a:hover { text-decoration: underline; }
+    .cq-small { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+    .cq-mono { font: 13px ui-monospace, "JetBrains Mono", Consolas, monospace; }
+    .cq-due-err { color: var(--err); } .cq-due-warn { color: var(--warn); }
+    .cq-due-err .cq-small, .cq-due-warn .cq-small { color: inherit; font-size: 11px; }
+    .cq-who { display: flex; align-items: center; gap: 8px; min-width: 0; white-space: nowrap; }
+    .cq-who > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+    .cq-av { flex: none; display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--fg); color: var(--bg); font-size: 9.5px; font-weight: 600; }
+    .cq-av.other { background: var(--soft); color: var(--fg); border: 1px solid var(--line); }
+    .cq-btn { display: inline-flex; align-items: center; height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+    .cq-btn:hover { background: var(--soft); }
+    .cq-btn.dark { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+    .cq-chev { background: none; border: 0; color: var(--muted); width: 24px; height: 24px; border-radius: 4px; font-size: 16px; line-height: 1; transition: transform .12s; }
+    .cq-chev:hover { background: var(--soft); color: var(--fg); }
+    .cq-chev[aria-expanded="true"] { transform: rotate(90deg); }
+    .cq-t tr.cq-detail td { background: var(--soft); padding: 12px 16px 14px 84px; }
+    .cq-dl { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px 24px; margin: 0; font-size: 13px; }
+    .cq-dl dt { font-size: 12px; color: var(--muted); }
+    .cq-dl dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+    .cq-pre { white-space: pre-wrap; font-size: 12.5px; margin-top: 10px; overflow-wrap: anywhere; }
+    .cq-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .cq-more { text-align: center; padding: 16px; color: var(--muted); font-size: 13px; }
+    .cq .copy { font-size: 12px; }
+    .cq .empty { padding: 36px; }
+  `;
+
   function createQueue() {
     const host = h('div', { id: 'zt-queue-host' });
     const root = host.attachShadow({ mode: 'open' });
     for (const type of ['keydown', 'keyup', 'keypress']) host.addEventListener(type, e => e.stopPropagation());
-    const defaults = { scope: 'mine', filters: {}, sort: [{ key: 'due', dir: 1 }], group: '', views: [], auto: true };
+    // Two looks over the same data: 'tools' (the Tools queue) and 'classic' (Portal+). Each keeps its own tab;
+    // search, filters and sort are shared
+    const skin = () => (queueView() === 'classic' ? 'classic' : 'tools');
+    const defaults = { scope: 'mine', cscope: 'mine', filters: {}, sort: [{ key: 'due', dir: 1 }], group: '', views: [], auto: true };
     const prefs = { ...defaults, ...GM_getValue(PREFS_KEY, {}) };
-    const savePrefs = () => GM_setValue(PREFS_KEY, { scope: S.scope, filters: S.filters, sort: S.sort, group: S.group, views: prefs.views, auto: S.auto });
+    const savePrefs = () => GM_setValue(PREFS_KEY, { scope: S.scope, cscope: S.cscope, filters: S.filters, sort: S.sort, group: S.group, views: prefs.views, auto: S.auto });
     const S = {
-      rows: [], me: null, loadedAt: 0, loading: false, error: '', q: '', scope: prefs.scope, filters: prefs.filters || {}, sort: prefs.sort, group: prefs.group,
+      rows: [], me: null, loadedAt: 0, loading: false, error: '', q: '', scope: prefs.scope, cscope: prefs.cscope, filters: prefs.filters || {}, sort: prefs.sort, group: prefs.group,
       auto: prefs.auto, sel: new Set(), anchor: -1, focus: -1, pop: '', popSearch: '', extra: null, extraFor: '', seenAt: GM_getValue(SEEN_KEY, 0), shown: [], limit: 300,
+      open: new Set(),   // Portal+: rows with their details showing
     };
     let autoTimer = null;
+    // Follows the portal's light / dark switch as soon as it's flipped, without redrawing the list
+    new MutationObserver(() => { if (host.isConnected) host.dataset.theme = pageIsDark() ? 'dark' : 'light'; })
+      .observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    const scopeList = () => (skin() === 'classic' ? CLASSIC_SCOPES : SCOPES);
+    const scopeKey = () => (skin() === 'classic' ? 'cscope' : 'scope');
+    const filterList = () => (skin() === 'classic' ? CLASSIC_FILTERS : FILTERS);
 
     const wrap = h('div', { class: 'q' });
-    root.append(h('style', { text: QUEUE_CSS }), wrap);
+    root.append(h('style', { text: QUEUE_CSS + CLASSIC_CSS }), wrap);
     let searchTimer = 0;
     const searchInput = h('input', {
       type: 'text', placeholder: 'Search anything: tracking, entry, master bill, customer, item, HS code, note… (paste a list to match many)',
@@ -4230,6 +4364,7 @@
         for (const id of [...S.sel]) if (!live.has(id)) S.sel.delete(id);
         S.loading = false;
         render();
+        if (placePending) { placePending = false; restorePlace(); }
         // Names the cache didn't have yet come in after the first draw
         const missing = rows.filter(r => r.orgId && !(r.orgId in names)).map(r => r.orgId);
         if (missing.length) {
@@ -4265,11 +4400,11 @@
     }
     function filterVals(f, r) { const v = f.val(r); return Array.isArray(v) ? v : [v]; }
     function visible({ ignore = '' } = {}) {
-      const scope = SCOPES.find(s => s.key === S.scope) || SCOPES[0];
+      const scope = scopeList().find(s => s.key === S[scopeKey()]) || scopeList()[0];
       const me = S.me?.id;
       const pq = parseQuery(S.q);
       let rows = S.rows.filter(r => scope.test(r, me));
-      for (const f of FILTERS) {
+      for (const f of filterList()) {
         const want = S.filters[f.key];
         if (f.key === ignore || !want?.length) continue;
         rows = rows.filter(r => filterVals(f, r).some(v => want.includes(v)));
@@ -4318,8 +4453,13 @@
     // ---- drawing
     function render() {
       host.dataset.theme = pageIsDarkSoon() ? 'dark' : 'light';
+      host.dataset.skin = skin();
       const me = S.me?.id;
       const rows = sortRows(visible());
+      if (skin() === 'classic') { S.shown = rows; saveNav(rows); renderClassic(rows); return; }
+      moreObserver.disconnect();
+      searchInput.placeholder = 'Search anything: tracking, entry, master bill, customer, item, HS code, note… (paste a list to match many)';
+      wrap.className = 'q';
       let ordered = rows;
       const groups = new Map();
       if (S.group) {
@@ -4339,7 +4479,7 @@
           h('label', { title: 'Reloads every minute while nothing is selected' },
             h('input', { type: 'checkbox', checked: S.auto, onchange: e => setAuto(e.target.checked) }), ' Auto-refresh'),
           h('button', { class: 'btn', type: 'button', text: '↻ Refresh', disabled: S.loading, onclick: () => load() }),
-          h('button', { class: 'btn', type: 'button', text: 'Portal view', title: "Show the portal's own queue (switch back under Tools)", onclick: () => setEnhanced(false) })));
+          viewPicker('btn')));
 
       const counts = Object.fromEntries(SCOPES.map(s => [s.key, S.rows.filter(r => s.test(r, me)).length]));
       const scopes = h('div', { class: 'scopes', role: 'tablist' }, SCOPES.map(s =>
@@ -4379,6 +4519,157 @@
       if (S.pop) { const p = root.querySelector('.pop input[type=search]'); if (p) p.focus(); }
       if (focusEl) { searchInput.focus(); }
     }
+    // ---- Portal+ (the 'classic' skin)
+    // Which queue this page shows, from either of ours
+    function viewPicker(cls) {
+      return h('select', { class: cls, 'aria-label': 'Queue view', title: 'Which queue this page shows (also under Tools ⚙︎ Settings)', onchange: e => setQueueView(e.target.value) },
+        Object.entries(QUEUE_VIEWS).map(([k, v]) => h('option', { value: k, text: `View: ${v}`, selected: queueView() === k })));
+    }
+    // More rows come in as you scroll near the bottom, instead of pages of 50
+    const moreObserver = new IntersectionObserver(es => {
+      if (es.some(e => e.isIntersecting) && S.shown.length > S.limit) { S.limit += 200; render(); }
+    }, { rootMargin: '800px 0px' });
+    const sortText = () => {
+      const s = S.sort[0];
+      if (!s) return 'nearest due first';
+      if (s.key === 'due') return s.dir > 0 ? 'nearest due first' : 'furthest due first';
+      if (s.key === 'age') return s.dir > 0 ? 'newest first' : 'oldest first';
+      const c = CLASSIC_COLS.find(x => x.key === s.key);
+      return `by ${(c?.label || s.key).toLowerCase()}, ${s.dir > 0 ? 'A to Z' : 'Z to A'}`;
+    };
+    function renderClassic(rows) {
+      const me = S.me?.id;
+      const mode = portal.mode();
+      wrap.className = 'q cq';
+      searchInput.placeholder = 'Search anything: tracking, entry, customer, item, HS code…';
+      const scope = CLASSIC_SCOPES.find(s => s.key === S.cscope) || CLASSIC_SCOPES[0];
+      const counts = Object.fromEntries(CLASSIC_SCOPES.map(s => [s.key, S.rows.filter(r => s.test(r, me)).length]));
+      const focusEl = root.activeElement === searchInput;
+      const top = h('div', { class: 'cq-top' },
+        h('div', {},
+          h('div', { class: 'cq-eyebrow', text: 'Entry writer queue' }),
+          h('h1', { text: 'Work queue' }),
+          h('div', { class: 'cq-sub', text: `${rows.length} order${rows.length === 1 ? '' : 's'} ${scope.desc} · ${sortText()}` })),
+        h('div', { class: 'cq-right' },
+          h('span', { text: S.loading ? 'Loading…' : S.loadedAt ? `Updated ${new Date(S.loadedAt).toLocaleTimeString()}` : '' }),
+          h('button', { class: 'cq-icon', type: 'button', text: '↻', title: 'Refresh queue (it also refreshes every minute)', 'aria-label': 'Refresh queue', disabled: S.loading, onclick: () => load() }),
+          h('span', { class: `mode ${mode}`, text: mode.toUpperCase(), title: 'The portal mode every action here goes to' }),
+          viewPicker('cq-view')));
+      const tabs = h('div', { class: 'cq-tabs', role: 'tablist' }, CLASSIC_SCOPES.map(s =>
+        h('button', { class: 'cq-tab', type: 'button', role: 'tab', 'aria-selected': String(S.cscope === s.key),
+          onclick: () => { S.cscope = s.key; S.sel.clear(); S.focus = -1; S.limit = 300; savePrefs(); render(); } },
+          s.label, h('span', { class: 'cq-n', text: String(counts[s.key]) }))));
+      const anyFilter = CLASSIC_FILTERS.some(f => S.filters[f.key]?.length) || S.q;
+      const bar = h('div', { class: 'cq-bar' },
+        CLASSIC_FILTERS.map(filterButton),
+        h('label', { class: 'cq-search' }, h('span', { class: 'muted', text: '⌕' }), searchInput),
+        h('button', { class: 'cq-clear', type: 'button', text: 'Clear all', style: `visibility:${anyFilter ? 'visible' : 'hidden'}`,
+          onclick: () => { for (const f of CLASSIC_FILTERS) delete S.filters[f.key]; S.filters = { ...S.filters }; S.q = ''; searchInput.value = ''; S.limit = 300; savePrefs(); render(); } }));
+      const note = h('div', { class: 'cq-note' },
+        S.missing?.length ? [h('b', { text: `Not found: ${S.missing.join(', ')}` }), ' · ', h('button', { class: 'linkish', type: 'button', text: 'Copy', onclick: () => copy(S.missing.join('\n'), 'Copied.') })]
+          : ['Showing every ', h('b', { text: 'Open' }), ' and ', h('b', { text: 'Waiting' }), ' order in one list. Click a column to sort; Ctrl-click a row for a new tab; Shift-click checkboxes to select a range.']);
+      wrap.replaceChildren(...[top, tabs, bar, note, S.sel.size && h('div', { class: 'cq-bulk' }, bulkBar()), classicTable(rows)].filter(Boolean));
+      moreObserver.disconnect();
+      const sentinel = wrap.querySelector('.cq-sentinel');
+      if (sentinel) moreObserver.observe(sentinel);
+      if (S.pop) { const p = root.querySelector('.pop input[type=search]'); if (p) p.focus(); }
+      if (focusEl) searchInput.focus();
+    }
+    function classicTable(rows) {
+      if (S.error) return h('div', { class: 'cq-more err' }, `Couldn't load the queue: ${S.error} `, h('button', { class: 'cq-btn', type: 'button', text: 'Try again', onclick: () => load() }));
+      if (!S.loadedAt && S.loading) return h('div', { class: 'cq-more', text: 'Loading every open and waiting order…' });
+      const shown = rows.slice(0, S.limit);
+      const allSel = rows.length > 0 && rows.every(r => S.sel.has(r.id));
+      const head = h('tr', {},
+        h('th', { class: 'cb' }, h('input', { type: 'checkbox', 'aria-label': 'Select every order in this list', checked: allSel,
+          onchange: e => { for (const r of rows) e.target.checked ? S.sel.add(r.id) : S.sel.delete(r.id); render(); } })),
+        h('th', {}),
+        CLASSIC_COLS.map(c => {
+          const i = S.sort.findIndex(s => s.key === c.key);
+          const arrow = i < 0 ? '' : `${S.sort[i].dir > 0 ? '↑' : '↓'}${S.sort.length > 1 ? i + 1 : ''}`;
+          return h('th', { class: 'sortable', 'aria-sort': i < 0 ? 'none' : S.sort[i].dir > 0 ? 'ascending' : 'descending', title: 'Click to sort, Shift-click to add a second sort',
+            onclick: e => sortBy(c.key, e.shiftKey) }, c.label, arrow ? h('span', { class: 'arrow', text: ` ${arrow}` }) : null);
+        }));
+      const body = [];
+      shown.forEach((r, i) => { body.push(classicRow(r, i)); if (S.open.has(r.id)) body.push(classicDetail(r)); });
+      return h('div', { class: 'cq-table' },
+        h('table', { class: 'cq-t' },
+          h('colgroup', {}, h('col', { style: 'width:34px' }), h('col', { style: 'width:36px' }), CLASSIC_COLS.map(c => h('col', { style: c.width ? `width:${c.width}px` : '' }))),
+          h('thead', {}, head), h('tbody', {}, body)),
+        rows.length ? null : h('div', { class: 'empty' }, emptyMessage()),
+        rows.length > S.limit
+          ? h('div', { class: 'cq-more cq-sentinel' }, `${S.limit} of ${rows.length} shown · more load as you scroll `,
+            h('button', { class: 'linkish', type: 'button', text: 'Show all', onclick: () => { S.limit = rows.length; render(); } }))
+          : rows.length ? h('div', { class: 'cq-more', text: `All ${rows.length} shown` }) : null);
+    }
+    function classicRow(r, i) {
+      const due = dueText(r);
+      const mine = !!r.assigneeId && r.assigneeId === S.me?.id;
+      const open = S.open.has(r.id);
+      const title = r.items.length > 1 ? `${r.items[0]} +${r.items.length - 1} more` : r.title;
+      const claimedAgo = r.claimedAt ? ` · claimed ${ageText(Date.parse(r.claimedAt))} ago` : '';
+      const who = r.assigneeId
+        ? h('div', { class: 'cq-who', title: `${r.assigneeName || 'Someone'}${claimedAgo}` },
+          h('span', { class: `cq-av${mine ? '' : ' other'}`, text: initials(mine ? S.me?.name || r.assigneeName : r.assigneeName) }),
+          h('span', {}, mine ? 'You' : r.assigneeName || 'Someone', h('span', { class: 'muted', style: 'font-size:12px', text: claimedAgo })))
+        : r.status === 'OPEN'
+          ? h('div', { class: 'cq-who' }, h('button', { class: 'cq-btn', type: 'button', text: 'Claim', title: 'Claim this order (one click, like the portal\'s own)', onclick: () => claimOne(r) }), h('span', { class: 'muted', text: 'Unclaimed' }))
+          : h('span', { class: 'muted', text: 'Unclaimed' });
+      return h('tr', { class: `row${S.sel.has(r.id) ? ' sel' : ''}${S.focus === i ? ' focus' : ''}`, tabindex: '-1', 'data-i': String(i),
+        onclick: e => { if (e.target.closest('input,button,a,select')) return; openRow(r, e); },
+        onauxclick: e => { if (e.button === 1 && !e.target.closest('a')) { e.preventDefault(); GM_openInTab(location.origin + r.url, { active: false, insert: true }); } } },
+        h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: S.sel.has(r.id), 'aria-label': `Select ${r.label} ${r.ref}`, onclick: e => selectClick(r, i, e) })),
+        h('td', {}, h('button', { class: 'cq-chev', type: 'button', text: '›', 'aria-expanded': String(open), 'aria-label': open ? 'Hide details' : 'Show details',
+          onclick: () => { open ? S.open.delete(r.id) : S.open.add(r.id); render(); } })),
+        h('td', {}, h('span', { class: 'cq-pill cq-class', text: r.label, title: r.label })),
+        h('td', { style: 'white-space:nowrap' }, h('span', { class: `cq-pill cq-st-${r.status}`, text: human2(r.status) }),
+          r.escalatedTo ? h('span', { class: 'cq-pill cq-esc', text: '↑', title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null),
+        h('td', {},
+          h('div', { class: 'cq-line' }, r.createdMs > S.seenAt ? h('span', { class: 'new', title: 'New since your last visit' }) : null,
+            h('a', { href: r.url, title: r.items.join(' · ') || r.title, onclick: e => openRow(r, e) }, title)),
+          r.claims || r.problem ? h('div', { class: 'cq-small', title: r.detail || r.claims, text: r.claims || r.problem }) : null),
+        h('td', {},
+          h('div', { class: 'cq-line cq-mono' }, r.ref, h('button', { class: 'copy', type: 'button', title: 'Copy', 'aria-label': `Copy ${r.ref}`, text: '⧉', onclick: () => copy(r.ref, `Copied ${r.ref}`) })),
+          r.entryNo && r.tracking ? h('div', { class: 'cq-small', text: `Entry ${r.entryNo}` }) : r.mbol && r.ref !== r.mbol ? h('div', { class: 'cq-small', text: `MBOL ${r.mbol}` }) : null),
+        h('td', {}, h('div', { class: 'cq-line', title: r.customer || r.consignee || '', text: r.customer || r.consignee || '—' }),
+          r.customer && r.consignee && r.consignee !== r.customer ? h('div', { class: 'cq-small', title: r.consignee, text: r.consignee }) : null),
+        h('td', { class: due.cls === 'err' ? 'cq-due-err' : due.cls === 'warn' ? 'cq-due-warn' : '' },
+          h('div', { class: 'cq-line', text: r.dueMs ? r._cqDue || (r._cqDue = CLASSIC_DUE.format(r.dueMs)) : '—' }), due.sub ? h('div', { class: 'cq-small', text: due.sub }) : null),
+        h('td', { class: 'muted', text: r.createdMs ? ageText(r.createdMs) : '—' }),
+        h('td', {}, who));
+    }
+    // What the portal's expander shows (and more), straight from what's loaded: nothing to wait for
+    function classicDetail(r) {
+      const when = ms => (ms ? new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '');
+      const fields = [
+        ['Tracking number', r.tracking], ['Entry', r.entryNo], ['Master bill', r.mbol],
+        [r.type === 'DUTY_DISPUTE_REVIEW' ? 'Dispute id' : 'Subject id', r.sid], ['Customer', r.customer], ['Consignee', r.consignee],
+        ['Status', `${human2(r.status)}${r.escalatedTo ? ` · escalated to ${human2(r.escalatedTo)}` : ''}`], ['Stream', r.stream && human2(r.stream)],
+        ['Created', when(r.createdMs)], ['Due', r.dueMs && `${CLASSIC_DUE.format(r.dueMs)} (${when(r.dueMs)} your time)`],
+        ['Assignee', r.assigneeId ? `${r.assigneeName || 'Someone'}${r.claimedAt ? `, claimed ${when(Date.parse(r.claimedAt))}` : ''}` : 'Unclaimed'],
+        ['Claims', r.claims], ['Work order id', r.id],
+      ].filter(([, v]) => v);
+      return h('tr', { class: 'cq-detail' }, h('td', { colspan: String(CLASSIC_COLS.length + 2) },
+        h('dl', { class: 'cq-dl' }, fields.map(([k, v]) => h('div', {}, h('dt', { text: k }), h('dd', { text: String(v) })))),
+        r.items.length > 1 ? h('div', { class: 'cq-pre' }, h('b', { text: `${r.items.length} items: ` }), r.items.join(' · ')) : null,
+        r.escalationNote ? h('div', { class: 'cq-pre' }, h('b', { text: 'Escalation note: ' }), r.escalationNote) : null,
+        r.detail ? h('div', { class: 'cq-pre', text: r.detail }) : null,
+        h('div', { class: 'cq-actions' },
+          h('a', { class: 'cq-btn dark', href: r.url, text: `Open ${r.type === 'DUTY_DISPUTE_REVIEW' ? 'dispute' : 'order'} ↗`, onclick: e => openRow(r, e) }),
+          h('button', { class: 'cq-btn', type: 'button', text: 'Open in a new tab', onclick: () => GM_openInTab(location.origin + r.url, { active: false, insert: true }) }),
+          h('button', { class: 'cq-btn', type: 'button', text: 'Copy link', onclick: () => copy(location.origin + r.url, 'Link copied.') }),
+          r.tracking || r.entryNo ? h('button', { class: 'cq-btn', type: 'button', text: `Copy ${r.tracking ? 'tracking' : 'entry'}`, onclick: () => copy(r.tracking || r.entryNo, `Copied ${r.tracking || r.entryNo}`) }) : null)));
+    }
+    // One click, like the portal's own Claim (through the same request); the row updates at once
+    async function claimOne(r) {
+      const res = await portal.act('BrokerageWorkOrderClaim', [r.id]);
+      if (res.failed.length) { toast(`Couldn't claim ${r.ref}: ${res.failed[0].error}`, true); return; }
+      Object.assign(r, { assigneeId: S.me?.id || '', assigneeName: S.me?.name || 'You', claimedAt: new Date().toISOString(), _hay: '' });
+      toast(`Claimed ${r.ref}.`);
+      render();
+      load({ quiet: true });
+    }
+
     function tally(rows, fn) {
       const m = new Map();
       for (const r of rows) { const k = fn(r); m.set(k, (m.get(k) || 0) + 1); }
@@ -4502,7 +4793,7 @@
       if (!S.loadedAt) return 'Nothing loaded yet.';
       const q = clean(S.q);
       const kids = [h('p', { text: q ? `Nothing open matches "${q}" here.` : 'Nothing here.' })];
-      if (q && S.scope !== 'all') kids.push(h('button', { class: 'btn small', type: 'button', text: 'Search all open orders', onclick: () => { S.scope = 'all'; render(); } }));
+      if (q && S[scopeKey()] !== 'all') kids.push(h('button', { class: 'btn small', type: 'button', text: 'Search all open orders', onclick: () => { S[scopeKey()] = 'all'; render(); } }));
       if (q && !/\s/.test(q)) {
         if (S.extraFor === q && S.extra) {
           kids.push(S.extra.length ? h('div', { style: 'text-align:left;margin-top:10px' }, h('p', { class: 'muted', text: 'Found in the portal (any status):' }),
@@ -4573,8 +4864,33 @@
         e.preventDefault?.();
         if (e.ctrlKey || e.metaKey || e.button === 1) { GM_openInTab(location.origin + r.url, { active: false, insert: true }); return; }
       }
+      rememberPlace();
       goTo(r.url);
     }
+    // Where you were in the list, so coming back from an order lands on the same rows (not the top, or page 1)
+    const PLACE_KEY = 'zt:queue:place';
+    const scroller = () => {
+      for (let el = host.parentElement; el && el !== document.body; el = el.parentElement) {
+        const o = getComputedStyle(el).overflowY;
+        if ((o === 'auto' || o === 'scroll') && el.scrollHeight > el.clientHeight) return el;
+      }
+      return document.scrollingElement || document.documentElement;
+    };
+    function rememberPlace() {
+      try { sessionStorage.setItem(PLACE_KEY, JSON.stringify({ y: scroller().scrollTop, limit: S.limit, at: Date.now() })); } catch { /* no storage */ }
+    }
+    function restorePlace() {
+      let p = null;
+      try { p = JSON.parse(sessionStorage.getItem(PLACE_KEY) || 'null'); sessionStorage.removeItem(PLACE_KEY); } catch { /* no storage */ }
+      if (!p || Date.now() - p.at > 30 * 60 * 1000) return;
+      S.limit = Math.max(S.limit, p.limit || 0);
+      render();
+      // The portal's router scrolls to the top after a page change, so this is set again a moment later
+      const go = () => { scroller().scrollTop = p.y; };
+      requestAnimationFrame(go);
+      setTimeout(go, 350);
+    }
+    let placePending = false;
     function moveFocus(step) {
       if (!S.shown.length) return;
       S.focus = Math.max(0, Math.min(S.shown.length - 1, (S.focus < 0 ? -1 : S.focus) + step));
@@ -4695,21 +5011,28 @@
       GM_setValue(NAV_AT_KEY, at);
     }
 
-    // ---- showing it in place of the portal's own queue. The portal's queue is the default; the Tools queue is
-    // a choice under Tools (the Tools tab's queue switch, or Setup), remembered on this computer.
+    // ---- showing it in place of the portal's own queue. The portal's queue is the default; Portal+ and the Tools
+    // queue are choices (the view picker on each, or Tools ⚙︎ Settings), remembered on this computer.
     const native = () => [...(document.querySelector('main')?.children || [])].find(el => el !== host);
-    function setEnhanced(on) {
-      GM_setValue(QUEUE_VIEW_KEY, on ? 'tools' : 'portal');
-      if (on) mount(); else unmount();
+    // After the view changed: ours shows (in the look picked) or the portal's own comes back
+    function refreshView() {
+      if (toolsQueueOn()) { mount(); S.limit = 300; render(); } else unmount();
     }
     let started = false;
-    // On the portal's own queue, a switch to the Tools queue sits by its "Updated … ↻", where the Tools queue
-    // has its "Portal view" button. It lives in the page, so it's put back whenever the portal redraws.
-    const switchBtn = h('button', { id: 'zt-queue-switch', type: 'button', text: '⚡ Tools queue', title: 'Switch to the Tools queue (search everything, filters, bulk actions)',
+    // On the portal's own queue, a switch to ours sits by its "Updated … ↻" (to whichever of ours was used last).
+    // It lives in the page, so it's put back whenever the portal redraws.
+    const lastView = () => (GM_getValue(QUEUE_LAST_KEY, 'classic') === 'tools' ? 'tools' : 'classic');
+    const switchBtn = h('button', { id: 'zt-queue-switch', type: 'button',
       style: 'margin-left:8px;padding:4px 10px;border-radius:6px;border:1px solid #f59e0b;background:rgba(245,158,11,.10);color:#f59e0b;font:600 12.5px system-ui,sans-serif;cursor:pointer',
-      onclick: () => setEnhanced(true) });
+      onclick: () => setQueueView(lastView()) });
     function placeSwitch() {
       if (!onQueuePage() || toolsQueueOn()) { switchBtn.remove(); return; }
+      const label = `⚡ ${QUEUE_VIEWS[lastView()]}`;
+      if (switchBtn.textContent !== label) {
+        switchBtn.textContent = label;
+        switchBtn.title = lastView() === 'tools' ? 'Switch to the Tools queue (search everything, filters, bulk actions)'
+          : 'Switch to Portal+: this queue as you know it, in one sortable list, with search on anything, one-click claim and bulk actions';
+      }
       const main = document.querySelector('main');
       if (!main || (switchBtn.isConnected && main.contains(switchBtn))) return;   // already there: nothing to look for
       // Small divs only (cheap test first), so the big wrappers' text is never read
@@ -4729,6 +5052,8 @@
         // The first visit has nothing to compare with, so nothing is marked new until the next one
         S.seenAt = GM_getValue(SEEN_KEY, 0) || Date.now();
         render();
+        // Back from an order: the list kept from last time shows at once, at the same place; it's then refreshed
+        if (S.rows.length) restorePlace(); else placePending = true;
         load();
         setAuto(S.auto);
       }
@@ -4743,7 +5068,7 @@
       started = false;
       clearInterval(autoTimer);
     }
-    queueCtl = { setEnhanced };
+    queueCtl = { refreshView };
     return { mount, unmount };
   }
 
@@ -5933,7 +6258,7 @@
         h('div', { class: 'row' }, promptsInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, btn('Set up Prompts', () => setUpPrompts()), btn('Refresh', () => refreshPrompts())),
         (showPromptsInfo(), promptsNote)),
-      EDITION !== 'sheets' && group('Claude Code research', 'Adds "Research in Claude Code": the request goes to your Notion Tasks and starts your cloud routine. Without it, use Copy prompt or Open in claude.ai.',
+      EDITION !== 'sheets' && group('Claude Code research', 'Adds "Research in Claude Code" beside Open in claude.ai on the Research tab: the request goes to your Notion Tasks and starts your cloud routine, and the answer comes back to the panel by itself.',
         h('div', { class: 'row' }, routineIdInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, routineTokenInput, btn('Save', saveRoutine)),
         routineNote),
@@ -6196,14 +6521,17 @@
     }
 
     // ---- the panel's own options, at the top of Settings (the cog), out of the way of the tabs
-    const setQueueView = on => { GM_setValue(QUEUE_VIEW_KEY, on ? 'tools' : 'portal'); queueCtl?.setEnhanced(on); };
-    const check = (label, on, change) => h('label', { class: 'doc' }, h('input', { type: 'checkbox', checked: on, onchange: e => change(e.target.checked) }), h('span', { text: label }));
+    const check =(label, on, change) => h('label', { class: 'doc' }, h('input', { type: 'checkbox', checked: on, onchange: e => change(e.target.checked) }), h('span', { text: label }));
     const prefsGroup = group('Panel and pages', "Changes to the portal's own pages are off until you turn them on here.",
       h('label', { class: 'frow', style: 'margin-bottom:6px' }, h('span', { class: 'flabel', text: 'Tools button' }),
         h('select', { class: 'field', 'aria-label': 'Tools button', onchange: e => { GM_setValue(LAUNCHER_KEY, e.target.value); placeLauncher(); dock(); } },
           h('option', { value: 'bubble', text: 'Floating bubble (drag it anywhere)', selected: launcherMode() === 'bubble' }),
           h('option', { value: 'sidebar', text: 'Button in the sidebar, above References', selected: launcherMode() === 'sidebar' }))),
-      check("Use the Tools queue on the Entry Writer Queue page (instead of the portal's own)", toolsQueueOn(), setQueueView),
+      h('label', { class: 'frow', style: 'margin-bottom:6px' }, h('span', { class: 'flabel', text: 'Entry Writer Queue page' }),
+        h('select', { class: 'field', 'aria-label': 'Entry Writer Queue page', onchange: e => setQueueView(e.target.value) },
+          h('option', { value: 'portal', text: "The portal's own queue", selected: queueView() === 'portal' }),
+          h('option', { value: 'classic', text: 'Portal+: the portal\'s queue in one sortable list, with search, one-click claim and bulk actions', selected: queueView() === 'classic' }),
+          h('option', { value: 'tools', text: 'Tools queue: dense, with summaries, grouping and saved views', selected: queueView() === 'tools' }))),
       check('Easier-to-read order pages (labeled details, CBP messages in plain English)', GM_getValue(READABLE_KEY, false), on => { GM_setValue(READABLE_KEY, on); if (on) makeReadable(); else undoReadable(); }),
       check("Hide the portal's own Classify / Quote rail", GM_getValue(HIDE_RAIL_KEY, false), on => { GM_setValue(HIDE_RAIL_KEY, on); refreshTools(); }),
       check('Denied-party reviews: "Listed on" opens the official list (and copies the name) instead of a Google search', GM_getValue(LIST_LINKS_KEY, false), on => { GM_setValue(LIST_LINKS_KEY, on); fixListLinks(); }),
@@ -6267,7 +6595,7 @@
       analytics: h('section', { class: 'view', hidden: true }, analyticsBody),
       dispute: h('section', { class: 'view' }, body, researchIdle,
         researchFooter = h('footer', {},
-          h('div', { class: 'actions', style: 'flex-wrap:wrap' }, openBtn),
+          h('div', { class: 'actions', style: 'flex-wrap:wrap' }, ccBtn, openBtn),
           status)),
       doc: h('section', { class: 'view', hidden: true },
         h('div', { class: 'entry-bar' }, h('span', { class: 'entry-caption', text: 'Case doc: answers, decisions and notes' }), docLink),
