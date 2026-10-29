@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.11.1
+// @version      7.12.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -155,6 +155,7 @@
   const CONFIG_DEFAULTS = {
     entryUrl: TEAM.entryUrl || 'https://entry.kars3n.com',   // the Entry Assistant site
     projectsDs: TEAM.projectsDs || '', tasksDs: TEAM.tasksDs || '', notionUser: '',   // Notion case tracking
+    promptsDs: TEAM.promptsDs || '',        // Notion "Prompts" data source: the team's edits to the research prompts
     routineId: '', routineToken: '',        // Claude Code cloud research: each person's own routine, never the team's
     notesUrl: TEAM.notesUrl || '',                           // shared answers server
     sheetsUrl: TEAM.sheetsUrl || '', sheetsSecret: TEAM.sheetsSecret || '',   // Sheets edition: the sheet's web app
@@ -165,6 +166,15 @@
     return c;
   };
   const setCfg = patch => GM_setValue(CONFIG_KEY, { ...GM_getValue(CONFIG_KEY, {}), ...patch });
+
+  // The team's edits to the research prompts' fixed text, from Notion's Prompts database (one row per piece,
+  // see promptPieces), kept here and refreshed every 10 minutes. A blank row, or none at all, means the
+  // built-in text. Lists are one item per line.
+  const PROMPTS_KEY = 'desk:prompts';
+  const promptTexts = () => GM_getValue(PROMPTS_KEY, null)?.texts || {};
+  const teamText = key => { const t = promptTexts()[key]; return typeof t === 'string' && t.trim() ? t : ''; };
+  const P = (key, text) => teamText(key).trim() || text;
+  const PL = (key, items) => { const t = teamText(key); return t ? t.split('\n').map(l => l.trimEnd()).filter(l => l.trim()) : items; };
   const baseUrl = u => clean(u).replace(/\/+$/, '').replace(/\/api\/v1$/, '');
 
   /* ------------------------------------------------- handoff to claude.ai */
@@ -1353,26 +1363,28 @@
   // materials, maker…). The answers are claims; the proof is the real listing the attached images lead to.
   const QUESTIONNAIRE_CHECK = "The merchant filled in Zonos's questionnaire to prove their item: their answers are claims, not proof. Open every attached image (screenshots, product photos, receipts) and identify the item from them: brand, shop or seller name, listing title, listing or order number, labels, \"Made in\" marks, distinctive design. Use that to find the real listing it came from (search the marketplace or the merchant's site by title, shop name and listing number; for an Etsy screenshot, find that shop and listing on Etsy). Read the listing in full: title, description, materials, where it's made and ships from, the shop's location and the price. Then check each questionnaire answer against the listing and the photos, one by one. Accept the claim only for what the listing and documents actually confirm; an answer the listing contradicts, or that nothing supports, means the claim is denied on that point. In the reply, list each answer as matched, contradicted or unsupported, with the listing link.";
 
-  // What counts as evidence for each kind of claim
+  // What counts as evidence for each kind of claim: [field pattern, check, its key in Prompts, its name there]
   const CLAIM_CHECKS = [
-    [/questionnaire/i, QUESTIONNAIRE_CHECK],
-    [/hs code/i, "Which code does the product, as the evidence shows it, actually fit: the current one, the merchant's, or another in the heading? Check every spec they give that the code wording turns on. Use the HTS facts, notes and rulings here plus your own HTS knowledge (GRI, section and chapter notes)."],
-    [/description/i, 'Does the claimed description match what the product actually is and how it is marketed (listing titles, categories, what it fits)?'],
-    [/origin|country/i, 'Is there proof of where it was made: "Made in" marks in the images, where the manufacturer makes it, listings, and the documents (commercial invoice, certificate of origin)? Origin is where the item was made or last substantially transformed, not where it shipped from or where the seller is based. The merchant saying so is not proof.'],
-    [/value/i, 'Does the claimed value match the price actually paid, per the invoice, receipt or listing? Complaints about duties or fees are not a reason to change the declared value.'],
-    [/tariff|exempt|exclusion|chapter 99|301|232/i, 'Does the item really qualify for the exemption or tariff provision the merchant names? Check it against the Chapter 99 headings and the "ways it may pay less" exclusions above, the HS code, the origin, and what the item actually is. The merchant saying so is not proof.'],
-    [/weight/i, 'Does the claimed weight match the invoice, listing or shipping documents? If only the unit changed (for example kilograms to ounces), say which unit fits the real item.'],
-    [/qty|quantity/i, 'Does the claimed quantity match the invoice, order or listing, for example a pack size?'],
+    [/questionnaire/i, QUESTIONNAIRE_CHECK, 'questionnaire', 'Questionnaire'],
+    [/hs code/i, "Which code does the product, as the evidence shows it, actually fit: the current one, the merchant's, or another in the heading? Check every spec they give that the code wording turns on. Use the HTS facts, notes and rulings here plus your own HTS knowledge (GRI, section and chapter notes).", 'hsCode', 'HS code'],
+    [/description/i, 'Does the claimed description match what the product actually is and how it is marketed (listing titles, categories, what it fits)?', 'description', 'Description'],
+    [/origin|country/i, 'Is there proof of where it was made: "Made in" marks in the images, where the manufacturer makes it, listings, and the documents (commercial invoice, certificate of origin)? Origin is where the item was made or last substantially transformed, not where it shipped from or where the seller is based. The merchant saying so is not proof.', 'origin', 'Country of origin'],
+    [/value/i, 'Does the claimed value match the price actually paid, per the invoice, receipt or listing? Complaints about duties or fees are not a reason to change the declared value.', 'value', 'Value'],
+    [/tariff|exempt|exclusion|chapter 99|301|232/i, 'Does the item really qualify for the exemption or tariff provision the merchant names? Check it against the Chapter 99 headings and the "ways it may pay less" exclusions above, the HS code, the origin, and what the item actually is. The merchant saying so is not proof.', 'tariff', 'Tariff or exemption'],
+    [/weight/i, 'Does the claimed weight match the invoice, listing or shipping documents? If only the unit changed (for example kilograms to ounces), say which unit fits the real item.', 'weight', 'Weight'],
+    [/qty|quantity/i, 'Does the claimed quantity match the invoice, order or listing, for example a pack size?', 'quantity', 'Quantity'],
   ];
+  const OTHER_CHECK = 'What evidence supports or contradicts it?';
   const CHAPTER_99_CHECK = "The merchant's code is a Chapter 99 provision, which adds a duty on top of a regular code rather than replacing it. Work out what the merchant actually means (for example, steel rather than aluminum) and whether the evidence supports that.";
   const SECTION_232_CHECK = "Does Section 232 really not apply, or apply only the way the merchant says? That turns on whether the item is a steel, aluminum or copper article or derivative covered for its HTS code, how much of it is that metal, and where the metal was melted and poured (steel) or smelted and cast (aluminum). Look for documents that prove it: a mill certificate, a manufacturer's statement, or an invoice that breaks out the metal's value. The merchant saying so is not proof.";
 
   function checkFor(claim, item) {
     const { field } = claim;
     const hs = item.fields.find(f => /^hs code$/i.test(f.label));
-    if (/hs code/i.test(field) && isChapter99(hsCodeIn(hs?.claimed))) return CHAPTER_99_CHECK;
-    if (disputeKinds(item).s232 && (/tariff|exempt|exclusion|chapter 99|232/i.test(field) || /232|alumin|steel|copper/i.test(claim.reason || ''))) return SECTION_232_CHECK;
-    return (CLAIM_CHECKS.find(([re]) => re.test(field)) || [null, 'What evidence supports or contradicts it?'])[1];
+    if (/hs code/i.test(field) && isChapter99(hsCodeIn(hs?.claimed))) return P('check.chapter99', CHAPTER_99_CHECK);
+    if (disputeKinds(item).s232 && (/tariff|exempt|exclusion|chapter 99|232/i.test(field) || /232|alumin|steel|copper/i.test(claim.reason || ''))) return P('check.section232', SECTION_232_CHECK);
+    const c = CLAIM_CHECKS.find(([re]) => re.test(field));
+    return c ? P(`check.${c[2]}`, c[1]) : P('check.other', OTHER_CHECK);
   }
 
   // Claims as the merchant filed them, or the changed fields when the page shows no claim text
@@ -1482,6 +1494,57 @@
 
   const SELLER_STEP = "Research the seller: who they are and where they're based, whether they make the item or resell it, and where they ship from. Look at the website's About and Contact pages and the business registry for its country, and check whether the contact email's domain points to a different company. Then look up every supplier, manufacturer or factory named in the documents or on the product: what it makes and where it is.";
 
+  // The dispute prompt's fixed text. Each piece can be edited by the team in Notion's Prompts database (see
+  // promptPieces); P and PL give the team's text when there is some, otherwise this.
+  const DISPUTE_TEXT = {
+    brief: "I'm a customs broker at Zonos handling a duty dispute. Do the fact-finding I'd otherwise do by hand: find out everything that matters about the item and the seller, catch anything that doesn't add up, and work out what proof is still missing. The merchant's claim is context, not the outline: check every fact in it, but research whatever matters for the duty, even if they didn't mention it.",
+    rules: [
+      '- The merchant has to prove their claim. Every red flag is a reason to ask them for more.',
+      '- When proof is missing, the higher-duty option stands, especially for tariffs (Section 232, Section 301, the Russia aluminum rate). A tariff stays until documents show it doesn\'t apply.',
+      '- Every specific thing the merchant says (numbers, materials, use, origin) gets checked against their own website, images and documents.',
+    ],
+    researchFirst: "**Research before you reply, every time.** Search the web and open the pages you find: run every search under \"Required searches\" and do every step under \"How to research\", then check you didn't skip one. None of that goes in the reply. Don't fill in the template from this prompt or from memory: everything here is the merchant's side or the entry as filed, and it's what you're checking. If you can't search the web in this chat, don't answer; reply only: \"I can't search the web in this chat. Turn on web search and send this again.\"",
+    docs: DOCS_STEP,
+    claimText: CLAIM_TEXT_STEP,
+    searches: "Run every Required search for each line, then follow up: open the best results (the manufacturer's page, the merchant's listing, marketplace listings), and search again for any new model, part or brand names you found there or in the images. Try variations: with and without dashes or spaces, and partial numbers. Don't stop at the first result.",
+    factCheck: "Fact-check every specific statement in the claim and in any new description against the merchant's own product page, images, manuals and spec sheets: numbers (output, size, weight, capacity), materials, what it's for, and where it's made. For example, a charger described as 25 W whose power adapter is rated 54 W, or a product page whose photos say \"Made in China\" while the entry says Australia.",
+    seller: SELLER_STEP,
+    marketing: "Find how the item is marketed: listing titles, categories, and what it fits or is compatible with, on the merchant's site and on marketplaces. For example, a lever sold for ATVs or motorcycles is a vehicle part, not a farm machinery part.",
+    value: 'For the value claim, find the price actually paid: the invoice or receipt if one is attached, otherwise the listing price around the order date.',
+    manufacturer: "Find the manufacturer's own page for the item, plus spec sheets, manuals or datasheets.",
+    hsCode: "For the HS code claim, work out the right code within the heading. Decide what the item is in its main identity, and for kits and sets what gives it its essential character (GRI 3(b)). Then read the subheading and statistical suffix wording in the current HTS, including the residual \"other\" lines, and check every spec the wording turns on. Compare with the closest CBP rulings (CROSS, with the entry-assistant skill or at rulings.cbp.gov), and say why any ruling that points elsewhere doesn't fit (a different input, a different build, outdated wording). The answer can be neither the current code nor the merchant's.",
+    material: "Find what it's made of. If it's metal, say which metal (steel, stainless steel, aluminum, copper or brass, zinc alloy) and roughly how much of its weight is metal, using the images, listings and spec sheets.",
+    origin: 'Look for country-of-origin evidence: "Made in" marks in the images, documents or listings; where the manufacturer and its suppliers are and where they have factories; the same product sold by overseas sellers on AliExpress, Alibaba, 1688, DHgate, Temu or Amazon. Where it was posted or shipped from doesn\'t decide origin, and a barcode prefix only shows where the barcode was registered.',
+    chapter99: "Using the Chapter 99 headings above, work out which ones apply. For Section 232 headings that comes down to the metal, the share of the weight that is metal, what the item is used for (for example motorcycle or other vehicle parts), and where it's made.",
+    s232: "For the Section 232 claim: is the item a steel, aluminum or copper article or derivative covered for its HTS code (the Chapter 99 headings above, or what the entry-assistant skill finds)? Estimate its metal content by weight, and by value if the documents show it, and find where the metal was melted and poured (steel) or smelted and cast (aluminum), from mill certificates, the manufacturer or the attached documents. The merchant's word that it isn't steel, isn't Russian, or that the metal content is small, isn't proof without such a document.",
+    rulings: 'Find CBP rulings (CROSS) on this kind of product, with the entry-assistant skill or at rulings.cbp.gov, and note the closest one: its number, what it covers, and how this item compares.',
+    qtyWeight: 'For a quantity or weight claim, compare it with the invoice, the listing or the shipping documents.',
+    platform: "Name the e-commerce platform the merchant's site runs on (Shopify, WooCommerce and so on).",
+    redFlags: "Collect every red flag: anything in the documents, the claim, the website or your research that contradicts the entry, the claim or itself, or that's missing when it should be there.",
+    skill: SKILL_STEP,
+    judge: "Then decide where this stands: what's proven, what isn't, and what to ask the merchant for. Without proof, the higher-duty option stands, especially for tariffs.",
+    closing: [
+      "If a page won't open, say which one and try another route: the site's search, its sitemap, or a web search limited to the site (site: plus the domain and the product number).",
+      'Use as many searches as it takes. A thorough answer matters more than a fast one.',
+    ],
+    replyRules: [
+      '- Copy the headings and labels, in this order. Replace each <…> with what you found and drop the angle brackets. Write "Not found" where you looked and found nothing.',
+      "- Keep it short: one line per bullet, no paragraphs, no greeting, no recap of the dispute. Write only the final reply: no progress notes, no list of the steps or searches, and no mention of the Entry Assistant API or the skill.",
+      '- Put HTS and Chapter 99 codes in backticks, and link a source for every fact.',
+      "- Red flags come first: anything that doesn't add up, from the documents, the claim text, the website or your research, each with its source. Nothing is too small: a document dated years before the order, goods shipping from a different country than the stated origin, a template with blanks left in, an email domain that doesn't match the website, a spec that contradicts the claim, a promised document that isn't attached.",
+      "- Under Ask the merchant for, list the specific documents or facts that would settle what's still unproven, each with what it would prove. For example: a mill certificate or supplier declaration naming the countries where the aluminum was smelted and cast; a bill of materials with each component's origin and cost; the latest supplier invoice; a spec sheet showing the output. Only what the merchant can actually provide. Settle classification questions yourself.",
+      "- The verdict must carry its proof. Don't just say what the item \"clearly\" is: say what shows it (which photo, document or listing, with its link) and which rule it meets or fails (the HTS heading or subheading text, the origin rule, the Section 232 heading). One or two sentences on one line.",
+      `  An example of the level of proof wanted (not of the content): "The merchant's claim is somewhat substantiated because the item is a finished microphone, not a part: the merchant's own listing ([link]) sells it as a complete USB condenser mic and photo 2 shows it assembled with its cable, so heading 8518 is right but their subheading (parts of microphones) is not; it belongs with complete microphones in 8518.10."`,
+      "- Every line gets a verdict: never \"waiting\" or \"needs more info\" as the answer. If proof is missing, decide on what's there (without proof the higher-duty option stands), and put what would change it under Ask the merchant for.",
+    ],
+    email: [
+      '- End the whole reply (once, after the last block) with this line on its own: "Would you like me to draft an email?"',
+      '- If I say yes, write a short, friendly email to the merchant contact: what the charge or code depends on, the requests as a numbered list, what happens once you have them, and the order number at the end. For example: "Hey Matt, I\'m looking at your dispute for the Section 232 duties. This charge depends on where the aluminum was smelted and cast, so we can remedy it once we have evidence that neither happened in Russia. Please send: 1. … Once we have these, we\'ll review the charge and recalculate the landed cost."',
+    ],
+  };
+  const DP = k => P(`dispute.${k}`, DISPUTE_TEXT[k]);
+  const DPL = k => PL(`dispute.${k}`, DISPUTE_TEXT[k]);
+
   function buildPrompt(d, s, attachedNames) {
     const L = [];
     const items = d.items.filter(i => i.inDispute);
@@ -1493,12 +1556,9 @@
     const any232 = kinds.some(k => k.s232);
     const productClaim = about(PRODUCT_CLAIM) || any232;
 
-    L.push("I'm a customs broker at Zonos handling a duty dispute. Do the fact-finding I'd otherwise do by hand: find out everything that matters about the item and the seller, catch anything that doesn't add up, and work out what proof is still missing. The merchant's claim is context, not the outline: check every fact in it, but research whatever matters for the duty, even if they didn't mention it.");
-    L.push('', 'How I handle disputes:',
-      '- The merchant has to prove their claim. Every red flag is a reason to ask them for more.',
-      '- When proof is missing, the higher-duty option stands, especially for tariffs (Section 232, Section 301, the Russia aluminum rate). A tariff stays until documents show it doesn\'t apply.',
-      '- Every specific thing the merchant says (numbers, materials, use, origin) gets checked against their own website, images and documents.');
-    L.push('', "**Research before you reply, every time.** Search the web and open the pages you find: run every search under \"Required searches\" and do every step under \"How to research\", then check you didn't skip one. None of that goes in the reply. Don't fill in the template from this prompt or from memory: everything here is the merchant's side or the entry as filed, and it's what you're checking. If you can't search the web in this chat, don't answer; reply only: \"I can't search the web in this chat. Turn on web search and send this again.\"");
+    L.push(DP('brief'));
+    L.push('', 'How I handle disputes:', ...DPL('rules'));
+    L.push('', DP('researchFirst'));
 
     L.push('', '## Merchant', `- Name: ${d.org || 'unknown'}`);
     const website = normalizeUrl(s.website);
@@ -1572,56 +1632,46 @@
       || items.some(i => isChapter99(hsCodeIn(i.fields.find(f => /^hs code$/i.test(f.label))?.claimed)));
     const declared = items.map(i => i.fields.find(f => /^declared value$/i.test(f.label))?.current).filter(Boolean);
     const platformUnknown = !!website && !s.site?.platforms.length;
-    const valueStep = about(/value/i) && "For the value claim, find the price actually paid: the invoice or receipt if one is attached, otherwise the listing price around the order date.";
-    const judgeStep = "Then decide where this stands: what's proven, what isn't, and what to ask the merchant for. Without proof, the higher-duty option stands, especially for tariffs." +
-      (allFacts.length ? ' The HTS facts above come from the current HTS release, so trust them over memory.' : '');
+    const valueStep = about(/value/i) && DP('value');
+    const judgeStep = DP('judge') + (allFacts.length ? ' The HTS facts above come from the current HTS release, so trust them over memory.' : '');
 
     const steps = [
       items.length > 1 && `There are ${items.length} lines. Research each one on its own, since they may be different products, and keep each line's findings to its own block in the reply.`,
-      attachedNames.length > 0 && DOCS_STEP,
-      claims.some(c => merchantReason(c)) && CLAIM_TEXT_STEP,
+      attachedNames.length > 0 && DP('docs'),
+      claims.some(c => merchantReason(c)) && DP('claimText'),
       siteStep,
-      "Run every Required search for each line, then follow up: open the best results (the manufacturer's page, the merchant's listing, marketplace listings), and search again for any new model, part or brand names you found there or in the images. Try variations: with and without dashes or spaces, and partial numbers. Don't stop at the first result.",
-      "Fact-check every specific statement in the claim and in any new description against the merchant's own product page, images, manuals and spec sheets: numbers (output, size, weight, capacity), materials, what it's for, and where it's made. For example, a charger described as 25 W whose power adapter is rated 54 W, or a product page whose photos say \"Made in China\" while the entry says Australia.",
-      SELLER_STEP,
-      "Find how the item is marketed: listing titles, categories, and what it fits or is compatible with, on the merchant's site and on marketplaces. For example, a lever sold for ATVs or motorcycles is a vehicle part, not a farm machinery part.",
+      DP('searches'),
+      DP('factCheck'),
+      DP('seller'),
+      DP('marketing'),
       `Find prices for the same item: the merchant's site, eBay (including sold listings), AliExpress, Amazon and anywhere else it's sold. Compare them with the declared value${declared.length === 1 ? ` (${declared[0]})` : ''}.`,
       valueStep,
-      productClaim && "Find the manufacturer's own page for the item, plus spec sheets, manuals or datasheets.",
+      productClaim && DP('manufacturer'),
       productClaim && 'Answer every "What to find" point.',
-      about(/hs code/i) && "For the HS code claim, work out the right code within the heading. Decide what the item is in its main identity, and for kits and sets what gives it its essential character (GRI 3(b)). Then read the subheading and statistical suffix wording in the current HTS, including the residual \"other\" lines, and check every spec the wording turns on. Compare with the closest CBP rulings (CROSS, with the entry-assistant skill or at rulings.cbp.gov), and say why any ruling that points elsewhere doesn't fit (a different input, a different build, outdated wording). The answer can be neither the current code nor the merchant's.",
-      (productClaim || metalMatters) && "Find what it's made of. If it's metal, say which metal (steel, stainless steel, aluminum, copper or brass, zinc alloy) and roughly how much of its weight is metal, using the images, listings and spec sheets.",
-      productClaim && 'Look for country-of-origin evidence: "Made in" marks in the images, documents or listings; where the manufacturer and its suppliers are and where they have factories; the same product sold by overseas sellers on AliExpress, Alibaba, 1688, DHgate, Temu or Amazon. Where it was posted or shipped from doesn\'t decide origin, and a barcode prefix only shows where the barcode was registered.',
-      hasChapter99 && "Using the Chapter 99 headings above, work out which ones apply. For Section 232 headings that comes down to the metal, the share of the weight that is metal, what the item is used for (for example motorcycle or other vehicle parts), and where it's made.",
-      any232 && "For the Section 232 claim: is the item a steel, aluminum or copper article or derivative covered for its HTS code (the Chapter 99 headings above, or what the entry-assistant skill finds)? Estimate its metal content by weight, and by value if the documents show it, and find where the metal was melted and poured (steel) or smelted and cast (aluminum), from mill certificates, the manufacturer or the attached documents. The merchant's word that it isn't steel, isn't Russian, or that the metal content is small, isn't proof without such a document.",
-      productClaim && !about(/hs code/i) && 'Find CBP rulings (CROSS) on this kind of product, with the entry-assistant skill or at rulings.cbp.gov, and note the closest one: its number, what it covers, and how this item compares.',
-      about(/qty|quantity|weight/i) && 'For a quantity or weight claim, compare it with the invoice, the listing or the shipping documents.',
-      platformUnknown && "Name the e-commerce platform the merchant's site runs on (Shopify, WooCommerce and so on).",
-      "Collect every red flag: anything in the documents, the claim, the website or your research that contradicts the entry, the claim or itself, or that's missing when it should be there.",
-      SKILL_STEP,
+      about(/hs code/i) && DP('hsCode'),
+      (productClaim || metalMatters) && DP('material'),
+      productClaim && DP('origin'),
+      hasChapter99 && DP('chapter99'),
+      any232 && DP('s232'),
+      productClaim && !about(/hs code/i) && DP('rulings'),
+      about(/qty|quantity|weight/i) && DP('qtyWeight'),
+      platformUnknown && DP('platform'),
+      DP('redFlags'),
+      DP('skill'),
       judgeStep,
     ].filter(Boolean);
     L.push(...programLines());
     L.push('', '## How to research', ...steps.map((step, i) => `${i + 1}. ${step}`));
-    L.push('', "If a page won't open, say which one and try another route: the site's search, its sitemap, or a web search limited to the site (site: plus the domain and the product number).");
-    L.push('Use as many searches as it takes. A thorough answer matters more than a fast one.');
+    L.push('', ...DPL('closing'));
 
     // The reply is a fill-in template, built per line from what that line's dispute is about, so every answer
     // has the same sections in the same order. The "### Line N" headings let the script save each line's
     // verdict, and the verdict line has to carry its own proof.
     L.push('', '## Reply',
       `Fill in this template${items.length > 1 ? ', one block per line, in this order' : ''}:`,
-      '- Copy the headings and labels, in this order. Replace each <…> with what you found and drop the angle brackets. Write "Not found" where you looked and found nothing.',
-      "- Keep it short: one line per bullet, no paragraphs, no greeting, no recap of the dispute. Write only the final reply: no progress notes, no list of the steps or searches, and no mention of the Entry Assistant API or the skill.",
-      '- Put HTS and Chapter 99 codes in backticks, and link a source for every fact.',
-      "- Red flags come first: anything that doesn't add up, from the documents, the claim text, the website or your research, each with its source. Nothing is too small: a document dated years before the order, goods shipping from a different country than the stated origin, a template with blanks left in, an email domain that doesn't match the website, a spec that contradicts the claim, a promised document that isn't attached.",
-      "- Under Ask the merchant for, list the specific documents or facts that would settle what's still unproven, each with what it would prove. For example: a mill certificate or supplier declaration naming the countries where the aluminum was smelted and cast; a bill of materials with each component's origin and cost; the latest supplier invoice; a spec sheet showing the output. Only what the merchant can actually provide. Settle classification questions yourself.",
-      "- The verdict must carry its proof. Don't just say what the item \"clearly\" is: say what shows it (which photo, document or listing, with its link) and which rule it meets or fails (the HTS heading or subheading text, the origin rule, the Section 232 heading). One or two sentences on one line.",
-      `  An example of the level of proof wanted (not of the content): "The merchant's claim is somewhat substantiated because the item is a finished microphone, not a part: the merchant's own listing ([link]) sells it as a complete USB condenser mic and photo 2 shows it assembled with its cable, so heading 8518 is right but their subheading (parts of microphones) is not; it belongs with complete microphones in 8518.10."`,
-      "- Every line gets a verdict: never \"waiting\" or \"needs more info\" as the answer. If proof is missing, decide on what's there (without proof the higher-duty option stands), and put what would change it under Ask the merchant for.",
+      ...DPL('replyRules'),
       `- After the last block, under **For the portal**, give the text I'll paste for each line in this reply, one line per box the decision asks for (${(() => { const f = textFieldsOn(document.querySelector('main')); return f.length ? f.join(', ') : 'the decision note'; })()}): "Line N · <box>: <text>", plain text, one sentence up to one short paragraph, stating the decision and why. Only the lines in this request.`,
-      '- End the whole reply (once, after the last block) with this line on its own: "Would you like me to draft an email?"',
-      '- If I say yes, write a short, friendly email to the merchant contact: what the charge or code depends on, the requests as a numbered list, what happens once you have them, and the order number at the end. For example: "Hey Matt, I\'m looking at your dispute for the Section 232 duties. This charge depends on where the aluminum was smelted and cast, so we can remedy it once we have evidence that neither happened in Russia. Please send: 1. … Once we have these, we\'ll review the charge and recalculate the landed cost."');
+      ...DPL('email'));
     L.push(`- Start the whole reply with ${FINAL_LABEL} (once, before the first block): ${finalStyle('DUTY_DISPUTE')}`, '', `${FINAL_LABEL} <one sentence>`);
     items.forEach((item, i) => L.push('', ...replyBlock(item, s, { platformUnknown: platformUnknown && i === 0 })));
     L.push('', '**For the portal**', ...items.map(i => `Line ${i.line} · <box>: <the text to paste>`));
@@ -1631,14 +1681,17 @@
   // The one-sentence answer at the top of every reply: what the panel shows first, and what the cloud
   // research writes to the case's "Claude Final Answer" in Notion. Plain words, the decision and why.
   const FINAL_LABEL = '**Final answer:**';
+  // How the Final answer sentence is worded, per kind of case (each editable in Prompts)
+  const FINAL_STYLES = {
+    DUTY_DISPUTE: '"The claim is substantiated because …", "The claim is somewhat substantiated because …" or "The claim is not substantiated because …" (for several lines, one sentence covering them)',
+    ADCVD_REVIEW: 'exactly this shape: "It’s in scope because the item that hit is <origin> <item>, and the order’s written scope covers <what it covers>, while nothing on the page shows <each exclusion or scope test it would need to fail>" or "It’s out of scope because the item that hit is <origin> <item>, and the order’s written scope <covers only … / excludes …>, which <why this item falls outside>". For example: "It’s in scope because the item that hit is the Chinese notebook, and the order’s written scope covers notebooks on lined paper, while nothing on the page shows it’s unlined, has fewer than 10 sheets, has pages outside 6–15 × 8¾–15 in or is case-bound."',
+    DENIED_PARTY_REVIEW: '"It is a false positive because …" or "It is a true match because …"',
+    HS_CODE_REVIEW: '"The current code is right because …" or "The code should be `<code>` because …"',
+    VALUE_REVIEW: '"The declared value is believable because …" or "The value should be <amount> because …"',
+    other: '"<the decision, as the page words it> because …"',
+  };
   function finalStyle(type) {
-    const how = {
-      ADCVD_REVIEW: 'exactly this shape: "It’s in scope because the item that hit is <origin> <item>, and the order’s written scope covers <what it covers>, while nothing on the page shows <each exclusion or scope test it would need to fail>" or "It’s out of scope because the item that hit is <origin> <item>, and the order’s written scope <covers only … / excludes …>, which <why this item falls outside>". For example: "It’s in scope because the item that hit is the Chinese notebook, and the order’s written scope covers notebooks on lined paper, while nothing on the page shows it’s unlined, has fewer than 10 sheets, has pages outside 6–15 × 8¾–15 in or is case-bound."',
-      DENIED_PARTY_REVIEW: '"It is a false positive because …" or "It is a true match because …"',
-      HS_CODE_REVIEW: '"The current code is right because …" or "The code should be `<code>` because …"',
-      VALUE_REVIEW: '"The declared value is believable because …" or "The value should be <amount> because …"',
-      DUTY_DISPUTE: '"The claim is substantiated because …", "The claim is somewhat substantiated because …" or "The claim is not substantiated because …" (for several lines, one sentence covering them)',
-    }[type] || '"<the decision, as the page words it> because …"';
+    const how = FINAL_STYLES[type] ? P(`final.${type}`, FINAL_STYLES[type]) : P('final.other', FINAL_STYLES.other);
     return `one plain sentence a coworker understands at a glance, no Markdown, written as ${how}.`;
   }
   // That sentence, from a saved answer: the Final answer line, else the AD/CVD scope line, the decision, or the verdict
@@ -2180,14 +2233,104 @@
 
   const ORDER_SKILL_STEP = "Use the entry-assistant skill (it calls the Entry Assistant API) for every HTS code involved: what it covers, its duties and extra duties for the origin, what to report on the entry line, partner-agency flags, and CBP rulings and messages. If you can't use the skill, use your own knowledge and carry on.";
 
+  // The order prompt's fixed text, shared by every class (each piece editable in Prompts, like DISPUTE_TEXT)
+  const ORDER_TEXT = {
+    rules: ORDER_RULES,
+    researchFirst: "**Research before you reply, every time.** Search the web and open the pages you find: do every step under \"How to research\", then check you didn't skip one. None of that goes in the reply. Don't fill in the template from this prompt or from memory: the page below is what you're checking. If you can't search the web in this chat, don't answer; reply only: \"I can't search the web in this chat. Turn on web search and send this again.\"",
+    skill: ORDER_SKILL_STEP,
+    redFlags: "Collect every red flag: anything on the page or in your research that contradicts the entry or itself, or that's missing when it should be there.",
+    decide: 'Then decide, using one of the choices on the page that settles the order (never waiting or escalating).',
+    closing: 'Use as many searches as it takes. A thorough answer matters more than a fast one.',
+    replyRules: [
+      '- Copy the headings and labels, in this order. Replace each <…> with what you found and drop the angle brackets. Write "Not found" where you looked and found nothing.',
+      '- Keep it short: one line per bullet, no paragraphs, no greeting. Write only the final reply: no progress notes, no list of the steps or searches, and no mention of the Entry Assistant API or the skill.',
+      '- Put HTS and Chapter 99 codes in backticks, and link a source for every fact.',
+      '- The decision is one of the choices on the page, written exactly as the page writes it; for a correction, give the new value too. It must carry its proof: what shows it (which source, with its link) and which rule it meets or fails.',
+    ],
+  };
+  const OP = k => P(`order.${k}`, ORDER_TEXT[k]);
+  const OPL = k => PL(`order.${k}`, ORDER_TEXT[k]);
+  // A class's guide with the team's edits from Prompts: its goal, rules, what to find, its "What we found" lines
+  // and (AD/CVD) its header lines
+  function guideText(type) {
+    const g = guideFor(type);
+    if (!WORK_ORDER_GUIDES[type]) return g;
+    const k = `order.${type}`;
+    return { ...g, goal: P(`${k}.goal`, g.goal), find: PL(`${k}.find`, g.find), found: PL(`${k}.found`, g.found),
+      ...(g.rules ? { rules: PL(`${k}.rules`, g.rules) } : {}), ...(g.header ? { header: PL(`${k}.header`, g.header) } : {}) };
+  }
+
+  // Every editable piece, as the rows of Notion's Prompts database: { key, group, name, text, about }. Lists are
+  // one item per line. "Set up Prompts" adds the rows that are missing, filled with the built-in text.
+  function promptPieces() {
+    const out = [];
+    const LIST = ' One item per line.';
+    const add = (key, group, name, text, about) => out.push({ key, group, name, text: Array.isArray(text) ? text.join('\n') : text, about: `${about}${Array.isArray(text) ? LIST : ''}` });
+    const D = 'Duty dispute';
+    const step = when => `A "How to research" step in dispute prompts, ${when}.`;
+    add('dispute.brief', D, 'Brief', DISPUTE_TEXT.brief, 'The opening paragraph of every dispute prompt.');
+    add('dispute.rules', D, 'How I handle disputes', DISPUTE_TEXT.rules, 'The rules under "How I handle disputes:".');
+    add('dispute.researchFirst', D, 'Research before you reply', DISPUTE_TEXT.researchFirst, 'The paragraph after the rules.');
+    for (const [k, name, when] of [
+      ['docs', 'Step: attached documents', 'when files are attached'],
+      ['claimText', "Step: the merchant's claim text", 'when the merchant gave a reason'],
+      ['searches', 'Step: required searches', 'always'],
+      ['factCheck', 'Step: fact-check', 'always'],
+      ['seller', 'Step: the seller', 'always'],
+      ['marketing', 'Step: how it is marketed', 'always'],
+      ['value', 'Step: value claim', 'for a value claim'],
+      ['manufacturer', "Step: manufacturer's page", 'for claims about what the item is, its origin or its duties'],
+      ['hsCode', 'Step: HS code claim', 'for an HS code claim'],
+      ['material', 'Step: what it is made of', 'for product claims, or when metal duties matter'],
+      ['origin', 'Step: country of origin', 'for product claims'],
+      ['chapter99', 'Step: Chapter 99 headings', 'when Chapter 99 headings apply'],
+      ['s232', 'Step: Section 232', 'for a Section 232 claim'],
+      ['rulings', 'Step: CBP rulings', 'for product claims other than an HS code claim'],
+      ['qtyWeight', 'Step: quantity or weight', 'for a quantity or weight claim'],
+      ['platform', "Step: the site's platform", "when the merchant's platform isn't known"],
+      ['redFlags', 'Step: red flags', 'always'],
+      ['skill', 'Step: entry-assistant skill', 'always'],
+      ['judge', 'Step: decide', 'always, last (a note to trust the HTS facts is added when there are some)'],
+    ]) add(`dispute.${k}`, D, name, DISPUTE_TEXT[k], step(when));
+    add('dispute.closing', D, 'After the steps', DISPUTE_TEXT.closing, 'The lines after "How to research".');
+    add('dispute.replyRules', D, 'Reply rules', DISPUTE_TEXT.replyRules, 'The rules under "## Reply", before the "For the portal" rule (which is built from the page).');
+    add('dispute.email', D, 'Reply rules: email', DISPUTE_TEXT.email, 'The last reply rules: offering to draft the email to the merchant.');
+    const C = 'Claim checks';
+    for (const [, text, k, name] of CLAIM_CHECKS) add(`check.${k}`, C, name, text, `The "Check:" after a ${name.toLowerCase()} claim in dispute prompts.`);
+    add('check.chapter99', C, 'Chapter 99 code', CHAPTER_99_CHECK, "The check when the merchant's code is a Chapter 99 provision.");
+    add('check.section232', C, 'Section 232', SECTION_232_CHECK, 'The check for a Section 232 claim.');
+    add('check.other', C, 'Any other claim', OTHER_CHECK, 'The check for a claim on any other field.');
+    const F = 'Final answer';
+    for (const [type, text] of Object.entries(FINAL_STYLES)) {
+      const name = type === 'DUTY_DISPUTE' ? 'Duty dispute' : type === 'other' ? 'Any other order' : guideFor(type).label;
+      add(`final.${type}`, F, name, text, `How the one-sentence Final answer is worded (${name}). It follows "written as".`);
+    }
+    const Q = 'Entry Writer Queue';
+    add('order.rules', Q, 'How I work these', ORDER_TEXT.rules, 'The rules under "How I work these:" in every queue order prompt (a class\'s own rules follow them).');
+    add('order.researchFirst', Q, 'Research before you reply', ORDER_TEXT.researchFirst, 'The paragraph after the rules.');
+    add('order.skill', Q, 'Step: entry-assistant skill', ORDER_TEXT.skill, 'A "How to research" step after the class\'s own steps.');
+    add('order.redFlags', Q, 'Step: red flags', ORDER_TEXT.redFlags, 'A "How to research" step.');
+    add('order.decide', Q, 'Step: decide', ORDER_TEXT.decide, 'The last "How to research" step.');
+    add('order.closing', Q, 'After the steps', ORDER_TEXT.closing, 'The line after "How to research".');
+    add('order.replyRules', Q, 'Reply rules', ORDER_TEXT.replyRules, 'The rules under "## Reply", before the rule listing the boxes to fill in.');
+    for (const [type, g] of Object.entries(WORK_ORDER_GUIDES)) {
+      add(`order.${type}.goal`, g.label, 'Goal', g.goal, `What a ${g.label} order is for, in the prompt's opening paragraph.`);
+      if (g.rules) add(`order.${type}.rules`, g.label, 'Rules', g.rules, `Rules for ${g.label} orders, after "How I work these".`);
+      add(`order.${type}.find`, g.label, 'What to research', g.find, `The first "How to research" steps for ${g.label} orders.`);
+      add(`order.${type}.found`, g.label, 'What we found', g.found, `The lines under "What we found" in the reply template for ${g.label} orders.`);
+      if (g.header) add(`order.${type}.header`, g.label, 'Reply header', g.header, `The lines at the top of the reply template for ${g.label} orders.`);
+    }
+    return out;
+  }
+
   function buildWorkOrderPrompt(d, s) {
-    const g = guideFor(d.type);
+    const g = guideText(d.type);
     const facts = Object.values(s.facts || {});
     const L = [];
     // Class names read badly in a sentence ("a submission failed"), so the class is quoted
     L.push(`I'm a customs broker at Zonos working the Entry Writer Queue, on an order in the "${g.label}" class. ${g.goal} Do the fact-finding I'd otherwise do by hand, catch anything that doesn't add up, and end with a decision I can act on.`);
-    L.push('', 'How I work these:', ...ORDER_RULES, ...(g.rules || []));
-    L.push('', "**Research before you reply, every time.** Search the web and open the pages you find: do every step under \"How to research\", then check you didn't skip one. None of that goes in the reply. Don't fill in the template from this prompt or from memory: the page below is what you're checking. If you can't search the web in this chat, don't answer; reply only: \"I can't search the web in this chat. Turn on web search and send this again.\"");
+    L.push('', 'How I work these:', ...OPL('rules'), ...(g.rules || []));
+    L.push('', OP('researchFirst'));
     L.push('', '## The order', `- Problem class: ${g.label}`);
     if (d.question) L.push(`- The page asks: ${d.question}`);
     if (d.postedIn) L.push(`- Posted in: ${d.postedIn} (from the tracking number's country code). Where it was posted doesn't decide where it was made.`);
@@ -2215,12 +2358,12 @@
     const steps = [
       ...g.find,
       !d.hasShipper && /HS_CODE|VALUE|DENIED/.test(d.type) && "The shipper isn't shown (the Parties section was closed); if the goods or the party can't be pinned down without it, say so.",
-      ORDER_SKILL_STEP,
-      "Collect every red flag: anything on the page or in your research that contradicts the entry or itself, or that's missing when it should be there.",
-      'Then decide, using one of the choices on the page that settles the order (never waiting or escalating).',
+      OP('skill'),
+      OP('redFlags'),
+      OP('decide'),
     ].filter(Boolean);
     L.push('', '## How to research', ...steps.map((step, i) => `${i + 1}. ${step}`));
-    L.push('', 'Use as many searches as it takes. A thorough answer matters more than a fast one.');
+    L.push('', OP('closing'));
     // Waiting and escalating don't settle an order, so they aren't offered as the decision
     const settling = d.choices.filter(c => !/wait|escalat|hold for|later/i.test(c.label));
     const choiceList = settling.length ? settling.map(c => c.label).join(' | ') : 'what to do';
@@ -2229,10 +2372,7 @@
     const fields = [...(d.textFields || []).filter(f => f.toLowerCase() !== g.note.toLowerCase()), g.note];
     L.push('', '## Reply',
       'Fill in this template:',
-      '- Copy the headings and labels, in this order. Replace each <…> with what you found and drop the angle brackets. Write "Not found" where you looked and found nothing.',
-      '- Keep it short: one line per bullet, no paragraphs, no greeting. Write only the final reply: no progress notes, no list of the steps or searches, and no mention of the Entry Assistant API or the skill.',
-      '- Put HTS and Chapter 99 codes in backticks, and link a source for every fact.',
-      '- The decision is one of the choices on the page, written exactly as the page writes it; for a correction, give the new value too. It must carry its proof: what shows it (which source, with its link) and which rule it meets or fails.',
+      ...OPL('replyRules'),
       `- End with the text for each box on the page (${fields.join(', ')}): what I'll paste in, plain text, no Markdown, one sentence up to one short paragraph, stating the decision and why. Never "waiting" or "needs more info".`,
       `- ${FINAL_LABEL} comes first: ${finalStyle(d.type)}`,
       '',
@@ -2556,7 +2696,8 @@
     }
 
     /* ---- Notion */
-    async function notion(method, path, body) {
+    // version: comments need a newer Notion API than the rest (editing and removing them came in 2026-03-11)
+    async function notion(method, path, body, version = '2025-09-03') {
       const key = notionKey();
       if (!key) throw new Error('No Notion key saved. Add it under Settings (the cog in Tools).');
       let r;
@@ -2566,7 +2707,7 @@
         try {
           r = await gmRequest({
             method, url: `https://api.notion.com/v1${path}`, timeout: 30000,
-            headers: { Authorization: `Bearer ${key}`, 'Notion-Version': '2025-09-03', 'Content-Type': 'application/json' },
+            headers: { Authorization: `Bearer ${key}`, 'Notion-Version': version, 'Content-Type': 'application/json' },
             data: body ? JSON.stringify(body) : undefined,
           });
         } catch (e) { throw new Error(`Notion: ${e.message}`); }
@@ -2577,7 +2718,7 @@
       let j = null;
       try { j = JSON.parse(r.responseText); } catch { /* handled below */ }
       if (r.status === 401) throw new Error('Notion rejected the key. Check it under Settings (the cog in Tools).');
-      if (r.status < 200 || r.status >= 300) throw new Error(`Notion: ${j?.message || `HTTP ${r.status}`}`);
+      if (r.status < 200 || r.status >= 300) throw Object.assign(new Error(`Notion: ${j?.message || `HTTP ${r.status}`}`), { status: r.status });
       return j;
     }
     const rt = (s, url) => [{ type: 'text', text: { content: String(s).slice(0, 1990), ...(url ? { link: { url } } : {}) } }];
@@ -3233,6 +3374,193 @@
       changed();
       return D.row;
     }
+    /* ---- Prompts: the team's edits to the research prompts, one row per piece (promptPieces) in Notion's
+       Prompts database: Name, Key, Group, Text (the piece; blank = built-in), About (where it goes) */
+    const PROMPTS = () => cfg().promptsDs;
+    const plainRich = r => (r || []).map(t => t.plain_text).join('');
+    // Text of any length as a rich text property (2,000 characters per run), split so it reads back exactly
+    const longRt = s => { const out = []; for (let i = 0; i < s.length && out.length < 100; i += 1900) out.push({ type: 'text', text: { content: s.slice(i, i + 1900) } }); return out; };
+    async function promptRows(ds) {
+      const rows = [];
+      let cursor = '';
+      do {
+        const r = await notion('POST', `/data_sources/${ds}/query`, { page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) });
+        rows.push(...(r.results || []));
+        cursor = r.has_more ? r.next_cursor : '';
+      } while (cursor);
+      return rows.map(p => ({ key: plainRich(p.properties?.Key?.rich_text).trim(), text: plainRich(p.properties?.Text?.rich_text) })).filter(r => r.key);
+    }
+    // The team's texts into PROMPTS_KEY, when they're older than 10 minutes (or now, with force)
+    async function loadPrompts(force) {
+      const ds = PROMPTS();
+      if (!notionKey() || !ds) { GM_deleteValue(PROMPTS_KEY); return null; }
+      const have = GM_getValue(PROMPTS_KEY, null);
+      if (!force && have?.from === ds && Date.now() - have.at < 10 * 60000) return have;
+      const texts = {};
+      for (const r of await promptRows(ds)) texts[r.key] = r.text;
+      const v = { at: Date.now(), from: ds, texts };
+      GM_setValue(PROMPTS_KEY, v);
+      return v;
+    }
+    // Makes the Prompts database next to Projects (when there isn't one yet) and adds a row, with the built-in
+    // text, for every piece it doesn't have. Rows already there are left as the team wrote them.
+    async function setupPrompts(say = () => {}) {
+      if (!notionKey() || !DS()) throw new Error('Set up Notion case tracking first (the key and Projects).');
+      let ds = PROMPTS();
+      let made = false;
+      if (!ds) {
+        say('Making the Prompts database next to Projects…');
+        const projects = await notion('GET', `/data_sources/${DS()}`);
+        const db = projects.parent?.database_id ? await notion('GET', `/databases/${projects.parent.database_id}`) : null;
+        const pageId = db?.parent?.type === 'page_id' ? db.parent.page_id : '';
+        if (!pageId) throw new Error("Projects isn't inside a page the integration can use, so Prompts can't be made next to it. Make a database called Prompts with the columns Name, Key, Group, Text and About, share it with the integration, paste its data source id here and press this again.");
+        const r = await notion('POST', '/databases', {
+          parent: { type: 'page_id', page_id: pageId },
+          title: [{ type: 'text', text: { content: 'Prompts' } }],
+          initial_data_source: { properties: { Name: { title: {} }, Group: { select: { options: [] } }, Text: { rich_text: {} }, About: { rich_text: {} }, Key: { rich_text: {} } } },
+        });
+        ds = r.data_sources?.[0]?.id;
+        if (!ds) throw new Error("Notion made the Prompts database but didn't give its data source id. Open it in Notion, copy its data source id, paste it here and press this again.");
+        setCfg({ promptsDs: ds });
+        made = true;
+      }
+      const have = new Set((await promptRows(ds)).map(r => r.key));
+      const missing = promptPieces().filter(p => !have.has(p.key));
+      let n = 0;
+      for (const p of missing) {
+        say(`Adding the prompts to Notion: ${++n} of ${missing.length}…`);
+        await notion('POST', '/pages', { parent: { type: 'data_source_id', data_source_id: ds }, properties: {
+          Name: { title: rt(p.name) }, Key: { rich_text: rt(p.key) }, Group: { select: { name: p.group } },
+          Text: { rich_text: longRt(p.text) }, About: { rich_text: rt(p.about) } } });
+      }
+      await loadPrompts(true);
+      return { made, added: missing.length };
+    }
+    // How many pieces the team has changed from the built-in text, and when they were last read
+    function promptsInfo() {
+      const v = GM_getValue(PROMPTS_KEY, null);
+      if (!v) return null;
+      const edited = promptPieces().filter(p => teamText(p.key) && teamText(p.key).trim() !== p.text.trim()).length;
+      return { at: v.at, edited, rows: Object.keys(v.texts).length };
+    }
+    if (onDashboard) {
+      const refresh = () => loadPrompts().catch(e => console.warn('[Dispute Desk] prompts', e));
+      setTimeout(refresh, 0);
+      setInterval(refresh, 10 * 60000);
+    }
+
+    /* ---- the scratchpad: each person's notes on the case, kept as one comment of theirs on the case page in
+       Notion, signed with their name and @mentioning their Notion user. It's made, edited and removed as they
+       type. The comment starts "@<name> · Scratchpad · <yyyy-mm-dd hh:mm>", then the notes. */
+    const COMMENTS_API = '2026-03-11';
+    const SCRATCH_HEAD = /^@?(.+?) · Scratchpad · (\d{4}-\d\d-\d\d \d\d:\d\d)\n?/;
+    const scratchKey = pageId => `desk:scratch:${pageId}`;
+    async function myNotionName() {
+      const id = cfg().notionUser;
+      if (id) {
+        const known = GM_getValue(`desk:notionName:${id}`, '');
+        if (known) return known;
+        try {
+          const u = await notion('GET', `/users/${id}`);
+          if (u?.name) { GM_setValue(`desk:notionName:${id}`, u.name); return u.name; }
+        } catch (e) { console.warn('[Dispute Desk] Notion user', e); }
+      }
+      return D.myName || (await portalName()) || 'Someone';
+    }
+    async function caseComments(pageId) {
+      const out = [];
+      let cursor = '';
+      do {
+        const r = await notion('GET', `/comments?block_id=${pageId}&page_size=100${cursor ? `&start_cursor=${cursor}` : ''}`, null, COMMENTS_API);
+        out.push(...(r.results || []));
+        cursor = r.has_more ? r.next_cursor : '';
+      } while (cursor);
+      return out;
+    }
+    // A comment as { id, who, at, text, mine }: a scratchpad's own header gives who and when
+    function readComment(c, mineId) {
+      const plain = plainRich(c.rich_text);
+      const m = SCRATCH_HEAD.exec(plain);
+      const first = c.rich_text?.[0];
+      const mine = c.id === mineId || (!!m && first?.type === 'mention' && !!cfg().notionUser && first.mention?.user?.id === cfg().notionUser);
+      return {
+        id: c.id, mine, scratch: !!m,
+        who: m ? m[1] : c.display_name?.resolved_name || 'Someone',
+        at: m ? m[2] : new Date(c.last_edited_time || c.created_time).toLocaleString('sv-SE', { hour12: false }).slice(0, 16),
+        text: (m ? plain.slice(m[0].length) : plain).trim(),
+      };
+    }
+    // The open case's scratchpads and comments: { id (the case), row, state: off | loading | ready | error, mine, others }
+    async function loadScratch() {
+      const ent = D.ent;
+      if (!ent) return;
+      if (!enabled()) { D.scratch = { id: ent.id, state: 'off', mine: null, others: [] }; changed(); return; }
+      const row = D.row?.id || '';
+      D.scratch = { id: ent.id, row, state: row ? 'loading' : 'ready', mine: null, others: [] };
+      changed();
+      if (!row) return;
+      try {
+        const all = (await caseComments(row)).map(c => readComment(c, GM_getValue(scratchKey(row), '')));
+        if (D.ent !== ent) return;
+        const mine = all.find(c => c.mine && c.scratch) || null;
+        D.scratch = { id: ent.id, row, state: 'ready', mine, others: all.filter(c => c !== mine) };
+      } catch (e) {
+        D.scratch = { id: ent.id, row, state: 'error', error: e.status === 403 ? "The Notion integration can't read comments: turn on Read comments and Insert comments in its capabilities." : e.message, mine: null, others: [] };
+      }
+      changed();
+    }
+    // For the Research tab: what's known for the open case, loading it when the case (or its Notion row) changed
+    function scratchFor() {
+      if (!D.ent) return null;
+      const sc = D.scratch;
+      if (!sc || sc.id !== D.ent.id || (sc.state !== 'off' && sc.row !== (D.row?.id || '') && sc.state !== 'loading')) {
+        D.scratch = { id: D.ent.id, row: D.row?.id || '', state: 'loading', mine: null, others: [] };
+        setTimeout(() => loadScratch(), 0);
+      }
+      return D.scratch;
+    }
+    // Saves your scratchpad as your comment on the case (the case is made if it isn't in Notion yet); empty
+    // text removes the comment. Says where it went: 'notion', 'test' (test mode, not written) or 'local'.
+    async function saveScratch(text) {
+      if (!enabled() || !D.ent) return 'local';
+      if (dryRun()) return 'test';
+      const ent = D.ent;
+      text = String(text || '').trim();
+      const sc = D.scratch?.id === ent.id ? D.scratch : { id: ent.id, state: 'ready', mine: null, others: [] };
+      if (!text) {
+        if (sc.mine) {
+          await notion('DELETE', `/comments/${sc.mine.id}`, null, COMMENTS_API).catch(e => { if (e.status !== 404) throw e; });
+          if (D.row) GM_deleteValue(scratchKey(D.row.id));
+          sc.mine = null;
+          changed();
+        }
+        return 'notion';
+      }
+      if (!D.row) {
+        const ctx = caseContext(ent);
+        const page = await apply(ctx, { log: `Case started for a scratchpad note in Tools (${midSentence(ctx.kind)} ${ctx.id}).`, create: true, explicit: true });
+        if (!page) throw new Error("Couldn't create the case in Notion.");
+        D.row = page;
+        D.state = 'tracked';
+      }
+      const name = await myNotionName();
+      const who = cfg().notionUser
+        ? { type: 'mention', mention: { type: 'user', user: { id: cfg().notionUser } } }
+        : { type: 'text', text: { content: name }, annotations: { bold: true } };
+      const at = stamp();
+      const rich = [who, { type: 'text', text: { content: ` · Scratchpad · ${at}\n` }, annotations: { color: 'gray' } },
+        ...chunks(text, 1900).slice(0, 95).map(c => ({ type: 'text', text: { content: c } }))];
+      let c = null;
+      if (sc.mine) {
+        // Someone may have deleted it in Notion: then a new one is posted
+        c = await notion('PATCH', `/comments/${sc.mine.id}`, { rich_text: rich }, COMMENTS_API).catch(e => { if (e.status === 404) return null; throw e; });
+      }
+      if (!c) c = await notion('POST', '/comments', { parent: { type: 'page_id', page_id: D.row.id }, rich_text: rich, display_name: { type: 'custom', custom: { name } } }, COMMENTS_API);
+      GM_setValue(scratchKey(D.row.id), c.id);
+      if (D.ent === ent) D.scratch = { ...sc, row: D.row.id, state: 'ready', mine: { id: c.id, who: name, at, text, mine: true, scratch: true } };
+      return 'notion';
+    }
+
     /* ---- the case chat: a "Case chat" toggle on the case page, one block per message:
        "Q — <who> · <yyyy-mm-dd hh:mm>" or "A — Claude, in <who>'s chat · <…>", then the text */
     const CHAT_TITLE = 'Case chat';
@@ -3319,7 +3647,7 @@
       if (Object.keys(props).length) D.row = await notion('PATCH', `/pages/${page.id}`, { properties: props });
       else D.row = page;
       if (answer) await setOwnAnswer(answer);
-      await addLog(page.id, [`${stamp()} (portal${name ? `, ${name}` : ''}): Case details saved in Tools${answer ? ', with the answer we found' : ''}.`]);
+      await addLog(page.id, [`${stamp()} (portal${name ? `, ${name}` : ''}): ${answer ? 'The answer we found' : 'Links'} saved in Tools.`]);
       D.state = 'tracked';
       changed();
       return 'the case in Notion';
@@ -3340,6 +3668,7 @@
       },
       finalIsOwn: () => !!(D.row?.properties?.['Final answer']?.rich_text || []).length,
       setOwnAnswer, loadChat, appendChat, sheetsOn, saveCaseDetails,
+      loadPrompts, setupPrompts, promptsInfo, scratchFor, saveScratch,
       // The open case's Front, Slack and AI chat links, where they're known (the sheet row or the Notion case)
       caseLinks: () => {
         if (sheetsOn()) return (D.sheetCase && D.ent && D.sheetCase.id === D.ent.id && D.sheetCase.links) || {};
@@ -4868,6 +5197,28 @@
     const tasksInput = textField('tasksDs', 'Tasks data source id (optional)', 'Tasks data source id');
     const userInput = textField('notionUser', 'Your Notion user id (cases you claim are assigned to you)', 'Notion user id');
     const notionNote = note();
+    // Prompts: the team's edits to the research prompts, in a Notion database next to Projects
+    const promptsInput = textField('promptsDs', 'Prompts data source id (made by Set up Prompts)', 'Prompts data source id');
+    const promptsNote = note();
+    const showPromptsInfo = () => {
+      const i = desk.promptsInfo();
+      say(promptsNote, !cfg().promptsDs ? 'Research prompts use the built-in text. Press Set up Prompts to make them editable in Notion.'
+        : i ? `Using the team's prompts from Notion (read ${shortDate(i.at)}): ${i.edited} of the pieces differ from the built-in text.` : 'Not read from Notion yet. Press Refresh.');
+    };
+    const setUpPrompts = async () => {
+      setCfg({ promptsDs: clean(promptsInput.value) });
+      try {
+        const r = await desk.setupPrompts(t => say(promptsNote, t));
+        promptsInput.value = cfg().promptsDs;
+        say(promptsNote, `${r.made ? 'Made the Prompts database next to Projects in Notion' : 'Prompts is set up'}${r.added ? ` and added ${r.added} piece${r.added === 1 ? '' : 's'} with the built-in text` : ': every piece is already there'}. Edit the Text column in Notion; a blank Text uses the built-in text. Share the data source id with the team (Copy my setup includes it).`, 'ok');
+        afterSetup();
+      } catch (err) { say(promptsNote, err.message, 'err'); }
+    };
+    const refreshPrompts = async () => {
+      setCfg({ promptsDs: clean(promptsInput.value) });
+      say(promptsNote, 'Reading the prompts from Notion…');
+      try { await desk.loadPrompts(true); showPromptsInfo(); } catch (err) { say(promptsNote, err.message, 'err'); }
+    };
     // "Find me": lists the workspace's people (needs the key saved) so nobody has to dig out their user id
     const pickRow = h('div', { class: 'row', style: 'margin-top:6px' });
     const findMe = async () => {
@@ -4885,7 +5236,7 @@
       if (k) desk.key.set(k);
       notionKeyInput.value = '';
       notionKeyInput.placeholder = desk.key.get() ? 'Saved (paste a new one to replace it)' : 'Notion integration key (ntn_…)';
-      setCfg({ projectsDs: clean(projectsInput.value), tasksDs: clean(tasksInput.value), notionUser: clean(userInput.value) });
+      setCfg({ projectsDs: clean(projectsInput.value), tasksDs: clean(tasksInput.value), notionUser: clean(userInput.value), promptsDs: clean(promptsInput.value) });
       afterSetup();
       if (!desk.key.get() && !cfg().projectsDs) { say(notionNote, 'Saved. Notion tracking is off.'); return; }
       say(notionNote, 'Saved. Testing…');
@@ -4893,8 +5244,8 @@
     };
     const clearNotion = () => {
       desk.key.set('');
-      setCfg({ projectsDs: '', tasksDs: '', notionUser: '' });
-      for (const i of [projectsInput, tasksInput, userInput]) i.value = '';
+      setCfg({ projectsDs: '', tasksDs: '', notionUser: '', promptsDs: '' });
+      for (const i of [projectsInput, tasksInput, userInput, promptsInput]) i.value = '';
       notionKeyInput.placeholder = 'Notion integration key (ntn_…)';
       say(notionNote, 'Notion tracking is off.');
       afterSetup();
@@ -4958,7 +5309,7 @@
       for (const k of Object.keys(CONFIG_DEFAULTS)) if (typeof s.config?.[k] === 'string') c[k] = s.config[k];
       setCfg(c);
       importBox.value = '';
-      for (const [input, k] of [[entryUrlInput, 'entryUrl'], [projectsInput, 'projectsDs'], [tasksInput, 'tasksDs'], [userInput, 'notionUser'], [routineIdInput, 'routineId'], [notesUrlInput, 'notesUrl'], [sheetsUrlInput, 'sheetsUrl']]) input.value = cfg()[k] || '';
+      for (const [input, k] of [[entryUrlInput, 'entryUrl'], [projectsInput, 'projectsDs'], [tasksInput, 'tasksDs'], [userInput, 'notionUser'], [promptsInput, 'promptsDs'], [routineIdInput, 'routineId'], [notesUrlInput, 'notesUrl'], [sheetsUrlInput, 'sheetsUrl']]) input.value = cfg()[k] || '';
       sheetsSecretInput.placeholder = cfg().sheetsSecret ? 'Saved (paste a new one to replace it)' : 'Sheet secret';
       say(backupNote, 'Imported and saved.', 'ok');
       refreshTokenNote();
@@ -4977,7 +5328,7 @@
         h('div', { class: 'row' }, sheetsUrlInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, sheetsSecretInput, btn('Save and test', saveSheets)),
         sheetsNote),
-      EDITION !== 'sheets' && group('Notion case tracking', 'Tracks each dispute and work order you work as a row in your Notion Projects database (needs a Notion integration with access to it). The Tasks database is needed only for Claude Code research.',
+      EDITION !== 'sheets' && group('Notion case tracking', 'Tracks each dispute and work order you work as a row in your Notion Projects database (needs a Notion integration with access to it). The Tasks database is needed only for Claude Code research. Your Notion user id signs your scratchpad comments; for those, the integration needs Read comments and Insert comments turned on (its Capabilities in Notion).',
         h('div', { class: 'row' }, notionKeyInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, projectsInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, tasksInput),
@@ -4988,6 +5339,10 @@
         h('label', { class: 'doc', style: 'margin-top:6px' },
           h('input', { type: 'checkbox', checked: desk.writeInTest.get(), onchange: e => desk.writeInTest.set(e.target.checked) }),
           h('span', { text: 'Write to Notion in test mode too (normally test mode is a dry run)' }))),
+      EDITION !== 'sheets' && group('Prompts', "The research prompts' fixed text (the brief, rules, research steps, claim checks, reply rules and each queue class's guide), editable by the team in a Prompts database in Notion. The parts built from the case itself stay as they are.",
+        h('div', { class: 'row' }, promptsInput),
+        h('div', { class: 'row', style: 'margin-top:6px' }, btn('Set up Prompts', () => setUpPrompts()), btn('Refresh', () => refreshPrompts())),
+        (showPromptsInfo(), promptsNote)),
       EDITION !== 'sheets' && group('Claude Code research', 'Adds "Research in Claude Code": the request goes to your Notion Tasks and starts your cloud routine. Without it, use Copy prompt or Open in claude.ai.',
         h('div', { class: 'row' }, routineIdInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, routineTokenInput, btn('Save', saveRoutine)),
@@ -6009,43 +6364,109 @@
         "The HTS lookups for Claude's prompt are off until the Entry Assistant token is saved in ",
         noteLink('Settings', () => setView('settings')), '.');
 
-      // Case details: the case's Front conversation, Slack thread and AI chat links, and the answer we found.
-      // Saved to the case (the Google Sheet row and its doc, or the Notion case); links already known are filled in.
+      // Links, right under the case: its Front conversation, Slack thread and AI chat. Each is saved to the case
+      // as soon as it's pasted or the box is left; links already on the case are filled in.
       const known = desk.caseLinks();
-      const linkField = (key, label) => s[key] || (s[key] = h('input', { type: 'text', placeholder: label, 'aria-label': label, autocomplete: 'off', spellcheck: 'false' }));
+      const saveLinks = async () => {
+        const v = { front: s.frontIn.value.trim(), slack: s.slackIn.value.trim(), chat: s.chatIn.value.trim() };
+        const bad = Object.entries(v).find(([, u]) => u && !/^https?:\/\/\S+$/i.test(u));
+        if (bad) { s.linksMsg.textContent = 'That doesn\'t look like a link (it should start with https://).'; s.linksMsg.className = 'hint err'; return; }
+        const fresh = Object.fromEntries(Object.entries(v).map(([k, u]) => [k, u !== (s.savedLinks?.[k] ?? known[k] ?? '') ? u : '']));
+        if (!Object.values(fresh).some(Boolean)) return;
+        s.linksMsg.textContent = 'Saving…';
+        s.linksMsg.className = 'hint';
+        try {
+          const where = await desk.saveCaseDetails(fresh);
+          s.savedLinks = { ...(s.savedLinks || {}), ...Object.fromEntries(Object.entries(fresh).filter(([, u]) => u)) };
+          s.linksMsg.textContent = where ? `Saved to ${where}.` : desk.dryRun() ? 'Test mode: not saved to Notion.' : 'Notion isn\'t set up, so links aren\'t saved.';
+          s.linksMsg.className = where ? 'hint ok' : 'hint';
+        } catch (err) { s.linksMsg.textContent = err.message; s.linksMsg.className = 'hint err'; }
+      };
+      const linkField = (key, label) => s[key] || (s[key] = h('input', { type: 'text', placeholder: label, 'aria-label': label, autocomplete: 'off', spellcheck: 'false',
+        onchange: () => saveLinks(), onpaste: () => setTimeout(() => saveLinks(), 0) }));
       const frontIn = linkField('frontIn', 'Front conversation link');
       const slackIn = linkField('slackIn', 'Slack thread link');
       const chatIn = linkField('chatIn', 'AI chat link (claude.ai)');
+      s.linksMsg = s.linksMsg || h('p', { class: 'hint' });
       for (const [el, v] of [[frontIn, known.front], [slackIn, known.slack], [chatIn, known.chat || GM_getValue(CHAT_URL_PREFIX + d.disputeId, '')]]) {
         if (v && !el.value && root.activeElement !== el) el.value = v;   // what's known, without overwriting your typing
       }
-      const foundIn = s.foundIn || (s.foundIn = h('textarea', { class: 'answer', rows: 4, 'aria-label': 'The answer we found', placeholder: 'The answer we found: the decision and why, one sentence up to a paragraph' }));
-      const saveDetails = async () => {
-        const answer = foundIn.value.trim();
-        if (answer) {
-          storeAnswer(`${FINAL_LABEL} ${answer}`, isOrder ? [] : picked.length ? picked.map(i => i.line) : inDispute.map(i => i.line), true);
-          foundIn.value = '';
-        }
-        const where = await desk.saveCaseDetails({ front: frontIn.value.trim(), slack: slackIn.value.trim(), chat: chatIn.value.trim(), answer });
-        setStatus(where ? `Saved to ${where}.` : 'Saved on this computer (no Google Sheet or Notion set up).', 'ok');
-        render();
-      };
-      const detailsSection = h('div', { class: 'section' },
-        h('p', { class: 'label', text: 'Case details' }),
+      const linksSection = h('div', { class: 'section' },
+        h('p', { class: 'label', text: 'Links' }),
         h('div', { class: 'row' }, frontIn),
         h('div', { class: 'row', style: 'margin-top:6px' }, slackIn),
         h('div', { class: 'row', style: 'margin-top:6px' }, chatIn),
-        h('div', { style: 'margin-top:6px' }, foundIn),
+        s.linksMsg.textContent ? s.linksMsg : h('p', { class: 'hint', text: desk.enabled() ? 'Saved to the case in Notion as soon as you paste one.' : 'Saved to the case once Notion is set up (Settings).' }));
+
+      // Your scratchpad: your notes on the case, saved as your comment on the case in Notion a moment after you
+      // stop typing (and kept on this computer as you go). Everyone else's comments on the case show below it.
+      const scratch = desk.scratchFor();
+      const draftKey = `desk:scratchDraft:${d.disputeId}`;
+      const flushScratch = async () => {
+        clearTimeout(s.scratchTimer);
+        const text = s.scratchIn.value.trim();
+        if (text === (s.scratchSaved ?? '')) return;
+        s.scratchNote.textContent = 'Saving…';
+        s.scratchNote.className = 'hint';
+        try {
+          const where = await desk.saveScratch(text);
+          if (where === 'notion') { s.scratchSaved = text; GM_deleteValue(draftKey); }
+          s.scratchNote.textContent = where === 'notion' ? (text ? `Saved to Notion ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` : 'Cleared: your comment is removed from the case.')
+            : where === 'test' ? 'Test mode: kept on this computer, not saved to Notion.' : 'Kept on this computer (Notion isn\'t set up).';
+          s.scratchNote.className = where === 'notion' ? 'hint ok' : 'hint';
+        } catch (err) { s.scratchNote.textContent = `Not saved to Notion: ${err.message}`; s.scratchNote.className = 'hint err'; }
+      };
+      if (!s.scratchIn) {
+        s.scratchIn = h('textarea', { class: 'answer', rows: 3, 'aria-label': 'Your scratchpad', placeholder: 'Your scratchpad: notes on this case (saved as your comment in Notion)',
+          oninput: () => { GM_setValue(draftKey, s.scratchIn.value); clearTimeout(s.scratchTimer); s.scratchTimer = setTimeout(() => flushScratch(), 2000); },
+          onblur: () => flushScratch() });
+        s.scratchNote = h('p', { class: 'hint' });
+        const draft = GM_getValue(draftKey, '');
+        if (draft) { s.scratchIn.value = draft; s.scratchTyped = true; }
+      }
+      // Your comment from Notion fills the box once it's loaded, unless you've started typing
+      if (scratch?.state === 'ready' && !s.scratchTyped && s.scratchSaved === undefined) {
+        s.scratchSaved = scratch.mine?.text || '';
+        if (root.activeElement !== s.scratchIn) s.scratchIn.value = s.scratchSaved;
+      }
+      if (root.activeElement === s.scratchIn) s.scratchTyped = true;
+      const others = scratch?.others || [];
+      const scratchSection = h('div', { class: 'section' },
+        h('p', { class: 'label', text: 'Scratchpad' }),
+        s.scratchIn,
+        s.scratchNote.textContent ? s.scratchNote
+          : h('p', { class: `hint${scratch?.state === 'error' ? ' err' : ''}`, text: scratch?.state === 'error' ? `Couldn't read the case's comments: ${scratch.error}`
+            : scratch?.state === 'loading' ? 'Loading the comments on this case…'
+            : desk.enabled() ? (desk.dryRun() ? 'Test mode: kept on this computer, not saved to Notion.' : 'Saved as your comment on the case in Notion, under your name.') : 'Kept on this computer. Set up Notion (Settings) to share it on the case.' }),
+        others.length > 0 && h('div', { class: 'tasks' }, others.map(o => h('div', { style: 'margin-top:6px' },
+          h('p', { class: 'hint', style: 'margin:0', text: `${o.who} · ${o.at}${o.scratch ? ' · scratchpad' : ''}` }),
+          h('p', { style: 'margin:2px 0 0;white-space:pre-wrap', text: o.text })))));
+
+      // The answer we found: the case's Final answer in Notion, with your name
+      const foundIn = s.foundIn || (s.foundIn = h('textarea', { class: 'answer', rows: 4, 'aria-label': 'The answer we found', placeholder: 'The answer we found: the decision and why, one sentence up to a paragraph' }));
+      const saveDetails = async () => {
+        const answer = foundIn.value.trim();
+        if (!answer) { setStatus('Write the answer first.', 'err'); return; }
+        storeAnswer(`${FINAL_LABEL} ${answer}`, isOrder ? [] : picked.length ? picked.map(i => i.line) : inDispute.map(i => i.line), true);
+        foundIn.value = '';
+        const where = await desk.saveCaseDetails({ answer });
+        setStatus(where ? `Saved to ${where}.` : 'Saved on this computer (Notion isn\'t set up).', 'ok');
+        render();
+      };
+      const detailsSection = h('div', { class: 'section' },
+        h('p', { class: 'label', text: 'The answer we found' }),
+        foundIn,
         h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => run(saveDetails) })),
-        h('p', { class: 'hint', text: desk.sheetsOn() ? 'Links go in the sheet row; the answer goes in the Answer cell and the case doc, with your name.'
-          : desk.enabled() ? "Links go on the case in Notion; the answer becomes the case's Final answer, with your name." : 'Saved on this computer.' }));
+        h('p', { class: 'hint', text: desk.enabled() ? "It becomes the case's Final answer in Notion, with your name." : 'Saved on this computer.' }));
 
       desk.setPageData(d);
       const deskCard = desk.card(noteLink);
       if (isOrder) {
-        rest.replaceChildren(...[deskCard, orderSection, answerSection, detailsSection, tokenHint].filter(Boolean));
+        rest.replaceChildren(...[deskCard, linksSection, scratchSection, orderSection, answerSection, detailsSection, tokenHint].filter(Boolean));
       } else rest.replaceChildren(...[
         deskCard,
+        linksSection,
+        scratchSection,
         h('div', { class: 'section' },
           h('p', { class: 'label', text: 'Lines to research' }),
           inDispute.length > 0
