@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.9.2
+// @version      7.10.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -149,11 +149,15 @@
   // Entry Assistant token and cloud routine. The shared file leaves it empty, so it holds no keys.
   // Anything set under Settings still wins; a blank setting falls back to the team's.
   const TEAM = {};
+  // Which edition this file is: 'notion' tracks cases in Notion; 'sheets' (built by build-sheets.ps1) tracks them in
+  // the team's Google Sheet, one row per case with a Google Doc of its answers and decisions, and leaves Notion off
+  const EDITION = 'notion';
   const CONFIG_DEFAULTS = {
     entryUrl: TEAM.entryUrl || 'https://entry.kars3n.com',   // the Entry Assistant site
     projectsDs: TEAM.projectsDs || '', tasksDs: TEAM.tasksDs || '', notionUser: '',   // Notion case tracking
     routineId: '', routineToken: '',        // Claude Code cloud research: each person's own routine, never the team's
     notesUrl: TEAM.notesUrl || '',                           // shared answers server
+    sheetsUrl: TEAM.sheetsUrl || '', sheetsSecret: TEAM.sheetsSecret || '',   // Sheets edition: the sheet's web app
   };
   const cfg = () => {
     const c = { ...CONFIG_DEFAULTS, ...GM_getValue(CONFIG_KEY, {}) };
@@ -2327,7 +2331,8 @@
     };
 
     const notionKey = () => GM_getValue(KEY, '') || TEAM.notionKey || '';
-    const enabled = () => onDashboard && !!notionKey() && !!DS();
+    const enabled = () => EDITION !== 'sheets' && onDashboard && !!notionKey() && !!DS();
+    const sheetsOn = () => EDITION === 'sheets' && onDashboard && !!cfg().sheetsUrl && !!cfg().sheetsSecret;
     // Research in Claude Code needs the Tasks database (the request lives there) and the cloud routine
     const researchOn = () => enabled() && !!TASKS() && !!cfg().routineId && !!cfg().routineToken;
     // The portal's mode switch: cookie (and localStorage) "broker-portal-mode" = "test" | "live"
@@ -2352,7 +2357,7 @@
     function onData(op, status, json) {
       captured.push({ op, at: Date.now(), json });
       if (captured.length > 60) captured.shift();
-      if (!enabled() || status >= 300 || !json?.data || json.errors?.length) return;
+      if (!(enabled() || sheetsOn()) || status >= 300 || !json?.data || json.errors?.length) return;
       if (ACTIONS[op]) {
         const v = varsByOp[op] && Date.now() - varsByOp[op].at < 15000 ? varsByOp[op].vars : {};
         handleAction(op, v, json.data).catch(e => { D.state = 'error'; D.msg = e.message; changed(); });
@@ -2743,13 +2748,16 @@
     // The portal's own Resolve button sends its request through a fetch the script can't see, so the note
     // typed there can be missing from what was captured: read the resolved work order back from the portal
     // and save its resolution and note
-    async function refreshResolution(page, ent, ctx) {
+    async function resolvedWorkOrder(ent, ctx) {
       await sleep(2500);
-      let wo = null;
       for (const q of [ent.wo.id, ...ctx.tracking.slice(0, 2)]) {
-        wo = (await portal.search(q, 25).catch(() => [])).find(o => o.id === ent.wo.id);
-        if (wo) break;
+        const wo = (await portal.search(q, 25).catch(() => [])).find(o => o.id === ent.wo.id);
+        if (wo) return wo;
       }
+      return null;
+    }
+    async function refreshResolution(page, ent, ctx) {
+      const wo = await resolvedWorkOrder(ent, ctx);
       if (!wo?.resolution && !wo?.resolutionNote) return;
       const text = [human(wo.resolution), wo.resolutionNote].filter(Boolean).join(': ');
       const name = await portalName();
@@ -2786,6 +2794,45 @@
         },
       });
     }
+    /* ---- the Sheets edition: the team's Google Sheet (one row per case) and a Google Doc per case for its answers
+       and decisions, through the sheet's Apps Script web app (harness/google/OctoberDisputes.gs) */
+    async function sheetsCall(action, ctx, extra = {}) {
+      const r = await gmRequest({
+        method: 'POST', url: cfg().sheetsUrl, timeout: 40000, headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        data: JSON.stringify({ secret: cfg().sheetsSecret, action, case: { id: ctx.id, name: ctx.name, type: ctx.kind, dashboard: ctx.url }, ...extra }),
+      });
+      let j = null;
+      try { j = JSON.parse(r.responseText); } catch { /* not JSON */ }
+      if (!j?.ok) throw new Error(`Google Sheet: ${j?.error || `the web app answered ${r.status}`}`);
+      if (j.doc) { D.sheetCase = { id: ctx.id, doc: j.doc, sheet: j.sheet }; changed(); }
+      return j;
+    }
+    // A portal action, for the sheet: claim and release set who's on it; wait, escalate and resume set Status;
+    // resolving or completing (and decisions on the way, like an HS code correction) go in the doc as decisions
+    async function sheetsAction(op, a, vars, ctx, n, ent) {
+      const who = await portalName();
+      const note = a.hold ? a.hold(vars, n) : '';
+      switch (op) {
+        case 'BrokerageWorkOrderClaim': case 'BrokerageWorkOrderAssign': return sheetsCall('claim', ctx, { who });
+        case 'BrokerageWorkOrderRelease': case 'BrokerageWorkOrderUnassign': return sheetsCall('release', ctx);
+        case 'BrokerageWorkOrderWait': return sheetsCall('status', ctx, { status: 'Waiting', note });
+        case 'BrokerageWorkOrderEscalate': return sheetsCall('status', ctx, { status: 'Escalated', note });
+        case 'BrokerageWorkOrderResume': return sheetsCall('status', ctx, { status: 'In progress', note: 'Resumed in the broker portal.' });
+        case 'BrokerageWorkOrderResolve': case 'BrokerageDutyDisputeComplete': {
+          let text = a.resolution ? a.resolution(vars, n) : '';
+          // The portal's own Resolve button can hide the note from the script: read it back from the portal
+          if (op === 'BrokerageWorkOrderResolve' && ent.wo?.id && !(vars.note || n?.resolutionNote)) {
+            const wo = await resolvedWorkOrder(ent, ctx);
+            if (wo?.resolution || wo?.resolutionNote) text = [human(wo.resolution), wo.resolutionNote].filter(Boolean).join(': ');
+          }
+          return sheetsCall('decision', ctx, { who, status: 'Done', text: text || cap(a.ev) });
+        }
+        case 'BrokerageDutyDisputeClaimsDecide': case 'BrokerageDutyDisputeClaimsCorrect':
+        case 'ConsignmentItemHsCodeCorrect': case 'ManifestLineAdcvdRequote':
+          return sheetsCall('decision', ctx, { who, text: describe(op, vars, ctx, n) });
+      }
+      return null;
+    }
     // A finished case's open tasks (research requests, deadlines) are done too
     async function closeTasks(pageId) {
       if (!TASKS()) return;
@@ -2811,11 +2858,18 @@
         if (a.status === 'Done' && ent.wo?.id) GM_setValue(`desk:resolved:${ent.wo.id}`, Date.now());   // handled once
         // Portal actions only update items that already exist, except a claim, which creates the case;
         // otherwise the Notion item is created by your button press
-        const page = await apply(ctx, { status: a.status, hold: a.hold ? a.hold(vars, n) : '', log: describe(op, vars, ctx, n), withSnapshot: !!a.snapshot, create: !!a.create, assign: a.assign, resolution: a.resolution ? a.resolution(vars, n) : '' });
+        const page = enabled() ? await apply(ctx, { status: a.status, hold: a.hold ? a.hold(vars, n) : '', log: describe(op, vars, ctx, n), withSnapshot: !!a.snapshot, create: !!a.create, assign: a.assign, resolution: a.resolution ? a.resolution(vars, n) : '' }) : null;
+        if (sheetsOn()) {
+          const shown = D.ent?.id === ent.id;
+          if (dryRun()) { if (shown) D.msg = `${cap(a.ev)} (test mode: not written to the sheet)`; }
+          else await sheetsAction(op, a, vars, ctx, n, ent)
+            .then(j => { if (shown && j) D.msg = `${cap(a.ev)} · saved to the Google Sheet`; })
+            .catch(e => { if (shown) { D.state = 'error'; D.msg = e.message; } console.warn('[Dispute Desk]', e); });
+        }
         if (page && a.assign && !dryRun()) await claimTask(page, ctx, n, a.assign).catch(e => console.warn('[Dispute Desk]', e));
         if (page && a.status === 'Done' && !dryRun()) await closeTasks(page.id).catch(e => console.warn('[Dispute Desk]', e));
         if (page && op === 'BrokerageWorkOrderResolve' && ent.wo?.id && !(vars.note || n?.resolutionNote) && !dryRun()) refreshResolution(page, ent, ctx).catch(e => console.warn('[Dispute Desk]', e));
-        if (D.ent?.id === ent.id) {
+        if (enabled() && D.ent?.id === ent.id) {
           if (page) { D.row = page; D.state = 'tracked'; }
           else if (dryRun()) D.state = 'tracked';
           D.msg = `${cap(a.ev)}${dryRun() ? ' (test mode: not written)' : ' · saved to Notion'}`;
@@ -2835,6 +2889,12 @@
       Object.assign(D, { ent, row: null, state: ent ? 'looking' : 'idle', msg: '', preview: null, research: null });
       pending.length = 0;
       changed();
+      // Sheets edition: is this case in the sheet already (for the card's sheet and doc links)
+      if (ent && sheetsOn()) {
+        await sleep(3000);
+        if (D.ent === ent) await sheetsCall('find', caseContext(ent)).catch(e => console.warn('[Dispute Desk] sheet', e));
+        return;
+      }
       if (!ent || !enabled()) { if (ent) D.state = 'off'; changed(); return; }
       await sleep(3000);   // let the portal load its data
       if (D.ent !== ent) return;
@@ -2915,7 +2975,16 @@
       addToCase([], `Research ${how}${lines.length ? ` for line${lines.length > 1 ? 's' : ''} ${lines.join(', ')}` : ''}.`).catch(e => console.warn('[Dispute Desk]', e));
     }
     // A Claude answer saved in the panel goes into the case's page, as Markdown
-    function onAnswer(text, lines, summary, author) {
+    function onAnswer(text, lines, summary, author, own = false) {
+      // Sheets edition: the answer's one sentence goes in the row's Answer cell and the whole answer in the case doc
+      if (sheetsOn() && D.ent && !dryRun()) {
+        const ctx = caseContext(D.ent);
+        portalName().then(name => sheetsCall('answer', ctx, {
+          text, sentence: finalSentence(text) || summary || '', who: author || name,
+          kind: own ? 'Own answer' : `Claude's answer${lines.length ? ` · line${lines.length > 1 ? 's' : ''} ${lines.join(', ')}` : ''}`,
+        })).then(() => { D.msg = 'Answer saved to the Google Sheet and the case doc.'; changed(); })
+          .catch(e => { D.msg = e.message; changed(); });
+      }
       if (!enabled()) return;
       const title = `Claude's answer${lines.length ? ` · line${lines.length > 1 ? 's' : ''} ${lines.join(', ')}` : ''}${summary ? ` · ${summary}` : ''}${author ? ` · ${author}` : ''} · ${stamp()}`;
       addToCase([toggle(title, chunks(text).map(para))], `Saved Claude's answer${summary ? ` (${summary})` : ''}.`, { create: true, explicit: true }).catch(e => { D.msg = e.message; changed(); });
@@ -3080,6 +3149,16 @@
     function card(link) {
       if (!onDashboard) return null;
       const ent = D.ent;
+      // Sheets edition: whether the case is in the sheet yet, with its sheet and doc
+      if (sheetsOn() && ent) {
+        const sc = D.sheetCase?.id === ent.id ? D.sheetCase : null;
+        const a = (href, text) => h('a', { href, target: '_blank', rel: 'noopener', text });
+        return h('div', { class: 'section' }, h('p', { class: 'label', text: `Case · ${kindOf(ent.type)}` }),
+          h('div', { class: 'order-card' },
+            h('p', { class: 'hint', style: 'margin:0', text: sc ? 'In the Google Sheet.' : 'Not in the Google Sheet yet: claiming it adds it.' }),
+            sc && h('div', { class: 'row', style: 'gap:12px;margin-top:6px' }, sc.sheet && a(sc.sheet, 'Sheet'), sc.doc && a(sc.doc, 'Case doc')),
+            D.msg && h('p', { class: `hint ${D.state === 'error' ? 'err' : 'ok'}`, text: D.msg })));
+      }
       if (!enabled() || !ent) return null;   // Notion tracking is optional (Settings (the cog in Tools))
       const ctx = caseContext(ent);
       const kids = [];
@@ -3184,8 +3263,14 @@
         return m && { role: m[1], who: m[2].replace(/^Claude, in (.+)'s chat$/, '$1'), at: m[3], text: s.slice(m[0].length).trim() };
       }).filter(Boolean);
     }
-    // Adds messages to the case's chat (the case and its chat are made if needed); false when Notion is off
+    // Adds messages to the case's chat (the case and its chat are made if needed); false when Notion is off.
+    // In the Sheets edition each message goes in the case doc's log instead.
     async function appendChat(turns) {
+      if (sheetsOn() && D.ent && !dryRun()) {
+        const ctx = caseContext(D.ent);
+        for (const t of turns) await sheetsCall('note', ctx, { text: t.role === 'Q' ? `${t.who} asked Claude: ${t.text}` : `Claude answered (in ${t.who}'s chat): ${t.text}` });
+        return true;
+      }
       if (!enabled() || !D.ent) return false;
       if (!D.row) {
         const ctx = caseContext(D.ent);
@@ -3223,7 +3308,16 @@
         return txt('Final answer') || txt('Claude Final Answer');
       },
       finalIsOwn: () => !!(D.row?.properties?.['Final answer']?.rich_text || []).length,
-      setOwnAnswer, loadChat, appendChat,
+      setOwnAnswer, loadChat, appendChat, sheetsOn,
+      // Sheets edition: the row's Front, Slack or AI chat link (only for a case already in the sheet)
+      sheetsLinks: links => (sheetsOn() && D.ent && !dryRun() ? sheetsCall('links', caseContext(D.ent), links) : Promise.resolve(null)),
+      sheetsPing: async () => {
+        const r = await gmRequest({ method: 'POST', url: cfg().sheetsUrl, timeout: 30000, headers: { 'Content-Type': 'text/plain;charset=utf-8' }, data: JSON.stringify({ secret: cfg().sheetsSecret, action: 'ping' }) });
+        let j = null;
+        try { j = JSON.parse(r.responseText); } catch { /* not JSON */ }
+        if (!j?.ok) throw new Error(j?.error || `The web app answered ${r.status}.`);
+        return j.version;
+      },
       hasRow: () => !!D.row,
       myName: () => D.myName || '',
       // The case in plain lines (the portal's own data), for a chat that starts without the research prompt
@@ -4785,6 +4879,21 @@
       afterSetup();
     };
 
+    // Sheets edition: the team sheet's web app address and its secret (both come with the setup block)
+    const sheetsUrlInput = textField('sheetsUrl', 'Sheet web app address (…/exec)', 'Sheet web app address');
+    const sheetsSecretInput = secretField(() => !!cfg().sheetsSecret, 'Sheet secret');
+    const sheetsNote = note();
+    const saveSheets = async () => {
+      const secret = clean(sheetsSecretInput.value);
+      setCfg({ sheetsUrl: clean(sheetsUrlInput.value), ...(secret ? { sheetsSecret: secret } : {}) });
+      sheetsSecretInput.value = '';
+      sheetsSecretInput.placeholder = cfg().sheetsSecret ? 'Saved (paste a new one to replace it)' : 'Sheet secret';
+      afterSetup();
+      if (!cfg().sheetsUrl || !cfg().sheetsSecret) { say(sheetsNote, 'Saved. Add both the address and the secret to turn it on.'); return; }
+      say(sheetsNote, 'Saved. Testing…');
+      try { say(sheetsNote, `Saved. Connected to the sheet (version ${await desk.sheetsPing()}).`, 'ok'); } catch (err) { say(sheetsNote, `Saved, but: ${err.message}`, 'err'); }
+    };
+
     // Back up / restore: everything above as one block of text, e.g. to move to another computer
     const importBox = h('textarea', { class: 'answer', rows: 4, placeholder: 'Paste a setup block here', 'aria-label': 'Setup to import', style: 'min-height:70px' });
     const backupNote = note();
@@ -4806,7 +4915,8 @@
       for (const k of Object.keys(CONFIG_DEFAULTS)) if (typeof s.config?.[k] === 'string') c[k] = s.config[k];
       setCfg(c);
       importBox.value = '';
-      for (const [input, k] of [[entryUrlInput, 'entryUrl'], [projectsInput, 'projectsDs'], [tasksInput, 'tasksDs'], [userInput, 'notionUser'], [routineIdInput, 'routineId'], [notesUrlInput, 'notesUrl']]) input.value = cfg()[k] || '';
+      for (const [input, k] of [[entryUrlInput, 'entryUrl'], [projectsInput, 'projectsDs'], [tasksInput, 'tasksDs'], [userInput, 'notionUser'], [routineIdInput, 'routineId'], [notesUrlInput, 'notesUrl'], [sheetsUrlInput, 'sheetsUrl']]) input.value = cfg()[k] || '';
+      sheetsSecretInput.placeholder = cfg().sheetsSecret ? 'Saved (paste a new one to replace it)' : 'Sheet secret';
       say(backupNote, 'Imported and saved.', 'ok');
       refreshTokenNote();
       refreshNotesKeyNote();
@@ -4820,7 +4930,11 @@
         h('div', { class: 'row' }, entryUrlInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, tokenInput, btn('Save', saveEntry), btn('Test', () => testConnection())),
         tokenNote),
-      group('Notion case tracking', 'Tracks each dispute and work order you work as a row in your Notion Projects database (needs a Notion integration with access to it). The Tasks database is needed only for Claude Code research.',
+      EDITION === 'sheets' && group('Google Sheet', 'Each case you claim gets a row in the team sheet and its own Google Doc with the answers and decisions. Both values come in the setup block from Karsen.',
+        h('div', { class: 'row' }, sheetsUrlInput),
+        h('div', { class: 'row', style: 'margin-top:6px' }, sheetsSecretInput, btn('Save and test', saveSheets)),
+        sheetsNote),
+      EDITION !== 'sheets' && group('Notion case tracking', 'Tracks each dispute and work order you work as a row in your Notion Projects database (needs a Notion integration with access to it). The Tasks database is needed only for Claude Code research.',
         h('div', { class: 'row' }, notionKeyInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, projectsInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, tasksInput),
@@ -4831,7 +4945,7 @@
         h('label', { class: 'doc', style: 'margin-top:6px' },
           h('input', { type: 'checkbox', checked: desk.writeInTest.get(), onchange: e => desk.writeInTest.set(e.target.checked) }),
           h('span', { text: 'Write to Notion in test mode too (normally test mode is a dry run)' }))),
-      group('Claude Code research', 'Adds "Research in Claude Code": the request goes to your Notion Tasks and starts your cloud routine. Without it, use Copy prompt or Open in claude.ai.',
+      EDITION !== 'sheets' && group('Claude Code research', 'Adds "Research in Claude Code": the request goes to your Notion Tasks and starts your cloud routine. Without it, use Copy prompt or Open in claude.ai.',
         h('div', { class: 'row' }, routineIdInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, routineTokenInput, btn('Save', saveRoutine)),
         routineNote),
@@ -5711,7 +5825,7 @@
       const noneHint = inDispute.length > 0 && !picked.length
         && h('p', { class: 'hint', text: doneCount === inDispute.length ? 'Every line has a saved answer. Tick a line to research it again.' : 'Tick the lines you want researched.' });
 
-      const storeAnswer = (text, lines) => {
+      const storeAnswer = (text, lines, own = false) => {
         const verdicts = recordAnswer(d.disputeId, lines, text);
         s.answerOpen = false;
         s.selected = unresearchedLines(d);
@@ -5719,7 +5833,7 @@
         setStatus(found ? `Answer saved for everyone on this ${word} (${found}).`
           : isOrder ? 'Answer saved for everyone on this order, but it has no decision line ("Decision: …").'
           : "Answer saved for everyone on this dispute, but it has no verdict sentence (\"The merchant's claim is …\").", found ? 'ok' : 'warn');
-        desk.onAnswer(text, lines, found || '', GM_getValue(AUTHOR_KEY, ''));
+        desk.onAnswer(text, lines, found || '', GM_getValue(AUTHOR_KEY, ''), own);
         answersChanged();
       };
       const saveAnswer = () => {
@@ -5798,7 +5912,7 @@
         s.ownOpen = false;
         ownInput.value = '';
         if (ownNote) ownNote.value = '';
-        storeAnswer(md, isOrder ? [] : picked.length ? picked.map(i => i.line) : inDispute.map(i => i.line));
+        storeAnswer(md, isOrder ? [] : picked.length ? picked.map(i => i.line) : inDispute.map(i => i.line), true);
         try { if (await desk.setOwnAnswer(text)) setStatus('Your answer is saved and is now the case\'s Final answer in Notion.', 'ok'); } catch (e) { setStatus(`Saved here, but Notion said: ${e.message}`, 'warn'); }
         render();
       };
@@ -5873,7 +5987,7 @@
         chatInput,
         h('div', { class: 'row', style: 'margin-top:6px' },
           h('button', { class: 'secondary', type: 'button', text: 'Send to my Claude', title: 'Ctrl+Enter', onclick: () => run(sendChat) })),
-        h('p', { class: 'hint', text: `Runs in your own claude.ai. ${desk.enabled() ? `The thread is saved to the case in Notion, so anyone on this ${word} can see it and carry on in their own Claude.` : 'Saved on this computer (Notion tracking is off).'}` }));
+        h('p', { class: 'hint', text: `Runs in your own claude.ai. ${desk.enabled() ? `The thread is saved to the case in Notion, so anyone on this ${word} can see it and carry on in their own Claude.` : desk.sheetsOn() ? 'Each question and reply also goes in the case doc, and your claude.ai chat is linked in the sheet.' : 'Saved on this computer (Notion tracking is off).'}` }));
 
       desk.setPageData(d);
       const deskCard = desk.card(noteLink);
@@ -6090,7 +6204,8 @@
       setStatus(chatUrl ? 'Sent to your Claude chat for this case. The reply comes back here and onto the case in Notion.'
         : 'Started your Claude chat for this case, with the case and the conversation so far. The reply comes back here and onto the case in Notion.', 'ok');
       render();
-      desk.appendChat([turn]).catch(e => setStatus(`Asked, but Notion said: ${e.message}`, 'warn'));
+      desk.appendChat([turn]).catch(e => setStatus(`Asked, but saving it said: ${e.message}`, 'warn'));
+      if (chatUrl) desk.sheetsLinks({ chat: chatUrl }).catch(e => console.warn('[Tools] sheet link', e));
     }
     // Replies the Claude tabs left for this case, and any question that couldn't be sent
     function chatNews() {
@@ -6103,7 +6218,7 @@
         GM_deleteValue(key);
         delete c.pending[key.slice(CHAT_REPLY_PREFIX.length)];
         if (r.failed) { setStatus(r.failed, 'warn'); continue; }
-        if (r.chatUrl) GM_setValue(CHAT_URL_PREFIX + c.id, r.chatUrl);
+        if (r.chatUrl) { GM_setValue(CHAT_URL_PREFIX + c.id, r.chatUrl); desk.sheetsLinks({ chat: r.chatUrl }).catch(e => console.warn('[Tools] sheet link', e)); }
         const turn = { role: 'A', who: chatWho(), at: chatStamp(), text: r.text };
         c.turns = [...c.turns, turn];
         GM_setValue(CHAT_LOG_PREFIX + c.id, c.turns.slice(-200));
