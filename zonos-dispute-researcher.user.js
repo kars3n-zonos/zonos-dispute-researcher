@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.18.0
+// @version      7.19.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -4446,6 +4446,9 @@
     .cq-more { text-align: center; padding: 16px; color: var(--muted); font-size: 13px; }
     .cq .copy { font-size: 12px; }
     .cq .empty { padding: 36px; }
+    .cq-many, .badge.many { color: #ffffff; background: #b45309; border-color: #b45309; font-weight: 700; margin-right: 6px; }
+    :host([data-theme="dark"]) .cq-many, :host([data-theme="dark"]) .badge.many { color: #111111; background: #f59e0b; border-color: #f59e0b; }
+    .cq-stack { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; cursor: pointer; }
   `;
 
   function createQueue() {
@@ -4455,13 +4458,14 @@
     // Two looks over the same data: 'tools' (the Tools queue) and 'classic' (Portal+). Each keeps its own tab;
     // search, filters and sort are shared
     const skin = () => (queueView() === 'classic' ? 'classic' : 'tools');
-    const defaults = { scope: 'mine', cscope: 'mine', filters: {}, sort: [{ key: 'due', dir: 1 }], group: '', views: [], auto: true };
+    const defaults = { scope: 'mine', cscope: 'mine', filters: {}, sort: [{ key: 'due', dir: 1 }], group: '', views: [], auto: true, stack: true };
     const prefs = { ...defaults, ...GM_getValue(PREFS_KEY, {}) };
-    const savePrefs = () => GM_setValue(PREFS_KEY, { scope: S.scope, cscope: S.cscope, filters: S.filters, sort: S.sort, group: S.group, views: prefs.views, auto: S.auto });
+    const savePrefs = () => GM_setValue(PREFS_KEY, { scope: S.scope, cscope: S.cscope, filters: S.filters, sort: S.sort, group: S.group, views: prefs.views, auto: S.auto, stack: S.stack });
     const S = {
       rows: [], me: null, loadedAt: 0, loading: false, error: '', q: '', scope: prefs.scope, cscope: prefs.cscope, filters: prefs.filters || {}, sort: prefs.sort, group: prefs.group,
       auto: prefs.auto, sel: new Set(), anchor: -1, focus: -1, pop: '', popSearch: '', extra: null, extraFor: '', seenAt: GM_getValue(SEEN_KEY, 0), shown: [], limit: 300,
       open: new Set(),   // Portal+: rows with their details showing
+      stack: prefs.stack !== false, stackMsg: '',   // identical disputes shown as one row (with the access code)
     };
     let autoTimer = null;
     // Follows the portal's light / dark switch as soon as it's flipped, without redrawing the list
@@ -4589,12 +4593,69 @@
       return '';
     }
 
+    // ---- identical disputes as one row (with Batch work's access code): the same company, assignee and status, and
+    // exactly the same disputed lines, claims and questionnaire answers. The first in the list's order stands for the
+    // rest (r._copies); claiming or selecting it does all of them, and opening it works them as one (merged).
+    const stackOn = () => S.stack && batchUnlocked();
+    const idsOf = r => [r.id, ...(r._copies || []).map(c => c.id)];
+    function stackKey(r) {
+      const k = r.type === 'DUTY_DISPUTE_REVIEW' && shapes.key(r.sid);
+      return k && !/^(none|err):/.test(k) ? `${k}|${r.assigneeId}|${r.status}|${r.escalatedTo}` : '';
+    }
+    function stack(rows, mark = true) {
+      if (mark) for (const r of S.rows) r._copies = null;
+      if (!stackOn()) return rows;
+      const out = [];
+      const leads = new Map();
+      for (const r of rows) {
+        const k = stackKey(r);
+        const lead = k && leads.get(k);
+        if (lead) { if (mark) lead._copies.push(r); continue; }
+        if (k) { if (mark) r._copies = []; leads.set(k, r); }
+        out.push(r);
+      }
+      return out;
+    }
+    // The shapes not known yet are worked out in the background (the first time takes a minute for ~900), and the
+    // list is redrawn as they come in
+    function fillShapes(rows) {
+      if (!stackOn() || shapes.busy()) return;
+      let last = 0;
+      shapes.fill(rows, (n, of) => {
+        S.stackMsg = n < of ? `Finding identical disputes… ${n} of ${of}` : '';
+        if (Date.now() - last > 1500 || n >= of) { last = Date.now(); render(); }
+      }).then(n => { if (n) { S.stackMsg = ''; render(); } }).catch(e => console.warn('[Tools] stacking', e));
+    }
+    // Every stack shown is worked as one wherever its row is opened from (a click, a new tab, Prev / Next):
+    // registered again only when the stacks changed
+    let stackSig = '';
+    function registerStacks(rows) {
+      const st = rows.filter(r => r._copies?.length);
+      const sig = st.map(r => `${r.id}:${r._copies.length}:${r._copies[r._copies.length - 1].id}`).join(',');
+      if (sig === stackSig) return;
+      stackSig = sig;
+      if (st.length) merged.adoptMany(st.map(r => ({ lead: r, copies: r._copies })), 'queue');
+    }
+    function prepareOpen(r) { if (r._copies?.length) merged.adoptMany([{ lead: r, copies: r._copies }], 'queue'); }
+    function stackToggle(cls) {
+      if (!batchUnlocked()) return null;
+      return h('label', { class: cls, title: 'Identical disputes (same company, assignee and status; exactly the same lines, claims and questionnaire answers) show as one row with ×N. Claim, select or open it, and what you do is done to all of them.' },
+        h('input', { type: 'checkbox', checked: S.stack, onchange: e => {
+          S.stack = e.target.checked; S.sel.clear(); S.limit = 300; savePrefs();
+          if (!S.stack) { stackSig = ''; merged.dropFrom('queue'); }
+          render();
+        } }), ' Stack identical');
+    }
+
     // ---- drawing
     function render() {
       host.dataset.theme = pageIsDarkSoon() ? 'dark' : 'light';
       host.dataset.skin = skin();
       const me = S.me?.id;
-      const rows = sortRows(visible());
+      const all = sortRows(visible());
+      const rows = stack(all);
+      if (stackOn()) registerStacks(rows);
+      fillShapes(all);
       if (skin() === 'classic') { S.shown = rows; saveNav(rows); renderClassic(rows); return; }
       moreObserver.disconnect();
       searchInput.placeholder = 'Search anything: tracking, entry, master bill, customer, item, HS code, note… (paste a list to match many)';
@@ -4617,10 +4678,11 @@
           S.loading ? h('span', { text: 'Loading…' }) : S.loadedAt ? h('span', { text: `Updated ${new Date(S.loadedAt).toLocaleTimeString()}` }) : null,
           h('label', { title: 'Reloads every minute while nothing is selected' },
             h('input', { type: 'checkbox', checked: S.auto, onchange: e => setAuto(e.target.checked) }), ' Auto-refresh'),
+          stackToggle(''),
           h('button', { class: 'btn', type: 'button', text: '↻ Refresh', disabled: S.loading, onclick: () => load() }),
           viewPicker('btn')));
 
-      const counts = Object.fromEntries(SCOPES.map(s => [s.key, S.rows.filter(r => s.test(r, me)).length]));
+      const counts = Object.fromEntries(SCOPES.map(s => [s.key, stack(S.rows.filter(r => s.test(r, me)), false).length]));
       const scopes = h('div', { class: 'scopes', role: 'tablist' }, SCOPES.map(s =>
         h('button', { class: 'scope', type: 'button', role: 'tab', 'aria-selected': String(S.scope === s.key), onclick: () => { S.scope = s.key; S.sel.clear(); S.focus = -1; savePrefs(); render(); } },
           s.label, h('span', { class: 'count', text: String(counts[s.key]) }))));
@@ -4682,17 +4744,19 @@
       wrap.className = 'q cq';
       searchInput.placeholder = 'Search anything: tracking, entry, customer, item, HS code…';
       const scope = CLASSIC_SCOPES.find(s => s.key === S.cscope) || CLASSIC_SCOPES[0];
-      const counts = Object.fromEntries(CLASSIC_SCOPES.map(s => [s.key, S.rows.filter(r => s.test(r, me)).length]));
+      const counts = Object.fromEntries(CLASSIC_SCOPES.map(s => [s.key, stack(S.rows.filter(r => s.test(r, me)), false).length]));
       const focusEl = root.activeElement === searchInput;
+      const hidden = rows.reduce((a, r) => a + (r._copies?.length || 0), 0);
       const top = h('div', { class: 'cq-top' },
         h('div', {},
           h('div', { class: 'cq-eyebrow', text: 'Entry writer queue' }),
           h('h1', { text: 'Work queue' }),
-          h('div', { class: 'cq-sub', text: `${rows.length} order${rows.length === 1 ? '' : 's'} ${scope.desc} · ${sortText()}` })),
+          h('div', { class: 'cq-sub', text: `${rows.length} order${rows.length === 1 ? '' : 's'} ${scope.desc}${hidden ? ` (${rows.length + hidden} with identical copies)` : ''} · ${sortText()}${S.stackMsg ? ` · ${S.stackMsg}` : ''}` })),
         h('div', { class: 'cq-right' },
           h('span', { text: S.loading ? 'Loading…' : S.loadedAt ? `Updated ${new Date(S.loadedAt).toLocaleTimeString()}` : '' }),
           h('button', { class: 'cq-icon', type: 'button', text: '↻', title: 'Refresh queue (it also refreshes every minute)', 'aria-label': 'Refresh queue', disabled: S.loading, onclick: () => load() }),
           h('span', { class: `mode ${mode}`, text: mode.toUpperCase(), title: 'The portal mode every action here goes to' }),
+          stackToggle('cq-stack'),
           viewPicker('cq-view')));
       const tabs = h('div', { class: 'cq-tabs', role: 'tablist' }, CLASSIC_SCOPES.map(s =>
         h('button', { class: 'cq-tab', type: 'button', role: 'tab', 'aria-selected': String(S.cscope === s.key),
@@ -4721,7 +4785,7 @@
       const allSel = rows.length > 0 && rows.every(r => S.sel.has(r.id));
       const head = h('tr', {},
         h('th', { class: 'cb' }, h('input', { type: 'checkbox', 'aria-label': 'Select every order in this list', checked: allSel,
-          onchange: e => { for (const r of rows) e.target.checked ? S.sel.add(r.id) : S.sel.delete(r.id); render(); } })),
+          onchange: e => { for (const r of rows) for (const id of idsOf(r)) e.target.checked ? S.sel.add(id) : S.sel.delete(id); render(); } })),
         h('th', {}),
         CLASSIC_COLS.map(c => {
           const i = S.sort.findIndex(s => s.key === c.key);
@@ -4747,16 +4811,18 @@
       const open = S.open.has(r.id);
       const title = r.items.length > 1 ? `${r.items[0]} +${r.items.length - 1} more` : r.title;
       const claimedAgo = r.claimedAt ? ` · claimed ${ageText(Date.parse(r.claimedAt))} ago` : '';
+      const n = 1 + (r._copies?.length || 0);
+      const many = n > 1 ? h('span', { class: 'cq-pill cq-many', text: `×${n}`, title: `${n} identical disputes (same company, exactly the same lines, claims and questionnaire answers). Claim, select or open this one, and what you do is done to all ${n}.` }) : null;
       const who = r.assigneeId
         ? h('div', { class: 'cq-who', title: `${r.assigneeName || 'Someone'}${claimedAgo}` },
           h('span', { class: `cq-av${mine ? '' : ' other'}`, text: initials(mine ? S.me?.name || r.assigneeName : r.assigneeName) }),
           h('span', {}, mine ? 'You' : r.assigneeName || 'Someone', h('span', { class: 'muted', style: 'font-size:12px', text: claimedAgo })))
         : r.status === 'OPEN'
-          ? h('div', { class: 'cq-who' }, h('button', { class: 'cq-btn', type: 'button', text: 'Claim', title: 'Claim this order (one click, like the portal\'s own)', onclick: () => claimOne(r) }), h('span', { class: 'muted', text: 'Unclaimed' }))
+          ? h('div', { class: 'cq-who' }, h('button', { class: 'cq-btn', type: 'button', text: n > 1 ? `Claim ${n}` : 'Claim', title: n > 1 ? `Claim all ${n} identical disputes` : 'Claim this order (one click, like the portal\'s own)', onclick: () => claimOne(r) }), h('span', { class: 'muted', text: 'Unclaimed' }))
           : h('span', { class: 'muted', text: 'Unclaimed' });
       return h('tr', { class: `row${S.sel.has(r.id) ? ' sel' : ''}${S.focus === i ? ' focus' : ''}`, tabindex: '-1', 'data-i': String(i),
         onclick: e => { if (e.target.closest('input,button,a,select')) return; openRow(r, e); },
-        onauxclick: e => { if (e.button === 1 && !e.target.closest('a')) { e.preventDefault(); GM_openInTab(location.origin + r.url, { active: false, insert: true }); } } },
+        onauxclick: e => { if (e.button === 1 && !e.target.closest('a')) { e.preventDefault(); prepareOpen(r); GM_openInTab(location.origin + r.url, { active: false, insert: true }); } } },
         h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: S.sel.has(r.id), 'aria-label': `Select ${r.label} ${r.ref}`, onclick: e => selectClick(r, i, e) })),
         h('td', {}, h('button', { class: 'cq-chev', type: 'button', text: '›', 'aria-expanded': String(open), 'aria-label': open ? 'Hide details' : 'Show details',
           onclick: () => { open ? S.open.delete(r.id) : S.open.add(r.id); render(); } })),
@@ -4764,12 +4830,12 @@
         h('td', { style: 'white-space:nowrap' }, h('span', { class: `cq-pill cq-st-${r.status}`, text: human2(r.status) }),
           r.escalatedTo ? h('span', { class: 'cq-pill cq-esc', text: '↑', title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null),
         h('td', {},
-          h('div', { class: 'cq-line' }, r.createdMs > S.seenAt ? h('span', { class: 'new', title: 'New since your last visit' }) : null,
+          h('div', { class: 'cq-line' }, r.createdMs > S.seenAt ? h('span', { class: 'new', title: 'New since your last visit' }) : null, many,
             h('a', { href: r.url, title: r.items.join(' · ') || r.title, onclick: e => openRow(r, e) }, title)),
           r.claims || r.problem ? h('div', { class: 'cq-small', title: r.detail || r.claims, text: r.claims || r.problem }) : null),
         h('td', {},
           h('div', { class: 'cq-line cq-mono' }, r.ref, h('button', { class: 'copy', type: 'button', title: 'Copy', 'aria-label': `Copy ${r.ref}`, text: '⧉', onclick: () => copy(r.ref, `Copied ${r.ref}`) })),
-          r.entryNo && r.tracking ? h('div', { class: 'cq-small', text: `Entry ${r.entryNo}` }) : r.mbol && r.ref !== r.mbol ? h('div', { class: 'cq-small', text: `MBOL ${r.mbol}` }) : null),
+          n > 1 ? h('div', { class: 'cq-small', text: `+${n - 1} identical` }) : r.entryNo && r.tracking ? h('div', { class: 'cq-small', text: `Entry ${r.entryNo}` }) : r.mbol && r.ref !== r.mbol ? h('div', { class: 'cq-small', text: `MBOL ${r.mbol}` }) : null),
         h('td', {}, h('div', { class: 'cq-line', title: r.customer || r.consignee || '', text: r.customer || r.consignee || '—' }),
           r.customer && r.consignee && r.consignee !== r.customer ? h('div', { class: 'cq-small', title: r.consignee, text: r.consignee }) : null),
         h('td', { class: due.cls === 'err' ? 'cq-due-err' : due.cls === 'warn' ? 'cq-due-warn' : '' },
@@ -4790,21 +4856,26 @@
       ].filter(([, v]) => v);
       return h('tr', { class: 'cq-detail' }, h('td', { colspan: String(CLASSIC_COLS.length + 2) },
         h('dl', { class: 'cq-dl' }, fields.map(([k, v]) => h('div', {}, h('dt', { text: k }), h('dd', { text: String(v) })))),
+        r._copies?.length ? h('div', { class: 'cq-pre' }, h('b', { text: `${r._copies.length} identical copies, done with this one: ` }),
+          r._copies.slice(0, 60).map(c => c.ref).join(' · '), r._copies.length > 60 ? ` …and ${r._copies.length - 60} more` : '') : null,
         r.items.length > 1 ? h('div', { class: 'cq-pre' }, h('b', { text: `${r.items.length} items: ` }), r.items.join(' · ')) : null,
         r.escalationNote ? h('div', { class: 'cq-pre' }, h('b', { text: 'Escalation note: ' }), r.escalationNote) : null,
         r.detail ? h('div', { class: 'cq-pre', text: r.detail }) : null,
         h('div', { class: 'cq-actions' },
           h('a', { class: 'cq-btn dark', href: r.url, text: `Open ${r.type === 'DUTY_DISPUTE_REVIEW' ? 'dispute' : 'order'} ↗`, onclick: e => openRow(r, e) }),
-          h('button', { class: 'cq-btn', type: 'button', text: 'Open in a new tab', onclick: () => GM_openInTab(location.origin + r.url, { active: false, insert: true }) }),
+          h('button', { class: 'cq-btn', type: 'button', text: 'Open in a new tab', onclick: () => prepareOpen(r) || GM_openInTab(location.origin + r.url, { active: false, insert: true }) }),
           h('button', { class: 'cq-btn', type: 'button', text: 'Copy link', onclick: () => copy(location.origin + r.url, 'Link copied.') }),
           r.tracking || r.entryNo ? h('button', { class: 'cq-btn', type: 'button', text: `Copy ${r.tracking ? 'tracking' : 'entry'}`, onclick: () => copy(r.tracking || r.entryNo, `Copied ${r.tracking || r.entryNo}`) }) : null)));
     }
     // One click, like the portal's own Claim (through the same request); the row updates at once
+    // A stacked row claims all of its identical copies with it
     async function claimOne(r) {
-      const res = await portal.act('BrokerageWorkOrderClaim', [r.id]);
-      if (res.failed.length) { toast(`Couldn't claim ${r.ref}: ${res.failed[0].error}`, true); return; }
-      Object.assign(r, { assigneeId: S.me?.id || '', assigneeName: S.me?.name || 'You', claimedAt: new Date().toISOString(), _hay: '' });
-      toast(`Claimed ${r.ref}.`);
+      const rows = [r, ...(r._copies || [])];
+      const res = await merged.holding(rows.map(x => x.id), () => portal.act('BrokerageWorkOrderClaim', rows.map(x => x.id)));
+      if (res.failed.length && !res.done.length) { toast(`Couldn't claim ${r.ref}: ${res.failed[0].error}`, true); return; }
+      const done = new Set(res.done);
+      for (const x of rows) if (done.has(x.id)) Object.assign(x, { assigneeId: S.me?.id || '', assigneeName: S.me?.name || 'You', claimedAt: new Date().toISOString(), _hay: '' });
+      toast(rows.length > 1 ? `Claimed ${res.done.length} identical disputes (${r.ref} and ${rows.length - 1} more).${res.failed.length ? ` ${res.failed.length} failed: ${res.failed[0].error}` : ''}` : `Claimed ${r.ref}.`, res.failed.length > 0);
       render();
       load({ quiet: true });
     }
@@ -4900,7 +4971,7 @@
       const allSel = rows.length > 0 && rows.every(r => S.sel.has(r.id));
       const head = h('tr', {},
         h('th', { class: 'cb' }, h('input', { type: 'checkbox', 'aria-label': 'Select every order shown', checked: allSel,
-          onchange: e => { for (const r of rows) e.target.checked ? S.sel.add(r.id) : S.sel.delete(r.id); render(); } })),
+          onchange: e => { for (const r of rows) for (const id of idsOf(r)) e.target.checked ? S.sel.add(id) : S.sel.delete(id); render(); } })),
         COLS.map(c => {
           const i = S.sort.findIndex(s => s.key === c.key);
           const arrow = i < 0 ? '' : `${S.sort[i].dir > 0 ? '▲' : '▼'}${S.sort.length > 1 ? i + 1 : ''}`;
@@ -4917,7 +4988,7 @@
             const members = groups.get(g) || rows.filter(x => groupOf(x) === g);
             const on = members.every(x => S.sel.has(x.id));
             body.push(h('tr', { class: 'group' }, h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: on, 'aria-label': `Select all in ${g}`,
-              onchange: e => { for (const x of members) e.target.checked ? S.sel.add(x.id) : S.sel.delete(x.id); render(); } })),
+              onchange: e => { for (const x of members) for (const id of idsOf(x)) e.target.checked ? S.sel.add(id) : S.sel.delete(id); render(); } })),
               h('td', { colspan: String(COLS.length), text: `${g} · ${members.length}` })));
           }
         }
@@ -4954,11 +5025,12 @@
       const isNew = r.createdMs > S.seenAt;
       const tr = h('tr', { class: `row${S.sel.has(r.id) ? ' sel' : ''}${S.focus === i ? ' focus' : ''}`, tabindex: '-1', 'data-i': String(i),
         onclick: e => { if (e.target.closest('input,button,a')) return; openRow(r, e); },
-        onauxclick: e => { if (e.button === 1) { e.preventDefault(); GM_openInTab(location.origin + r.url, { active: false, insert: true }); } } },
+        onauxclick: e => { if (e.button === 1) { e.preventDefault(); prepareOpen(r); GM_openInTab(location.origin + r.url, { active: false, insert: true }); } } },
         h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: S.sel.has(r.id), 'aria-label': `Select ${r.label} ${r.ref}`, onclick: e => selectClick(r, i, e) })),
         h('td', {}, h('span', { class: 'badge', text: r.label, title: r.label })),
         h('td', {}, h('div', { class: 'badges' }, h('span', { class: `badge st-${r.status}`, text: human2(r.status) }), r.escalatedTo ? h('span', { class: 'badge esc', text: `↑ ${r.escalatedTo === 'ENGINEERING' ? 'Eng' : human2(r.escalatedTo)}`, title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null)),
-        h('td', {}, h('div', { class: 'title', title: r.items.join(' · ') || r.title }, isNew ? h('span', { class: 'new', title: 'New since your last visit' }) : null, r.title),
+        h('td', {}, h('div', { class: 'title', title: r.items.join(' · ') || r.title }, isNew ? h('span', { class: 'new', title: 'New since your last visit' }) : null,
+          r._copies?.length ? h('span', { class: 'badge many', text: `×${r._copies.length + 1}`, title: `${r._copies.length + 1} identical disputes: claim, select or open this one, and what you do is done to all of them` }) : null, r.title),
           r.problem ? h('div', { class: 'sub', title: r.detail, text: r.problem }) : null),
         h('td', {}, h('span', { class: 'ref' }, h('a', { href: r.url, onclick: e => openRow(r, e) }, r.ref)),
           h('button', { class: 'copy', type: 'button', title: 'Copy', 'aria-label': `Copy ${r.ref}`, text: '⧉', onclick: () => copy(r.ref, `Copied ${r.ref}`) }),
@@ -4992,13 +5064,13 @@
       if (e.shiftKey && S.anchor >= 0) {
         const [a, b] = [Math.min(S.anchor, i), Math.max(S.anchor, i)];
         const on = !S.sel.has(r.id);
-        for (const x of S.shown.slice(a, b + 1)) on ? S.sel.add(x.id) : S.sel.delete(x.id);
-      } else if (S.sel.has(r.id)) S.sel.delete(r.id);
-      else S.sel.add(r.id);
+        for (const x of S.shown.slice(a, b + 1)) for (const id of idsOf(x)) on ? S.sel.add(id) : S.sel.delete(id);
+      } else { const on = !S.sel.has(r.id); for (const id of idsOf(r)) on ? S.sel.add(id) : S.sel.delete(id); }
       S.anchor = i;
       render();
     }
     function openRow(r, e) {
+      prepareOpen(r);
       if (e) {
         e.preventDefault?.();
         if (e.ctrlKey || e.metaKey || e.button === 1) { GM_openInTab(location.origin + r.url, { active: false, insert: true }); return; }
@@ -5055,7 +5127,7 @@
       else if (e.key === 'k') { moveFocus(-1); e.preventDefault(); }
       else if (e.key === 'x' && r) { selectClick(r, S.focus, e); e.preventDefault(); }
       else if (e.key === 'Enter' && r) { openRow(r); e.preventDefault(); }
-      else if (e.key === 'o' && r) { GM_openInTab(location.origin + r.url, { active: false, insert: true }); e.preventDefault(); }
+      else if (e.key === 'o' && r) { prepareOpen(r); GM_openInTab(location.origin + r.url, { active: false, insert: true }); e.preventDefault(); }
       else if (e.key === 'Escape') { if (S.pop) S.pop = ''; else S.sel.clear(); render(); }
     }
     document.addEventListener('keydown', onKey, true);
@@ -5079,7 +5151,7 @@
     }
     function openTabs(rows) {
       if (rows.length > 10 && !confirm(`Open ${rows.length} tabs?`)) return;
-      for (const r of rows.slice(0, 40)) GM_openInTab(location.origin + r.url, { active: false, insert: true });
+      for (const r of rows.slice(0, 40)) { prepareOpen(r); GM_openInTab(location.origin + r.url, { active: false, insert: true }); }
     }
 
     // ---- bulk actions: a dialog says exactly what will happen, in which mode, before anything is sent
@@ -5884,10 +5956,10 @@
       update();
       // Two or more open copies can be worked as one, on the portal's own page for one of them
       const open = disputeState(g).open.length;
-      const asOne = merged.record()?.key === g.key;
+      const asOne = merged.byKey(g.key);
       const oneB = open > 1 ? h('button', { class: 'secondary', type: 'button', text: asOne ? 'Open the one you work ↗' : `Work as one (${open}) ↗`,
         title: `Opens one of these ${open} in the portal. What you save or submit there with the portal's own buttons is done to the other ${open - 1} too.`,
-        onclick: () => { if (asOne) window.open(merged.record().leadUrl, '_blank'); else { merged.start(g); draw(); } } }) : null;
+        onclick: () => { if (asOne) window.open(asOne.leadUrl, '_blank'); else { merged.start(g); draw(); } } }) : null;
       return h('div', { class: 'bt-card' }, membersOf(g), claims, stateEl, h('div', { class: 'row', style: 'flex-wrap:wrap' }, saveB, doneB, oneB));
     }
     function orderCard(g) {
@@ -5925,81 +5997,211 @@
     return el;
   }
 
-  /* ---- working identical disputes as one (Batch work's "Work as one") */
+  /* ---- working identical disputes as one (Batch work's "Work as one", and Portal+'s stacked rows) */
 
-  // One dispute of an identical group stands for all of them: you work it on the portal's own page, and when the
-  // portal saves decisions on it or completes it, the same is done to every other copy. Each copy is read again
-  // first (its lines, claims and questionnaire answers) and only one still exactly the same as the dispute you
-  // worked, of the same company and still open, gets anything. Completing the copies asks first.
+  // A dispute's shape key (disputeShape), kept on this computer so stacking identical disputes in the queue is
+  // instant after the first time. Only for showing: before anything is copied, every copy is read again.
+  const SHAPES_KEY = 'zt:shapes';
+  const SHAPE_TTL = 3 * 86400000;
+  const shapes = (() => {
+    let cache = null;
+    const all = () => cache || (cache = GM_getValue(SHAPES_KEY, {}));
+    const save = () => {
+      const now = Date.now();
+      for (const [id, e] of Object.entries(all())) if (now - e.at > SHAPE_TTL) delete cache[id];
+      GM_setValue(SHAPES_KEY, cache);
+    };
+    // '' while not known yet; a key starting "none:" or "err:" matches nothing
+    const key = sid => { const e = all()[sid]; return e && Date.now() - e.at < SHAPE_TTL ? e.k : ''; };
+    const qa = {};   // questionnaire session -> its answers as text, for this page's life
+    let running = null;
+    // Works out the shape of each dispute row that has none yet, 8 at a time; `onProgress(done, of)`
+    function fill(rows, onProgress = () => {}) {
+      if (running) return running;
+      const need = rows.filter(r => r.type === 'DUTY_DISPUTE_REVIEW' && r.sid && !key(r.sid));
+      if (!need.length) return Promise.resolve(0);
+      running = (async () => {
+        let n = 0;
+        for (let i = 0; i < need.length; i += 8) {
+          await Promise.all(need.slice(i, i + 8).map(async r => {
+            try {
+              const d = await fetchDispute(r.sid, r.orgId);
+              for (const it of d?.items || []) {
+                const s = it.questionnaireSessionId;
+                if (s && !(s in qa)) { try { qa[s] = await questionnaireText(s, d.organizationId); } catch { /* unreadable: matches nothing */ } }
+              }
+              const sh = d?.id ? disputeShape(d, qa) : null;
+              all()[r.sid] = { k: sh?.slots.length ? sh.key : `none:${r.sid}`, at: Date.now() };
+            } catch {
+              all()[r.sid] = { k: `err:${r.sid}`, at: Date.now() - SHAPE_TTL + 10 * 60000 };   // tried again in 10 minutes
+            }
+          }));
+          n = Math.min(need.length, i + 8);
+          onProgress(n, need.length);
+          if (i % 80 === 0) save();
+        }
+        save();
+        return n;
+      })().finally(() => { running = null; });
+      return running;
+    }
+    // A dispute that was corrected has a new shape
+    const forget = sid => { if (all()[sid]) { delete cache[sid]; save(); } };
+    return { key, fill, forget, busy: () => !!running };
+  })();
+
+  // One dispute stands for all of its identical copies: you work it on the portal's own page, and what the portal
+  // does to it (claim, release, saved decisions, Submit) is done to every other copy. Before decisions or Submit
+  // are copied, each copy is read again (its lines, claims and questionnaire answers) and only one still exactly
+  // the same as the dispute you worked, of the same company and still open, gets anything. Submitting the copies
+  // waits 5 seconds, with Cancel, on the bar at the bottom.
   const MERGED_KEY = 'zt:batch:merged';
   const merged = (() => {
-    const record = () => GM_getValue(MERGED_KEY, null);
-    // Saved only while it's still the same group (ending it in another tab wins)
-    const keep = m => { if (record()?.lead === m.lead) GM_setValue(MERGED_KEY, m); };
-    const R = { running: false, again: '', stop: false, msg: '', kind: '' };
+    // lead dispute id -> record (7.18.0 kept a single record)
+    const records = () => { const v = GM_getValue(MERGED_KEY, null) || {}; return v.lead ? { [v.lead]: v } : v; };
+    const record = lead => records()[lead] || null;
+    const byKey = key => Object.values(records()).find(m => m.key === key) || null;
+    const recordOn = id => (id ? Object.values(records()).find(m => m.lead === id || m.copies.some(c => c.id === id)) || null : null);
+    const put = m => { const all = records(); all[m.lead] = m; GM_setValue(MERGED_KEY, all); };
+    // Saved only while it's still worked as one (stopping it in another tab wins)
+    const keep = m => { if (record(m.lead)) put(m); };
+    const drop = lead => { const all = records(); delete all[lead]; GM_setValue(MERGED_KEY, all); };
+    const R = { job: null, stop: false, cancel: false, counting: false, msgs: {} };
+    const jobs = [];
+    const held = new Set();   // work orders being claimed from the queue: their replies aren't copied again
     let host = null, box = null, lastPath = '';
 
+    // Batch work's button: asks first
     function start(g) {
       const open = g.members.filter(m => m.d && DECIDABLE.has(m.d.status)).sort((a, b) => (a.r.dueMs ?? Infinity) - (b.r.dueMs ?? Infinity));
       if (open.length < 2) return;
       const [lead, ...rest] = open;
-      const cur = record();
-      if (cur && cur.key !== g.key && !confirm(`You're already working ${cur.leadRef} as one (×${cur.copies.length + 1}). Stop that and work this group as one instead?`)) return;
-      if (!confirm(`Work these ${open.length} identical disputes as one?\n\n${lead.r.ref} opens in a new tab. Work it with the portal's own buttons: the decisions you save there are copied to the other ${rest.length}, and when you press Submit there you're asked whether to submit them too.\n\nEach copy is read again first and left alone if it no longer matches exactly.\n\nPortal mode: ${portal.mode().toUpperCase()}`)) return;
-      GM_setValue(MERGED_KEY, {
-        lead: lead.d.id, leadRef: lead.r.ref, leadUrl: lead.r.url, org: lead.d.organizationId, customer: lead.r.customer || lead.r.consignee || '',
-        key: g.key, mode: portal.mode(), copies: rest.map(m => ({ id: m.d.id, ref: m.r.ref, url: m.r.url })), results: {}, pending: '', at: Date.now(),
-      });
+      if (!confirm(`Work these ${open.length} identical disputes as one?\n\n${lead.r.ref} opens in a new tab. Work it with the portal's own buttons: the decisions you save there are copied to the other ${rest.length}, and when you press Submit there the others are submitted too (after 5 seconds, with Cancel).\n\nEach copy is read again first and left alone if it no longer matches exactly.\n\nPortal mode: ${portal.mode().toUpperCase()}`)) return;
+      adopt(lead.r, rest.map(m => m.r), g.key);
       window.open(lead.r.url, '_blank');
     }
-    function end() {
-      const m = record();
-      if (R.running) { R.stop = true; R.again = ''; }
-      if (m && !confirm(`Stop working ${m.leadRef} as one? Nothing already copied is undone; from now on what you do there stays on that dispute only.`)) return;
-      GM_deleteValue(MERGED_KEY);
-      R.msg = '';
+    // A stacked row opened from the queue (or Batch work): its record, made or brought up to date. Any other
+    // record that shares one of these disputes is dropped, so a dispute is only ever copied to from one place.
+    // `stacks`: [{ lead, copies, key }] of queue rows; `from`: 'queue' (Portal+'s stacks) or 'batch'
+    function adoptMany(stacks, from) {
+      const all = records();
+      for (const { lead, copies, key = shapes.key(lead.sid) } of stacks) {
+        if (!copies.length || !key) continue;
+        const ids = new Set([lead.sid, ...copies.map(c => c.sid)]);
+        for (const [k, m] of Object.entries(all)) {
+          const stale = Date.now() - m.at > 7 * 86400000 && !m.pending;
+          if (k !== lead.sid && R.job?.lead !== k && (stale || ids.has(m.lead) || m.copies.some(c => ids.has(c.id)))) delete all[k];
+        }
+        const old = all[lead.sid];
+        all[lead.sid] = {
+          lead: lead.sid, leadWo: lead.id, leadRef: lead.ref, leadUrl: lead.url, org: lead.orgId, customer: lead.customer || lead.consignee || '',
+          key, mode: portal.mode(), copies: copies.map(c => ({ id: c.sid, wo: c.id, ref: c.ref, url: c.url })), from,
+          results: old?.key === key ? old.results || {} : {}, pending: old?.pending || '', submitLater: old?.key === key && !!old.submitLater, at: Date.now(),
+        };
+      }
+      GM_setValue(MERGED_KEY, all);
+    }
+    const adopt = (lead, copies, key) => adoptMany([{ lead, copies, key }], 'batch');
+    // Stacking turned off: the queue's stacks are no longer worked as one (one being copied right now finishes)
+    function dropFrom(from) {
+      const all = records();
+      for (const [k, m] of Object.entries(all)) if (m.from === from && R.job?.lead !== k && !m.pending) delete all[k];
+      GM_setValue(MERGED_KEY, all);
+      draw();
+    }
+    function end(lead) {
+      const m = record(lead);
+      if (!m) return;
+      if (!confirm(`Stop working ${m.leadRef} as one? Nothing already copied is undone; from now on what you do there stays on that dispute only.`)) return;
+      if (R.job?.lead === lead) { R.stop = true; R.cancel = true; }
+      for (let i = jobs.length - 1; i >= 0; i--) if (jobs[i].lead === lead) jobs.splice(i, 1);
+      drop(lead);
+      delete R.msgs[lead];
       draw();
     }
 
-    // The portal's own reply to a save or complete on the dispute you work
+    // The portal's own replies: a save or Submit on a dispute worked as one, a claim or release of its work order
+    // (from its page, one order at a time), or a correction (which changes what it is)
     function onReply(op, status, json) {
-      if (op !== 'BrokerageDutyDisputeClaimsDecide' && op !== 'BrokerageDutyDisputeComplete') return;
-      const m = batchUnlocked() ? record() : null;
-      const d = json?.data && Object.values(json.data)[0];
-      if (!m || status >= 300 || json.errors?.length || d?.id !== m.lead) return;
-      queue(op === 'BrokerageDutyDisputeComplete' ? 'complete' : 'decide');
+      if (!batchUnlocked() || status >= 300 || !json?.data || json.errors?.length) return;
+      const d = Object.values(json.data)[0];
+      if (op === 'BrokerageDutyDisputeClaimsCorrect' && d?.id) { shapes.forget(d.id); return; }
+      if (op === 'BrokerageDutyDisputeClaimsDecide' || op === 'BrokerageDutyDisputeComplete') {
+        if (d?.id && record(d.id)) queue(d.id, op === 'BrokerageDutyDisputeComplete' ? 'complete' : 'decide');
+        return;
+      }
+      if (op === 'BrokerageWorkOrderClaim' || op === 'BrokerageWorkOrderRelease') {
+        const wos = [];
+        (function walk(o, depth) {
+          if (!o || typeof o !== 'object' || depth > 6) return;
+          if (typeof o.id === 'string' && 'assigneeName' in o) wos.push(o.id);
+          for (const v of Array.isArray(o) ? o : Object.values(o)) walk(v, depth + 1);
+        })(json.data, 0);
+        if (wos.length !== 1 || held.has(wos[0])) return;
+        const m = Object.values(records()).find(x => x.leadWo === wos[0]);
+        if (m) queue(m.lead, op === 'BrokerageWorkOrderClaim' ? 'claim' : 'release');
+      }
     }
-    // One copy run at a time; a save made while one runs is copied right after it
-    function queue(kind) {
-      if (R.running) { if (kind === 'complete' || !R.again) R.again = kind; return; }
-      run(kind);
+    // Claims from the queue (the whole stack at once): their replies aren't copied again
+    async function holding(woIds, fn) {
+      woIds.forEach(id => held.add(id));
+      try { return await fn(); } finally { setTimeout(() => woIds.forEach(id => held.delete(id)), 3000); }
     }
-    async function run(kind) {
-      let m = record();
-      if (!m) return;
-      if (kind === 'complete' && !confirm(`${m.leadRef} is submitted. Submit the other ${m.copies.length} identical disputes too, with the same decisions?\n\nPortal mode: ${portal.mode().toUpperCase()}. This can't be undone from here.\n\nCancel copies the decisions only; you can submit them later from the bar at the bottom.`)) kind = 'decide';
-      Object.assign(R, { running: true, stop: false, kind, msg: '' });
-      m.pending = kind;
-      keep(m);
-      draw();
+    // One job at a time; a save made while one runs is copied right after it (Submit wins over a save)
+    const isDecision = k => k === 'decide' || k === 'complete';
+    function queue(lead, kind) {
+      const same = jobs.find(j => j.lead === lead && (j.kind === kind || (isDecision(j.kind) && isDecision(kind))));
+      if (same) { if (kind === 'complete') same.kind = 'complete'; return; }
+      jobs.push({ lead, kind });
+      if (!R.job) next();
+    }
+    async function next() {
+      const job = jobs.shift();
+      if (!job) { R.job = null; draw(); return; }
+      let m = record(job.lead);
+      if (!m) { next(); return; }
+      Object.assign(R, { job, stop: false, cancel: false, counting: false });
+      R.msgs[m.lead] = '';
       try {
-        R.msg = await copy(m, kind === 'complete');
-        m = record() ? { ...record(), results: m.results, pending: '', completeLater: kind !== 'complete' && m.leadDone } : null;
-        if (m) keep(m);
+        if (job.kind === 'claim' || job.kind === 'release') R.msgs[m.lead] = await claimCopies(m, job.kind);
+        else {
+          let complete = job.kind === 'complete';
+          m.pending = job.kind;
+          keep(m);
+          if (complete) complete = await countdown(m);
+          draw();
+          R.msgs[m.lead] = await copy(m, complete);
+          const cur = record(m.lead);
+          if (cur) keep({ ...cur, results: m.results, pending: '', submitLater: !complete && !!m.leadDone });
+        }
       } catch (e) {
-        R.msg = e.message;
+        R.msgs[m.lead] = e.message;
         console.warn('[Tools] work as one', e);
-        const cur = record();
+        const cur = record(m.lead);
         if (cur) keep({ ...cur, results: m.results, pending: '' });
       }
-      R.running = false;
+      R.job = null;
       draw();
-      const next = R.again;
-      R.again = '';
-      if (next && record()) run(next);
+      next();
+    }
+    // 5 seconds to cancel before the copies are submitted
+    async function countdown(m) {
+      R.counting = true;
+      for (let s = 5; s > 0 && !R.cancel; s--) { say(m, `Submitting the other ${m.copies.length} in ${s}s…`); await sleep(1000); }
+      R.counting = false;
+      if (R.cancel) { say(m, 'Not submitted: the copies keep the decisions only.'); return false; }
+      return true;
+    }
+    async function claimCopies(m, kind) {
+      if (portal.mode() !== m.mode) throw new Error(`The portal is in ${portal.mode().toUpperCase()} mode, but these disputes were stacked in ${m.mode.toUpperCase()} mode. Nothing was copied.`);
+      const wos = m.copies.map(c => c.wo).filter(Boolean);
+      if (!wos.length) return '';
+      say(m, `${kind === 'claim' ? 'Claiming' : 'Releasing'} the other ${wos.length}…`);
+      const res = await holding(wos, () => portal.act(kind === 'claim' ? 'BrokerageWorkOrderClaim' : 'BrokerageWorkOrderRelease', wos));
+      return `${kind === 'claim' ? 'Claimed' : 'Released'} the other ${res.done.length}${res.failed.length ? ` · ${res.failed.length} failed: ${res.failed[0].error}` : ''}.`;
     }
     async function copy(m, complete) {
-      if (portal.mode() !== m.mode) throw new Error(`The portal is in ${portal.mode().toUpperCase()} mode, but these disputes were grouped in ${m.mode.toUpperCase()} mode. Nothing was copied.`);
+      if (portal.mode() !== m.mode) throw new Error(`The portal is in ${portal.mode().toUpperCase()} mode, but these disputes were stacked in ${m.mode.toUpperCase()} mode. Nothing was copied.`);
       const qa = {};
       const shapeOf = async d => {
         for (const i of d.items || []) {
@@ -6008,10 +6210,10 @@
         }
         return disputeShape(d, qa);
       };
-      say('Reading the dispute you worked again…');
+      say(m, 'Reading the dispute you worked again…');
       const lead = await fetchDispute(m.lead, m.org);
       const ls = await shapeOf(lead);
-      if (ls.key !== m.key) throw new Error(`${m.leadRef} no longer matches the group it was picked from (a line, claim or answer changed there), so nothing was copied. Stop working as one and group them again in Batch work.`);
+      if (ls.key !== m.key) throw new Error(`${m.leadRef} no longer matches the disputes it was stacked with (a line, claim or answer changed there), so nothing was copied.`);
       m.leadDone = !DECIDABLE.has(lead.status);
       if (complete && !m.leadDone) throw new Error(`${m.leadRef} isn't submitted, so the others weren't either.`);
       const want = ls.slots.map(s => s.claim.decision);
@@ -6033,7 +6235,7 @@
             if (complete) { await completeDispute(d.id, d.organizationId); m.results[c.id] = { state: 'completed' }; }
             else m.results[c.id] = { state: 'decided' };
           } catch (e) { m.results[c.id] = { state: 'skipped', why: e.message }; }
-          say(`${complete ? 'Submitting' : 'Copying decisions to'} the others… ${++n} of ${todo.length}`);
+          say(m, `${complete ? 'Submitting' : 'Copying decisions to'} the others… ${++n} of ${todo.length}`);
         }));
       }
       const counts = {};
@@ -6042,26 +6244,26 @@
         counts.closed && `${counts.closed} already closed`, counts.skipped && `${counts.skipped} left alone (see below)`, counts.waiting && `${counts.waiting} not reached`].filter(Boolean).join(' · ');
     }
 
-    // ---- the bar at the bottom of the page: on the dispute you work, on its copies, and while copying
+    // ---- the bar at the bottom of the page: on a dispute worked as one, on its copies, and while copying
     const BAR_CSS = `
       :host { all: initial; --bg:#ffffff; --fg:#18181b; --muted:#71717a; --line:#e4e4e7; --soft:#f4f4f5; --accent:#b45309; --accent-fg:#ffffff; --warn:#b45309; --err:#b91c1c; }
       :host([data-theme="dark"]) { --bg:#18181b; --fg:#f4f4f5; --muted:#a1a1aa; --line:#3f3f46; --soft:#27272a; --accent:#f59e0b; --accent-fg:#111111; --warn:#fbbf24; --err:#f87171; }
       .bar { position: fixed; z-index: 2147482990; left: 50%; bottom: 16px; transform: translateX(-50%); width: min(620px, calc(100vw - 32px)); max-height: 50vh; overflow-y: auto;
         font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-left: 4px solid var(--accent);
         border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.3); padding: 10px 14px; box-sizing: border-box; }
+      .n { display: inline-block; padding: 0 8px; margin-right: 6px; border-radius: 999px; background: var(--accent); color: var(--accent-fg); font-weight: 700; }
       b { font-weight: 600; } p { margin: 4px 0 0; } .muted { color: var(--muted); } .warn { color: var(--warn); } .err { color: var(--err); }
       .row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
       button { font: inherit; cursor: pointer; background: transparent; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; }
       button:hover { background: var(--soft); } button.primary { background: var(--accent); color: var(--accent-fg); border: 0; font-weight: 600; }
       button:disabled { opacity: .55; cursor: default; }
       a { color: inherit; } summary { cursor: pointer; color: var(--muted); margin-top: 6px; } ul { margin: 4px 0 0; padding-left: 18px; }`;
-    function say(text) { R.msg = text; draw(); }
+    function say(m, text) { R.msgs[m.lead] = text; draw(); }
     function draw() {
-      const m = batchUnlocked() ? record() : null;
-      const id =(location.pathname.match(/^\/duty-disputes\/([^/?#]+)/) || [])[1] || '';
-      const onLead = m && id === m.lead;
-      const onCopy = m && !onLead && m.copies.some(c => c.id === id);
-      if (!m || !(onLead || onCopy || R.running || m.pending)) { if (host) host.hidden = true; return; }
+      const all = batchUnlocked() ? records() : {};
+      const id = (location.pathname.match(/^\/duty-disputes\/([^/?#]+)/) || [])[1] || '';
+      const m = recordOn(id) && all[recordOn(id).lead] ? recordOn(id) : (R.job && all[R.job.lead]) || Object.values(all).find(x => x.pending) || null;
+      if (!m) { if (host) host.hidden = true; return; }
       if (!host) {
         host = h('div', { id: 'zt-merged-host' });
         const root = host.attachShadow({ mode: 'open' });
@@ -6070,25 +6272,30 @@
       if (!host.isConnected) document.body.append(host);
       host.hidden = false;
       host.dataset.theme = pageIsDark() ? 'dark' : 'light';
-      const all = m.copies.length + 1;
+      const onLead = id === m.lead;
+      const onCopy = !onLead && m.copies.some(c => c.id === id);
+      const busy = R.job?.lead === m.lead;
+      const msg = R.msgs[m.lead] || '';
+      const all1 = m.copies.length + 1;
       const skipped = m.copies.filter(c => m.results[c.id]?.state === 'skipped');
-      const btn = (text, onclick, cls = '') => h('button', { type: 'button', class: cls, text, disabled: R.running && !/Stop/.test(text), onclick });
+      const btn = (text, onclick, cls = '') => h('button', { type: 'button', class: cls, text, onclick });
       const lead = h('a', { href: m.leadUrl, text: m.leadRef });
       box.replaceChildren(...[
-        h('div', {}, h('b', { text: `Working as one · ×${all}` }), h('span', { class: 'muted', text: ` · ${m.customer} · ${m.mode.toUpperCase()}` })),
-        onCopy ? h('p', { class: 'warn' }, `This dispute is one of the ${all} being worked as one through `, lead, '. Work that one: what you do there is copied here.')
-          : onLead ? h('p', { text: `This dispute stands for ${all} identical disputes. Decide the claims and press Submit here as usual: decisions are copied to the other ${m.copies.length} as you save them, and Submit asks whether to submit them too.` })
+        h('div', {}, h('span', { class: 'n', text: `×${all1}` }), h('b', { text: 'identical disputes, worked as one' }), h('span', { class: 'muted', text: ` · ${m.customer} · ${m.mode.toUpperCase()}` })),
+        onCopy ? h('p', { class: 'warn' }, `This dispute is one of the ${all1} worked as one through `, lead, '. Work that one: what you do there is done here too.')
+          : onLead ? h('p', { text: `Claim, decide and Submit here as usual: each is done to the other ${m.copies.length} too. Decisions are copied as you save them; Submit submits the others after 5 seconds.` })
             : h('p', {}, 'Copying from ', lead, ' to its identical copies.'),
-        R.msg ? h('p', { class: /no longer|isn't|mode, but|nothing was/i.test(R.msg) ? 'err' : '', text: R.msg }) : null,
-        !R.running && m.pending ? h('p', { class: 'warn', text: 'Copying stopped part-way (the page was closed or reloaded).' }) : null,
+        msg ? h('p', { class: /no longer|isn't|mode, but|nothing was|failed/i.test(msg) ? 'err' : '', text: msg }) : null,
+        !busy && m.pending ? h('p', { class: 'warn', text: 'Copying stopped part-way (the page was closed or reloaded).' }) : null,
         skipped.length ? h('details', {}, h('summary', { text: `${skipped.length} left alone` }),
           h('ul', {}, skipped.slice(0, 50).map(c => h('li', {}, h('a', { href: c.url, target: '_blank', text: c.ref }), `: ${m.results[c.id].why}`)))) : null,
         h('div', { class: 'row' }, ...[
-          R.running ? btn('Stop', () => { R.stop = true; R.again = ''; }) : null,
-          !R.running && onLead ? btn('Copy decisions now', () => queue('decide')) : null,
-          !R.running && m.pending ? btn('Finish copying', () => queue(m.pending), 'primary') : null,
-          !R.running && !m.pending && m.completeLater ? btn(`Submit the other ${m.copies.length}…`, () => queue('complete'), 'primary') : null,
-          btn('Stop working as one', end),
+          busy && R.counting ? btn('Cancel', () => { R.cancel = true; }, 'primary') : null,
+          busy && !R.counting ? btn('Stop', () => { R.stop = true; }) : null,
+          !busy && onLead ? btn('Copy decisions now', () => queue(m.lead, 'decide')) : null,
+          !busy && m.pending ? btn('Finish copying', () => queue(m.lead, m.pending), 'primary') : null,
+          !busy && !m.pending && m.submitLater ? btn(`Submit the other ${m.copies.length}`, () => queue(m.lead, 'complete'), 'primary') : null,
+          btn('Stop working as one', () => end(m.lead)),
         ].filter(Boolean))].filter(Boolean));
     }
     // Called on every route check: redraws only when the page changed
@@ -6099,7 +6306,7 @@
       draw();
     }
     replyWatchers.add(onReply);
-    return { record, start, onRoute };
+    return { record, byKey, start, adoptMany, dropFrom, holding, onRoute };
   })();
 
   /* ------------------------------------------------- dashboard: the panel */
