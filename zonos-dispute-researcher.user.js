@@ -2760,15 +2760,28 @@
       const isLog = b => b.type === 'toggle' && (b.toggle.rich_text || []).map(t => t.plain_text).join('') === LOG_TITLE;
       let i = -1;
       for (let k = kids.length - 1; k >= 0; k--) if (isLog(kids[k])) { i = k; break; }
+      let out;
       if (i < 0) {
         const r = await notion('PATCH', `/blocks/${pageId}/children`, { children: [logToggle([])] });
-        return { log: r.results[0].id, prev: kids.length ? kids[kids.length - 1].id : null };
-      }
-      return { log: kids[i].id, prev: i > 0 ? kids[i - 1].id : null };
+        out = { log: r.results[0].id, prev: kids.length ? kids[kids.length - 1].id : null };
+      } else out = { log: kids[i].id, prev: i > 0 ? kids[i - 1].id : null };
+      logIds[pageId] = out.log;
+      GM_setValue(LOG_IDS, logIds);
+      return out;
     }
+    // Each case page's Case log toggle, once found, so a log line is one call instead of reading the whole page
+    const LOG_IDS = 'desk:logIds';
+    const logIds = GM_getValue(LOG_IDS, {});
     async function addLog(pageId, lines) {
+      const children = lines.map(logItem);
+      if (logIds[pageId]) {
+        // If the toggle was deleted in Notion, it's found (or made) again below
+        const ok = await notion('PATCH', `/blocks/${logIds[pageId]}/children`, { children }).then(() => true, () => false);
+        if (ok) return;
+        delete logIds[pageId];
+      }
       const { log } = await pageLayout(pageId);
-      await notion('PATCH', `/blocks/${log}/children`, { children: lines.map(logItem) });
+      await notion('PATCH', `/blocks/${log}/children`, { children });
     }
     async function addAboveLog(pageId, blocks) {
       if (!blocks.length) return;
@@ -2860,11 +2873,13 @@
       Object.assign(props, claimProps(assign, me, name));
       if (resolution) props.Resolution = { rich_text: resolutionText(resolution, me, name) };
       if (Object.keys(props).length) page = await notion('PATCH', `/pages/${page.id}`, { properties: props });
-      // One read of the page's blocks for both: new blocks go just above the Case log, the line goes inside it
-      const { log: logId, prev } = await pageLayout(page.id);
+      // New blocks go just above the Case log (one read of the page's blocks finds where), the line inside it
       const above = [...(withSnapshot ? [snapshot(ctx)] : []), ...(extra || [])];
-      if (above.length) await notion('PATCH', `/blocks/${page.id}/children`, prev ? { after: prev, children: above } : { position: { type: 'start' }, children: above });
-      await notion('PATCH', `/blocks/${logId}/children`, { children: [logItem(logLine)] });
+      if (above.length) {
+        const { log: logId, prev } = await pageLayout(page.id);
+        await notion('PATCH', `/blocks/${page.id}/children`, prev ? { after: prev, children: above } : { position: { type: 'start' }, children: above });
+        await notion('PATCH', `/blocks/${logId}/children`, { children: [logItem(logLine)] });
+      } else await addLog(page.id, [logLine]);
       return page;
     }
 
@@ -3036,12 +3051,17 @@
           const k = `desk:opened:${ent.id}`;
           if (Date.now() - GM_getValue(k, 0) > OPEN_LOG_THROTTLE_MS) {
             GM_setValue(k, Date.now());
-            // The visit's portal snapshot needs the portal's data
+            // The visit's portal snapshot needs the portal's data. It's added only when that data changed since the
+            // last snapshot on this computer; otherwise the visit is just a line in the Case log.
             sleep(3000)
               .then(() => {
                 if (D.ent !== ent) return null;
                 const ctx = caseContext(ent);
-                return apply(ctx, { log: `Opened ${midSentence(ctx.kind)} ${ent.id}.`, withSnapshot: true });
+                const facts = ctx.hasData ? ctx.facts.join('\n') : '';
+                const snapKey = `desk:snapshot:${ent.id}`;
+                const fresh = !!facts && GM_getValue(snapKey, '') !== facts;
+                return apply(ctx, { log: `Opened ${midSentence(ctx.kind)} ${ent.id}.${fresh ? '' : ' (Portal data unchanged since the last snapshot.)'}`, withSnapshot: fresh })
+                  .then(p => { if (p && fresh && !dryRun()) GM_setValue(snapKey, facts); return p; });
               })
               .then(p => { if (p && D.ent === ent) { D.msg = dryRun() ? 'Test mode: would log this visit' : 'Visit logged in Notion'; changed(); } })
               .catch(e => console.warn('[Dispute Desk] logging the visit', e));
