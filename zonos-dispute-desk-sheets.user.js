@@ -3,7 +3,7 @@
 // @namespace    zonos-brokerage-sheets
 // @updateURL    https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-desk-sheets.user.js
 // @downloadURL  https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-desk-sheets.user.js
-// @version      7.10.0
+// @version      7.11.0
 // @description  Sheets edition: cases go to the team Google Sheet, each with a Google Doc of its answers and decisions. Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @match        https://brokerage.dashboard.zonos.com/*
 // @match        https://claude.ai/*
@@ -2802,7 +2802,7 @@
       let j = null;
       try { j = JSON.parse(r.responseText); } catch { /* not JSON */ }
       if (!j?.ok) throw new Error(`Google Sheet: ${j?.error || `the web app answered ${r.status}`}`);
-      if (j.doc) { D.sheetCase = { id: ctx.id, doc: j.doc, sheet: j.sheet }; changed(); }
+      if (j.doc) { D.sheetCase = { id: ctx.id, doc: j.doc, sheet: j.sheet, links: j.links || {} }; changed(); }
       return j;
     }
     // A portal action, for the sheet: claim and release set who's on it; wait, escalate and resume set Status;
@@ -2979,7 +2979,7 @@
         const ctx = caseContext(D.ent);
         portalName().then(name => sheetsCall('answer', ctx, {
           text, sentence: finalSentence(text) || summary || '', who: author || name,
-          kind: own ? 'Own answer' : `Claude's answer${lines.length ? ` · line${lines.length > 1 ? 's' : ''} ${lines.join(', ')}` : ''}`,
+          kind: own ? 'Answer we found' : `Claude's answer${lines.length ? ` · line${lines.length > 1 ? 's' : ''} ${lines.join(', ')}` : ''}`,
         })).then(() => { D.msg = 'Answer saved to the Google Sheet and the case doc.'; changed(); })
           .catch(e => { D.msg = e.message; changed(); });
       }
@@ -3292,6 +3292,33 @@
       return true;
     }
 
+    // Case details from the Research tab: the Front, Slack and AI chat links, and the answer we found. The Sheets
+    // edition puts the links in the row (the answer reaches the sheet and doc through onAnswer); Notion gets the
+    // links on the case and the answer as its Final answer. Says where it saved, or '' when neither is set up.
+    async function saveCaseDetails({ front, slack, chat, answer }) {
+      if (!D.ent || dryRun()) return '';
+      const ctx = caseContext(D.ent);
+      if (sheetsOn()) {
+        if (front || slack || chat) await sheetsCall('links', ctx, { front, slack, chat, create: true });
+        return 'the Google Sheet';
+      }
+      if (!enabled()) return '';
+      const name = await portalName();
+      const page = D.row || await apply(ctx, { log: `Case started from Case details in Tools (${midSentence(ctx.kind)} ${ctx.id}).`, create: true, explicit: true });
+      if (!page) throw new Error("Couldn't create the case in Notion.");
+      const props = {};
+      if (front) props.Front = { url: front };
+      if (slack) props['Slack Thread'] = { url: slack };
+      if (chat) props['Chat Link'] = { url: chat };
+      if (Object.keys(props).length) D.row = await notion('PATCH', `/pages/${page.id}`, { properties: props });
+      else D.row = page;
+      if (answer) await setOwnAnswer(answer);
+      await addLog(page.id, [`${stamp()} (portal${name ? `, ${name}` : ''}): Case details saved in Tools${answer ? ', with the answer we found' : ''}.`]);
+      D.state = 'tracked';
+      changed();
+      return 'the case in Notion';
+    }
+
     // The workspace's people, so Settings can offer "pick yourself" for Assigned
     async function people() {
       const r = await notion('GET', '/users?page_size=100');
@@ -3306,7 +3333,19 @@
         return txt('Final answer') || txt('Claude Final Answer');
       },
       finalIsOwn: () => !!(D.row?.properties?.['Final answer']?.rich_text || []).length,
-      setOwnAnswer, loadChat, appendChat, sheetsOn,
+      setOwnAnswer, loadChat, appendChat, sheetsOn, saveCaseDetails,
+      // The open case's Front, Slack and AI chat links, where they're known (the sheet row or the Notion case)
+      caseLinks: () => {
+        if (sheetsOn()) return (D.sheetCase && D.ent && D.sheetCase.id === D.ent.id && D.sheetCase.links) || {};
+        const url = p => D.row?.properties?.[p]?.url || '';
+        return D.row ? { front: url('Front'), slack: url('Slack Thread'), chat: url('Chat Link') } : {};
+      },
+      // The open case's Google Doc (Sheets edition), for the Doc tab
+      caseDoc: () => (sheetsOn() && D.sheetCase && D.ent && D.sheetCase.id === D.ent.id ? D.sheetCase.doc || '' : ''),
+      docNote: async text => {
+        if (!sheetsOn() || !D.ent) throw new Error('No case doc for this page.');
+        return sheetsCall('note', caseContext(D.ent), { text: `${(await portalName()) || 'Note'}: ${text}` });
+      },
       // Sheets edition: the row's Front, Slack or AI chat link (only for a case already in the sheet)
       sheetsLinks: links => (sheetsOn() && D.ent && !dryRun() ? sheetsCall('links', caseContext(D.ent), links) : Promise.resolve(null)),
       sheetsPing: async () => {
@@ -5242,21 +5281,52 @@
       if (researchFooter) researchFooter.hidden = idle;
     }
 
+    // The Doc tab (Sheets edition): the case's Google Doc as a scratch pad, inside the panel. Google may refuse to
+    // show itself in a frame, so there's always the link out, and the note box adds lines to the doc either way.
+    const docFrame = h('iframe', { class: 'entry-frame', title: 'Case doc', referrerpolicy: 'no-referrer', allow: 'clipboard-read; clipboard-write' });
+    const docLink = h('a', { target: '_blank', rel: 'noopener', text: 'Open in a new tab' });
+    const docNote = h('textarea', { class: 'answer', rows: 2, placeholder: 'Quick note for the doc (goes in its log with your name)', 'aria-label': 'Note for the case doc', style: 'min-height:48px' });
+    const docNoteStatus = h('p', { class: 'hint', style: 'margin:4px 0 0' });
+    const addDocNote = async () => {
+      const text = docNote.value.trim();
+      if (!text) return;
+      docNoteStatus.textContent = 'Adding…';
+      try {
+        await desk.docNote(text);
+        docNote.value = '';
+        docNoteStatus.textContent = 'Added to the doc.';
+        docFrame.src = docFrame.src;   // show it
+      } catch (e) { docNoteStatus.textContent = e.message; }
+    };
+    const docId = url => (String(url || '').match(/\/d\/([\w-]+)/) || String(url || '').match(/[?&]id=([\w-]+)/) || [])[1] || '';
+    function showDoc() {
+      const id = docId(desk.caseDoc());
+      if (!id) return;
+      const src = `https://docs.google.com/document/d/${id}/edit?rm=minimal`;
+      if (docFrame.src !== src) docFrame.src = src;
+      docLink.href = `https://docs.google.com/document/d/${id}/edit`;
+    }
+
     const views = {
       classify: h('section', { class: 'view', hidden: true }, classifyBody),
       quote: h('section', { class: 'view', hidden: true }, quoteBody),
       analytics: h('section', { class: 'view', hidden: true }, analyticsBody),
       dispute: h('section', { class: 'view' }, body, researchIdle,
         researchFooter = h('footer', {},
-          h('div', { class: 'actions', style: 'flex-wrap:wrap' }, ccBtn, openBtn, copyBtn),
+          h('div', { class: 'actions', style: 'flex-wrap:wrap' }, openBtn),
           status)),
+      doc: h('section', { class: 'view', hidden: true },
+        h('div', { class: 'entry-bar' }, h('span', { class: 'entry-caption', text: 'Case doc: answers, decisions and notes' }), docLink),
+        docFrame,
+        h('footer', {}, docNote, h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'secondary', type: 'button', text: 'Add note', onclick: () => addDocNote() })), docNoteStatus)),
       entry: h('section', { class: 'view', hidden: true },
         h('div', { class: 'entry-bar' }, entryCaption, entryNewTab),
         entryBlocked, entryFrame),
       settings: h('section', { class: 'view', hidden: true }, settingsBody),
     };
     const tab = (name, text) => h('button', { class: 'tab', type: 'button', role: 'tab', 'aria-selected': 'false', text, onclick: () => setView(name) });
-    const tabs = { dispute: tab('dispute', 'Research'), classify: tab('classify', 'Classify'), quote: tab('quote', 'Quote'), entry: tab('entry', 'Entry Assistant') };
+    const tabs = { dispute: tab('dispute', 'Research'), doc: tab('doc', 'Doc'), classify: tab('classify', 'Classify'), quote: tab('quote', 'Quote'), entry: tab('entry', 'Entry Assistant') };
+    tabs.doc.hidden = true;   // only when the case has a Google Doc
     const gear = h('button', { class: 'icon', type: 'button', 'aria-label': 'Settings', title: 'Settings: options, keys and connections', 'aria-pressed': 'false', text: '⚙︎', onclick: () => setView(view === 'settings' ? lastView : 'settings') });
     // Overlay (floats over the page) or side by side (the page narrows beside it); your choice is remembered
     const LAYOUT_KEY = 'zt:layout';
@@ -5266,14 +5336,14 @@
     const panel = h('aside', { class: 'panel', hidden: true, 'aria-label': 'Tools' },
       grip,
       h('header', {},
-        h('nav', { class: 'tabs', role: 'tablist' }, tabs.dispute, tabs.classify, tabs.quote, tabs.entry),
+        h('nav', { class: 'tabs', role: 'tablist' }, tabs.dispute, tabs.doc, tabs.classify, tabs.quote, tabs.entry),
         h('div', { class: 'header-actions' },
           analyticsBtn,
           layoutBtn,
           gear,
           h('button', { class: 'icon', type: 'button', 'aria-label': 'Close panel', title: 'Close', text: '×', onclick: () => close() }))),
       toolstrip,
-      views.dispute, views.classify, views.quote, views.analytics, views.entry, views.settings);
+      views.dispute, views.doc, views.classify, views.quote, views.analytics, views.entry, views.settings);
     root.append(h('style', { text: PANEL_CSS }), h('div', { class: 'wrap' }, launch, panel));
 
     let view = 'dispute';
@@ -5291,13 +5361,20 @@
       if (name === 'dispute') showResearchIdle();
       refreshTools();
       if (name === 'entry') showEntryPage();
+      if (name === 'doc') showDoc();
       if (name === 'settings') refreshNotesKeyNote();
     }
     setView('dispute');
 
     // The desk redraws the Research tab when the case changes, and hands over Claude Code's answers,
-    // which are saved like a pasted answer (shared with the team) but not written back to Notion
-    desk.subscribe(() => { if (state && !panel.hidden) render(); });
+    // which are saved like a pasted answer (shared with the team) but not written back to Notion.
+    // The Doc tab shows only while the open case has a Google Doc.
+    desk.subscribe(() => {
+      const hasDoc = !!desk.caseDoc();
+      tabs.doc.hidden = !hasDoc;
+      if (!hasDoc && view === 'doc') setView('dispute');
+      if (state && !panel.hidden) render();
+    });
     desk.setImporter(({ text, lines }) => {
       if (!state) return;
       const d = state.data;
@@ -5416,7 +5493,6 @@
     // While the panel is open, coworkers' answers are picked up every 15 seconds and when you come back to the tab
     const NOTES_POLL_MS = 15000;
     let pollTimer = null;
-    let chatTimer = null;
     // The panel is only redrawn when the answers changed, so reading or selecting text in an open answer
     // isn't interrupted every 15 seconds. The first sync also re-picks the lines to tick, since coworkers'
     // answers may have just arrived.
@@ -5458,13 +5534,10 @@
           desk.pollAnswers();
         }
       }, NOTES_POLL_MS);
-      // Chat replies come back faster than the shared answers sync
-      chatTimer = setInterval(() => { if (state && !panel.hidden) chatNews(); }, 3000);
     }
     function stopPolling() {
       clearInterval(pollTimer);
-      clearInterval(chatTimer);
-      pollTimer = chatTimer = null;
+      pollTimer = null;
     }
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && state && !panel.hidden) syncNow();
@@ -5486,10 +5559,8 @@
     // Coming back from the Claude tab: it may have filled the message box and kept Claude's answer
     window.addEventListener('focus', () => {
       if (!state || panel.hidden) return;
-      if (state.chat) state.chat.fromNotion = false;   // teammates may have added to the chat: read it again
       render();
       claudeTabNews();
-      chatNews();
     });
 
     const setStatus = (text, kind = '') => { status.textContent = text; status.className = `status ${kind}`; };
@@ -5897,43 +5968,12 @@
       const finalCard = finalText && h('div', { class: 'final-card' },
         h('p', { class: 'final-text', text: finalText }),
         h('p', { class: 'hint', style: 'margin:4px 0 0', text: fromNotion ? (desk.finalIsOwn() ? 'Your team\'s own answer, from the case in Notion (overrides Claude\'s)' : 'Claude\'s, from the case in Notion') : `From the answer saved ${shortDate(newest.createdAt)}` }));
-      // Your own answer, overriding Claude's or without Claude: saved like any answer (newest wins, shared with
-      // everyone) and as the case's Final answer in Notion
-      // Made once per page, so redraws (lookups finishing) don't clear what you're typing
-      const ownInput = s.ownInput || (s.ownInput = h('textarea', { class: 'answer', rows: 4, placeholder: isOrder ? 'Your decision and why, one sentence to one paragraph (as you\'d put it on the page)' : 'Your answer for the lines you ticked, one sentence to one paragraph', 'aria-label': 'Your own answer' }));
-      const ownNote = isOrder && (s.ownNote || (s.ownNote = h('textarea', { class: 'answer', rows: 2, placeholder: `${guideFor(d.type).note} to paste on the page (optional)`, 'aria-label': 'Your note' })));
-      const saveOwn = async () => {
-        const text = clean(ownInput.value);
-        if (!text) return;
-        const note = ownNote ? clean(ownNote.value) : '';
-        const md = [`${FINAL_LABEL} ${text}`, isOrder && `**Decision:** ${text}`, isOrder && note && `**${guideFor(d.type).note}:** ${note}`].filter(Boolean).join('\n\n');
-        s.ownOpen = false;
-        ownInput.value = '';
-        if (ownNote) ownNote.value = '';
-        storeAnswer(md, isOrder ? [] : picked.length ? picked.map(i => i.line) : inDispute.map(i => i.line), true);
-        try { if (await desk.setOwnAnswer(text)) setStatus('Your answer is saved and is now the case\'s Final answer in Notion.', 'ok'); } catch (e) { setStatus(`Saved here, but Notion said: ${e.message}`, 'warn'); }
-        render();
-      };
-      const ownBlock = s.ownOpen
-        ? h('div', { style: 'margin-top:8px' }, ownInput, ownNote,
-            h('div', { class: 'row', style: 'margin-top:6px' },
-              h('button', { class: 'primary', type: 'button', text: 'Save my answer', onclick: () => run(saveOwn) }),
-              h('button', { class: 'secondary', type: 'button', text: 'Cancel', onclick: () => { s.ownOpen = false; render(); } })))
-        : h('button', { class: 'secondary', type: 'button', text: finalText ? 'Use my own answer instead' : 'Write my own answer', title: "Overrides Claude's answer for everyone, or answers without Claude.", onclick: () => { s.ownOpen = true; s.answerOpen = false; render(); ownInput.focus(); } });
-      const answerSection = (isOrder || inDispute.length > 0) && h('div', { class: 'section' },
+      const answerSection = (finalCard || replyBlock || newest) && h('div', { class: 'section' },
         h('p', { class: 'label', text: 'Answer' }),
         finalCard,
         syncState,
         replyBlock,
-        newest && h('div', { class: 'answers' }, answerCard(newest)),
-        ownBlock,
-        s.answerOpen
-          ? h('div', {},
-              answerInput,
-              h('div', { class: 'row', style: 'margin-top:6px' },
-                h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: saveAnswer }),
-                h('button', { class: 'secondary', type: 'button', text: 'Cancel', onclick: () => { s.answerOpen = false; render(); } })))
-          : h('button', { class: 'secondary', type: 'button', text: "Paste Claude's answer", title: `Saved as Markdown and shared with everyone on this ${word}.`, onclick: () => { s.answerOpen = true; render(); answerInput.focus(); } }));
+        newest && h('div', { class: 'answers' }, answerCard(newest)));
 
       showSyncState(pad);
       // Redraws happen while lookups finish; if you're typing in a box that gets moved (the website box),
@@ -5963,34 +6003,41 @@
         "The HTS lookups for Claude's prompt are off until the Entry Assistant token is saved in ",
         noteLink('Settings', () => setView('settings')), '.');
 
-      // The case chat: the whole thread (from Notion once the case is there), and the next question, which goes
-      // to your own claude.ai. The thread loads again when the case turns up in Notion or you come back to the tab.
-      if (!s.chat || s.chat.id !== d.disputeId) {
-        s.chat = { id: d.disputeId, turns: GM_getValue(CHAT_LOG_PREFIX + d.disputeId, []), pending: {}, input: null };
-        loadCaseChat();
-      } else if (desk.hasRow() && !s.chat.fromNotion && !s.chat.loading) loadCaseChat();
-      const c = s.chat;
-      const chatInput = c.input || (c.input = h('textarea', { class: 'answer', rows: 3, 'aria-label': 'Your question for Claude', placeholder: 'Ask Claude about this case…',
-        onkeydown: e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(sendChat); } } }));
-      const shownTurns = c.showAll ? c.turns : c.turns.slice(-6);
-      const chatSection = h('div', { class: 'section' },
-        h('p', { class: 'label', text: 'Chat' }),
-        c.turns.length > shownTurns.length && noteLink(`Show all ${c.turns.length} messages`, () => { c.showAll = true; render(); }),
-        shownTurns.length
-          ? h('div', { class: 'chat' }, shownTurns.map(t => h('div', { class: `chat-turn ${t.role === 'Q' ? 'q' : 'a'}` },
-              h('p', { class: 'chat-who', text: t.role === 'Q' ? `${t.who} · ${t.at}` : `Claude, in ${t.who}'s chat · ${t.at}` }),
-              t.role === 'Q' ? h('p', { style: 'margin:0;white-space:pre-wrap', text: t.text }) : h('div', { class: 'md saved' }, renderMarkdown(t.text)))))
-          : h('p', { class: 'hint', text: c.loading ? 'Loading the chat…' : `No questions on this ${word} yet.` }),
-        Object.keys(c.pending).length > 0 && h('p', { class: 'hint', text: "Waiting for Claude's reply in your claude.ai tab…" }),
-        chatInput,
-        h('div', { class: 'row', style: 'margin-top:6px' },
-          h('button', { class: 'secondary', type: 'button', text: 'Send to my Claude', title: 'Ctrl+Enter', onclick: () => run(sendChat) })),
-        h('p', { class: 'hint', text: `Runs in your own claude.ai. ${desk.enabled() ? `The thread is saved to the case in Notion, so anyone on this ${word} can see it and carry on in their own Claude.` : desk.sheetsOn() ? 'Each question and reply also goes in the case doc, and your claude.ai chat is linked in the sheet.' : 'Saved on this computer (Notion tracking is off).'}` }));
+      // Case details: the case's Front conversation, Slack thread and AI chat links, and the answer we found.
+      // Saved to the case (the Google Sheet row and its doc, or the Notion case); links already known are filled in.
+      const known = desk.caseLinks();
+      const linkField = (key, label) => s[key] || (s[key] = h('input', { type: 'text', placeholder: label, 'aria-label': label, autocomplete: 'off', spellcheck: 'false' }));
+      const frontIn = linkField('frontIn', 'Front conversation link');
+      const slackIn = linkField('slackIn', 'Slack thread link');
+      const chatIn = linkField('chatIn', 'AI chat link (claude.ai)');
+      for (const [el, v] of [[frontIn, known.front], [slackIn, known.slack], [chatIn, known.chat || GM_getValue(CHAT_URL_PREFIX + d.disputeId, '')]]) {
+        if (v && !el.value && root.activeElement !== el) el.value = v;   // what's known, without overwriting your typing
+      }
+      const foundIn = s.foundIn || (s.foundIn = h('textarea', { class: 'answer', rows: 4, 'aria-label': 'The answer we found', placeholder: 'The answer we found: the decision and why, one sentence up to a paragraph' }));
+      const saveDetails = async () => {
+        const answer = foundIn.value.trim();
+        if (answer) {
+          storeAnswer(`${FINAL_LABEL} ${answer}`, isOrder ? [] : picked.length ? picked.map(i => i.line) : inDispute.map(i => i.line), true);
+          foundIn.value = '';
+        }
+        const where = await desk.saveCaseDetails({ front: frontIn.value.trim(), slack: slackIn.value.trim(), chat: chatIn.value.trim(), answer });
+        setStatus(where ? `Saved to ${where}.` : 'Saved on this computer (no Google Sheet or Notion set up).', 'ok');
+        render();
+      };
+      const detailsSection = h('div', { class: 'section' },
+        h('p', { class: 'label', text: 'Case details' }),
+        h('div', { class: 'row' }, frontIn),
+        h('div', { class: 'row', style: 'margin-top:6px' }, slackIn),
+        h('div', { class: 'row', style: 'margin-top:6px' }, chatIn),
+        h('div', { style: 'margin-top:6px' }, foundIn),
+        h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => run(saveDetails) })),
+        h('p', { class: 'hint', text: desk.sheetsOn() ? 'Links go in the sheet row; the answer goes in the Answer cell and the case doc, with your name.'
+          : desk.enabled() ? "Links go on the case in Notion; the answer becomes the case's Final answer, with your name." : 'Saved on this computer.' }));
 
       desk.setPageData(d);
       const deskCard = desk.card(noteLink);
       if (isOrder) {
-        rest.replaceChildren(...[deskCard, orderSection, answerSection, chatSection, tokenHint].filter(Boolean));
+        rest.replaceChildren(...[deskCard, orderSection, answerSection, detailsSection, tokenHint].filter(Boolean));
       } else rest.replaceChildren(...[
         deskCard,
         h('div', { class: 'section' },
@@ -6010,7 +6057,7 @@
         docsBlock,
         valueHint,
         answerSection,
-        chatSection,
+        detailsSection,
         tokenHint,
       ].filter(Boolean));
 
@@ -6140,98 +6187,6 @@
       const warning = lookupWarning();
       if (skipped.length) setStatus(`Opened Claude, but couldn't download: ${skipped.join('; ')}.${warning}`, 'warn');
       else setStatus(`Opened Claude in a new tab. The prompt and files go into its message box; nothing is sent until you press Enter there.${warning}`, warning ? 'warn' : 'ok');
-    }
-
-    /* ---- the case chat: each question runs in your own claude.ai (your seat, your login), and the thread is
-       kept on the case in Notion so anyone opening the case sees it and can carry on in their own Claude */
-    const chatStamp = () => new Date().toLocaleString('sv-SE', { hour12: false }).slice(0, 16);
-    const chatWho = () => desk.myName() || GM_getValue(AUTHOR_KEY, '') || 'Me';
-    const turnKey = t => `${t.role}|${t.at}|${(t.text || '').slice(0, 60)}`;
-    // Notion has everyone's turns; this computer may hold some Notion didn't take yet
-    function mergeTurns(remote, local) {
-      const seen = new Set(remote.map(turnKey));
-      return [...remote, ...local.filter(t => !seen.has(turnKey(t)))].sort((a, b) => a.at.localeCompare(b.at));
-    }
-    async function loadCaseChat() {
-      const s = state;
-      const c = s?.chat;
-      if (!c || c.loading) return;
-      c.loading = true;
-      try {
-        const remote = await desk.loadChat();
-        if (remote) {
-          c.turns = mergeTurns(remote, c.turns);
-          GM_setValue(CHAT_LOG_PREFIX + c.id, c.turns.slice(-200));
-        }
-      } catch (e) { console.warn('[Tools] case chat', e); }
-      c.fromNotion = desk.hasRow();
-      c.loading = false;
-      if (state === s) render();
-    }
-    // A new chat (yours, on this case) starts with what Claude needs: the case, the research answer and the
-    // thread so far. Party names and tracking numbers are left out, as in the research prompts.
-    function chatSeed(d, turns, question) {
-      const L = ["I'm a customs broker at Zonos, picking up a Claude chat about one case. You don't have the earlier conversation, so here's what you need.", '',
-        '## The case', `- ${d.kind === 'workOrder' ? d.label : 'Duty dispute'}`];
-      for (const f of desk.caseFacts().filter(f => !/^(consignee|receiver|sender|importer|buyer|tracking)/i.test(f)).slice(0, 40)) L.push(`- ${f}`);
-      const newest = visibleAnswers(loadNotes(d.disputeId))[0];
-      if (newest) L.push('', `## The research answer (${[newest.author, shortDate(newest.createdAt)].filter(Boolean).join(' · ')})`, newest.text.slice(0, 12000));
-      if (turns.length) {
-        L.push('', '## The chat so far');
-        for (const t of turns.slice(-30)) L.push('', t.role === 'Q' ? `**${t.who} asked (${t.at}):** ${t.text}` : `**Claude answered (${t.at}):** ${t.text.slice(0, 6000)}`);
-      }
-      L.push('', '## My question', question, '',
-        'Answer it directly. Check facts on the web and with the entry-assistant skill when they matter. If it calls for a decision, make one (never "waiting"), and give anything I need to paste into the portal as plain text.');
-      return L.join('\n');
-    }
-    async function sendChat() {
-      const s = state;
-      const c = s?.chat;
-      const question = (c?.input?.value || '').trim();
-      if (!question) return;
-      const chatUrl = GM_getValue(CHAT_URL_PREFIX + c.id, '');
-      const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-      const prompt = chatUrl ? question : chatSeed(s.data, c.turns, question);
-      GM_setValue(HANDOFF_PREFIX + id, { id, createdAt: Date.now(), disputeId: c.id, lines: [], prompt, files: [], chat: true });
-      const turn = { role: 'Q', who: chatWho(), at: chatStamp(), text: question };
-      c.turns = [...c.turns, turn];
-      GM_setValue(CHAT_LOG_PREFIX + c.id, c.turns.slice(-200));
-      c.pending[id] = { at: Date.now() };
-      c.input.value = '';
-      GM_openInTab(`${chatUrl || 'https://claude.ai/new'}#zdr=${id}`, { active: true, insert: true, setParent: true });
-      setStatus(chatUrl ? 'Sent to your Claude chat for this case. The reply comes back here and onto the case in Notion.'
-        : 'Started your Claude chat for this case, with the case and the conversation so far. The reply comes back here and onto the case in Notion.', 'ok');
-      render();
-      desk.appendChat([turn]).catch(e => setStatus(`Asked, but saving it said: ${e.message}`, 'warn'));
-      if (chatUrl) desk.sheetsLinks({ chat: chatUrl }).catch(e => console.warn('[Tools] sheet link', e));
-    }
-    // Replies the Claude tabs left for this case, and any question that couldn't be sent
-    function chatNews() {
-      const c = state?.chat;
-      if (!c || panel.hidden) return;
-      for (const key of GM_listValues()) {
-        if (!key.startsWith(CHAT_REPLY_PREFIX)) continue;
-        const r = GM_getValue(key, null);
-        if (!r || r.caseId !== c.id) continue;
-        GM_deleteValue(key);
-        delete c.pending[key.slice(CHAT_REPLY_PREFIX.length)];
-        if (r.failed) { setStatus(r.failed, 'warn'); continue; }
-        if (r.chatUrl) { GM_setValue(CHAT_URL_PREFIX + c.id, r.chatUrl); desk.sheetsLinks({ chat: r.chatUrl }).catch(e => console.warn('[Tools] sheet link', e)); }
-        const turn = { role: 'A', who: chatWho(), at: chatStamp(), text: r.text };
-        c.turns = [...c.turns, turn];
-        GM_setValue(CHAT_LOG_PREFIX + c.id, c.turns.slice(-200));
-        desk.appendChat([turn]).catch(e => setStatus(`Claude replied, but Notion said: ${e.message}`, 'warn'));
-        render();
-      }
-      for (const [id, p] of Object.entries(c.pending)) {
-        const f = GM_getValue(FILL_PREFIX + id, null);
-        if (!f || p.told) continue;
-        if (f.login) { p.told = true; setStatus('Claude asked you to sign in. Once you have, your question goes in by itself; press Enter there if it isn\'t sent.', 'warn'); }
-        else if (f.sent === false) {
-          p.told = true;
-          setStatus(f.typed ? "Your question is in Claude's message box but wasn't sent: press Enter there. The reply still comes back here." : "Claude's message box couldn't be filled, so your question is on your clipboard: paste it there and press Enter.", 'warn');
-        } else if (f.sent) { p.told = true; GM_deleteValue(FILL_PREFIX + id); }
-      }
     }
 
     return {
