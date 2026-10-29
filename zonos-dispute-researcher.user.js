@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.13.1
+// @version      7.14.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Notion case tracking, Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -138,6 +138,10 @@
     }
     return true;
   }
+  // The same, asked at most every 2 seconds (it makes the browser work out the page's styles)
+  let darkAt = 0;
+  let darkWas = true;
+  const pageIsDarkSoon = () => { if (Date.now() - darkAt > 2000) { darkAt = Date.now(); darkWas = pageIsDark(); } return darkWas; };
 
   /* ------------------------------------------------------------------ setup */
 
@@ -188,6 +192,14 @@
     for (const x of listHandoffs()) {
       if (Date.now() - x.createdAt > HANDOFF_TTL_MS) GM_deleteValue(HANDOFF_PREFIX + x.id);
     }
+  }
+  // The clean-ups read every stored record, so they run at most every 6 hours, once the browser is idle
+  function purgeSometimes(...fns) {
+    const k = 'zt:lastPurge';
+    if (Date.now() - GM_getValue(k, 0) < 6 * 3600 * 1000) return;
+    GM_setValue(k, Date.now());
+    const run = () => fns.forEach(fn => { try { fn(); } catch (e) { console.warn('[Dispute Researcher] clean-up', e); } });
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 15000 }); else setTimeout(run, 3000);
   }
 
   /* ------------------------------------------- memory: what's been researched */
@@ -649,6 +661,17 @@
   }
 
   // Headings, paragraphs, lists, quotes, code blocks, tables and rules; single line breaks are kept
+  // A folded answer's body: its Markdown becomes HTML only once it's opened (answers can be long, and the
+  // Research tab redraws often)
+  function lazyMdBody(open, text) {
+    const el = h('div', { class: 'md saved' });
+    if (open) el.append(...renderMarkdown(text)); else el.dataset.lazy = '1';
+    return el;
+  }
+  function lazyMd(details, text) {
+    const el = details.querySelector(':scope > .md.saved');
+    if (details.open && el?.dataset.lazy) { delete el.dataset.lazy; el.append(...renderMarkdown(text)); }
+  }
   function renderMarkdown(md) {
     const lines = md.replace(/\r\n?/g, '\n').split('\n');
     const LIST = /^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$/;
@@ -831,8 +854,15 @@
     };
   }
 
+  // One DisplayNames for every lookup, each name remembered (making one per call was slow in lists of countries)
+  let regionNames = null;
+  const regionCache = new Map();
   const regionName = code => {
-    try { return new Intl.DisplayNames(['en'], { type: 'region' }).of(code) || code; } catch { return code; }
+    if (regionCache.has(code)) return regionCache.get(code);
+    let name = code;
+    try { regionNames = regionNames || new Intl.DisplayNames(['en'], { type: 'region' }); name = regionNames.of(code) || code; } catch { /* not a region code */ }
+    regionCache.set(code, name);
+    return name;
   };
 
   const FREE_MAIL = /^(gmail|googlemail|yahoo|ymail|rocketmail|hotmail|outlook|live|msn|icloud|me|mac|aol|proton|protonmail|gmx|mail|zoho|yandex|qq|163|126|bigpond|optusnet|comcast|verizon|att|sbcglobal|shaw|rogers|btinternet|orange|web|t-online|libero|naver|hanmail)\./i;
@@ -874,7 +904,31 @@
     return headers;
   }
 
+  // Kept for a day on this computer (a merchant's site doesn't change that fast), the oldest dropped past `max`
+  function dayCache(name, max) {
+    const KEY = `zt:cache:${name}`;
+    return {
+      get(k) { const v = GM_getValue(KEY, {})[k]; return v && Date.now() - v.at < 24 * 3600 * 1000 ? v.val : undefined; },
+      set(k, val) {
+        const all = GM_getValue(KEY, {});
+        all[k] = { at: Date.now(), val };
+        const keys = Object.keys(all);
+        if (keys.length > max) keys.sort((a, b) => all[a].at - all[b].at).slice(0, keys.length - max).forEach(x => delete all[x]);
+        GM_setValue(KEY, all);
+      },
+    };
+  }
+  const siteCache = dayCache('sites', 200);
+  const searchCache = dayCache('siteSearches', 60);
+
   async function inspectSite(url) {
+    const known = siteCache.get(url);
+    if (known) return known;
+    const site = await inspectSiteNow(url);
+    if (site.status >= 200 && site.status < 400 && !site.blocked) siteCache.set(url, site);
+    return site;
+  }
+  async function inspectSiteNow(url) {
     const r = await gmRequest({ url, headers: { Accept: 'text/html,application/xhtml+xml' } });
     const headers = headerMap(r.responseHeaders);
     const html = r.responseText || '';
@@ -930,10 +984,14 @@
       : site.platforms.includes('WooCommerce') ? wooSearch
       : null;
     if (!search) return null; // no product feed to search; Claude will search instead
+    const key = `${site.origin}|${queries.join('|')}`;
+    const known = searchCache.get(key);
+    if (known) return known;
     for (const q of queries) {
       const found = await search(site.origin, q).catch(() => []);
-      if (found.length) return found;
+      if (found.length) { searchCache.set(key, found); return found; }
     }
+    searchCache.set(key, []);
     return [];
   }
 
@@ -1076,6 +1134,7 @@
     'bad-token': 'the Entry Assistant API rejected the saved token',
     unreachable: "the script couldn't reach the Entry Assistant API",
     server: 'the Entry Assistant API returned an error',
+    timeout: 'the Entry Assistant API took too long to answer',
   };
 
   // People paste the token in several forms: bare, "Bearer …", or the whole "export ENTRY_API_TOKEN=…" line
@@ -1152,7 +1211,19 @@
   // One failed call doesn't sink the rest: it's noted in `problems`, unless the token itself is the problem.
   // Options for queue orders: `roles` names the two codes, `rulings` fetches them even for one code, and
   // `extended` adds what to report on the entry line and the partner agencies to the prompt.
-  async function gatherFacts(item, { roles = ['Current code', "Merchant's code"], rulings = false, extended = false } = {}) {
+  // The same codes, origins and options give the same facts: kept 30 minutes in this tab, so going back to a
+  // case (or Prev / Next through the queue) doesn't look them all up again
+  const factsCache = new Map();
+  async function gatherFacts(item, opts = {}) {
+    const field = re => item.fields.find(f => re.test(f.label));
+    const key = JSON.stringify([field(/^hs code$/i)?.current, field(/^hs code$/i)?.claimed, field(/^country of origin$/i)?.current, field(/^country of origin$/i)?.claimed, opts]);
+    const known = factsCache.get(key);
+    if (known && Date.now() - known.at < 30 * 60 * 1000) return known.facts;
+    const facts = await gatherFactsNow(item, opts);
+    if (!facts.problems?.length) factsCache.set(key, { at: Date.now(), facts });
+    return facts;
+  }
+  async function gatherFactsNow(item, { roles = ['Current code', "Merchant's code"], rulings = false, extended = false } = {}) {
     const hs = item.fields.find(f => /^hs code$/i.test(f.label));
     const origin = item.fields.find(f => /^country of origin$/i.test(f.label));
     const current = hsCodeIn(hs?.current);
@@ -2485,7 +2556,7 @@
     const testMode = () => portalMode() === 'test';
     const dryRun = () => testMode() && !GM_getValue(WRITE_IN_TEST, false);
 
-    const D = { ent: null, row: null, state: 'idle', msg: '', preview: null, research: null, timer: null, page: null, me: GM_getValue('desk:me', '') };
+    const D = { ent: null, row: null, rowAt: 0, state: 'idle', msg: '', preview: null, research: null, timer: null, page: null, me: GM_getValue('desk:me', '') };
     const listeners = new Set();
     const changed = () => listeners.forEach(fn => { try { fn(); } catch (e) { console.warn('[Dispute Desk]', e); } });
 
@@ -2494,8 +2565,10 @@
     const captured = [];
     const varsByOp = {};
     const opOf = url => (String(url || '').match(/\/api\/graphql\/[^/?#]+\/(\w+)/) || [])[1] || '';
+    let captureSeq = 0;   // goes up with every reply kept, so what's worked out from them knows when to redo it
     function onData(op, status, json) {
       captured.push({ op, at: Date.now(), json });
+      captureSeq++;
       if (captured.length > 60) captured.shift();
       if (!(enabled() || sheetsOn()) || status >= 300 || !json?.data || json.errors?.length) return;
       if (ACTIONS[op]) {
@@ -2504,10 +2577,11 @@
         return;
       }
       // Some decisions (the AD/CVD review's in scope / out of scope) resolve the work order through their own
-      // action. Whatever the action, a work order the portal shows as resolved in the last few minutes is
-      // handled as resolved, once.
+      // action. Whatever the action, a work order of yours the portal shows as resolved in the last few minutes is
+      // handled as resolved, once. Someone else's (seen in Analytics or the queue) is theirs to record, not yours.
       for (const o of walk(json.data)) {
         if (!isWorkOrder(o) || !o.resolvedAt || Date.now() - Date.parse(o.resolvedAt) > 3 * 60 * 1000) continue;
+        if (!D.me || o.assigneeId !== D.me) continue;
         const k = `desk:resolved:${o.id}`;
         if (GM_getValue(k, 0)) continue;
         GM_setValue(k, Date.now());
@@ -2625,9 +2699,22 @@
     const money = (a, c) => (a == null ? '' : `${a} ${c || ''}`.trim());
     const who = p => (p?.person ? [p.person.companyName, [p.person.firstName, p.person.lastName].filter(Boolean).join(' ')].filter(Boolean).join(' / ') : '');
     const uniq = a => [...new Set(a.filter(Boolean))];
+    // A short fingerprint of a text (FNV-1a), to tell whether it changed without storing it
+    const fingerprint = s => { let x = 0x811c9dc5; for (let i = 0; i < s.length; i++) { x ^= s.charCodeAt(i); x = Math.imul(x, 0x01000193) >>> 0; } return `${s.length}:${x.toString(36)}`; };
 
-    // Everything about the case in plain lines: the portal's data, plus the claims read from the page
+    // Everything about the case in plain lines: the portal's data, plus the claims read from the page. It's
+    // worked out again only when the case, the portal's replies or what was read off the page changed (the
+    // Research tab asks for it on every draw). A case given with its own work order or dispute isn't cached.
+    let ctxCache = null;
     function caseContext(ent) {
+      if (ent.wo || ent.dd) return buildCaseContext(ent);
+      const key = `${ent.type}|${ent.id}|${ent.url}|${location.search}|${captureSeq}`;
+      if (ctxCache?.key === key && ctxCache.page === D.page) return ctxCache.ctx;
+      const ctx = buildCaseContext(ent);
+      ctxCache = { key, page: D.page, ctx };
+      return ctx;
+    }
+    function buildCaseContext(ent) {
       const { wo, cm, en, dd } = dataFor(ent);
       const kind = kindOf(ent.type);
       const items = [];
@@ -2765,8 +2852,7 @@
         const r = await notion('PATCH', `/blocks/${pageId}/children`, { children: [logToggle([])] });
         out = { log: r.results[0].id, prev: kids.length ? kids[kids.length - 1].id : null };
       } else out = { log: kids[i].id, prev: i > 0 ? kids[i - 1].id : null };
-      logIds[pageId] = out.log;
-      GM_setValue(LOG_IDS, logIds);
+      if (logIds[pageId] !== out.log) { logIds[pageId] = out.log; GM_setValue(LOG_IDS, logIds); }
       return out;
     }
     // Each case page's Case log toggle, once found, so a log line is one call instead of reading the whole page
@@ -3022,7 +3108,7 @@
     async function onRoute() {
       clearTimeout(D.timer);
       const ent = currentEntity();
-      Object.assign(D, { ent, row: null, state: ent ? 'looking' : 'idle', msg: '', preview: null, research: null });
+      Object.assign(D, { ent, row: null, rowAt: 0, state: ent ? 'looking' : 'idle', msg: '', preview: null, research: null });
       pending.length = 0;
       changed();
       // Sheets edition: is this case in the sheet already (for the card's sheet and doc links)
@@ -3045,6 +3131,7 @@
         }
         if (page) {
           D.row = page;
+          D.rowAt = Date.now();
           D.state = 'tracked';
           changed();   // the card and the comments show now; the rest happens behind them
           pollAnswers(true);
@@ -3057,7 +3144,8 @@
               .then(() => {
                 if (D.ent !== ent) return null;
                 const ctx = caseContext(ent);
-                const facts = ctx.hasData ? ctx.facts.join('\n') : '';
+                // (a short fingerprint of the data is kept, not the data itself)
+                const facts = ctx.hasData ? fingerprint(ctx.facts.join('\n')) : '';
                 const snapKey = `desk:snapshot:${ent.id}`;
                 const fresh = !!facts && GM_getValue(snapKey, '') !== facts;
                 return apply(ctx, { log: `Opened ${midSentence(ctx.kind)} ${ent.id}.${fresh ? '' : ' (Portal data unchanged since the last snapshot.)'}`, withSnapshot: fresh })
@@ -3107,7 +3195,9 @@
         for (const c of i.claims || []) if (c.reason) claims.push(`Line ${i.line} claim (${c.field}${c.status ? `, ${c.status}` : ''}): "${c.reason}"`);
       }
       if (d.kind === 'workOrder' && d.summary) claims.push(`Page: ${d.summary}`);
-      D.page = { id: ent.id, items, claims };
+      // Kept as the same object while nothing changed (it runs on every draw), so caseContext's cache holds
+      const next = { id: ent.id, items, claims };
+      if (JSON.stringify(next) !== JSON.stringify(D.page)) D.page = next;
     }
     // Entry Assistant facts per line, once per line every 12 hours
     async function onFacts(s) {
@@ -3192,7 +3282,11 @@
     }
 
     // Who's signed in to the portal, for the case chat's names
-    setTimeout(() => portalName().then(n => { D.myName = n; changed(); }), 0);   // after the portal helpers exist
+    // and their portal user id (work orders' assigneeId), so only their own resolved work orders are recorded
+    setTimeout(() => {
+      portalName().then(n => { D.myName = n; changed(); });
+      try { if (onDashboard) portal.me().then(s => { if (s.id && s.id !== D.me) { D.me = s.id; GM_setValue('desk:me', s.id); } }).catch(() => {}); } catch { /* not on the portal */ }
+    }, 0);   // after the portal helpers exist
 
     // Starts the cloud research session for a research task; the session URL goes on the case as its Chat Link
     async function fireResearch(taskId, pageId, { openTab = true } = {}) {
@@ -3249,8 +3343,10 @@
       if (linksLoading) return linksLoading;
       const rowId = D.row.id;
       linksLoading = (async () => {
-        const page = await notion('GET', `/pages/${rowId}`).catch(() => null);
-        if (page && D.row?.id === rowId) D.row = page;
+        // The row was just read (opening the case): it isn't read again
+        const fresh = D.rowAt && Date.now() - D.rowAt < 5000;
+        const page = fresh ? D.row : await notion('GET', `/pages/${rowId}`).catch(() => null);
+        if (page && D.row?.id === rowId && !fresh) { D.row = page; D.rowAt = Date.now(); }
         let tasks = [];
         if (TASKS()) {
           const r = await notion('POST', `/data_sources/${TASKS()}/query`, { filter: { and: [
@@ -3258,15 +3354,30 @@
           sorts: [{ timestamp: 'created_time', direction: 'descending' }], page_size: 5 }).catch(() => null);
           tasks = (r?.results || []).map(t => ({ name: titleOf(t).replace(/^Research:\s*/, ''), url: t.url, status: statusOf(t), at: Date.parse(t.created_time) || 0 }));
         }
-        if (D.row?.id === rowId) { D.links = { row: rowId, tasks, chat: D.row?.properties?.['Chat Link']?.url || '' }; changed(); }
+        if (D.row?.id === rowId) {
+          const links = { row: rowId, tasks, chat: D.row?.properties?.['Chat Link']?.url || '' };
+          // Redrawn only when something on the card changed (this runs with every answer check)
+          const same = JSON.stringify(links) === JSON.stringify(D.links || null);
+          D.links = links;
+          if (!same) changed();
+        }
       })().finally(() => { linksLoading = null; });
       return linksLoading;
     }
 
+    // Every 30 seconds while research is out (sent to Claude Code, or a research task not Done), otherwise every
+    // 2 minutes. The page's blocks are listed only when the page changed since the last look.
+    let lastSeenEdit = { row: '', at: '' };
     async function pollAnswers(force) {
-      if (!enabled() || !D.row || !importer || (!force && Date.now() - lastPoll < POLL_MS)) return;
+      const waiting = !!(D.research || GM_getValue(`desk:research:${D.ent?.id}`, null) || D.links?.tasks?.some(t => t.status !== 'Done'));
+      if (!enabled() || !D.row || !importer || (!force && Date.now() - lastPoll < (waiting ? POLL_MS : 4 * POLL_MS))) return;
       lastPoll = Date.now();
-      refreshLinks();
+      await refreshLinks();
+      if (!D.row) return;
+      const edited = D.row.last_edited_time || '';
+      // (Notion's edit times are to the minute, so while research is out the blocks are always listed)
+      if (!force && !waiting && edited && lastSeenEdit.row === D.row.id && lastSeenEdit.at === edited) return;
+      lastSeenEdit = { row: D.row.id, at: edited };
       const done = GM_getValue(IMPORTED, {});
       try {
         let cursor;
@@ -3445,7 +3556,7 @@
     function promptsInfo() {
       const v = GM_getValue(PROMPTS_KEY, null);
       if (!v) return null;
-      const edited = promptPieces().filter(p => teamText(p.key) && teamText(p.key).trim() !== p.text.trim()).length;
+      const edited = promptPieces().filter(p => { const t = v.texts[p.key]; return typeof t === 'string' && t.trim() && t.trim() !== p.text.trim(); }).length;
       return { at: v.at, edited, rows: Object.keys(v.texts).length };
     }
     if (onDashboard) {
@@ -3763,7 +3874,9 @@
         nodes.push(...batch.flat());
       }
       const unique = [...new Map(nodes.map(n => [n.id, n])).values()];
-      if (unique.length >= total || !first.pageInfo.hasNextPage) return unique;
+      // Orders claimed, resolved or added while the pages load shift the offsets a little: a few missing is
+      // fine (the next refresh has them). Only a real mismatch is re-read page by page.
+      if (unique.length >= total - Math.max(5, Math.ceil(total * 0.01)) || !first.pageInfo.hasNextPage) return unique;
       const all = first.edges.map(e => e.node);
       let after = first.pageInfo.endCursor;
       while (after && all.length < total) {
@@ -3835,6 +3948,7 @@
   let queueCtl = null;   // set once the queue exists, so Tools can switch views
   const onQueuePage = () => location.pathname.replace(/\/$/, '') === QUEUE_PATH;
   const NAV_KEY = 'zt:queue:nav';        // the queue as last shown: the order of Prev / Next and each order's summary
+  const NAV_AT_KEY = 'zt:queue:navAt';   // when NAV_KEY was last written (cheap to read, to know when to re-read it)
   const PREFS_KEY = 'zt:queue:prefs';
   const SEEN_KEY = 'zt:queue:seenAt';
   const DAY = 86400000;
@@ -3883,15 +3997,22 @@
   const hay = r => r._hay || (r._hay = [r.label, r.status, r.title, r.problem, r.detail, r.tracking, r.entryNo, r.mbol, r.sid, r.id, r.customer, r.consignee,
     r.assigneeName, r.stream, r.escalatedTo, r.escalationNote, ...r.items, ...r.codes].join(' \u0001 ').toLowerCase());
 
+  // One date formatter for every row (making one per call was the queue's slowest step), and today's start and
+  // each row's due day worked out once instead of on every test, sort and render
+  const DUE_DATE = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
   function dueText(r) {
     if (!r.dueMs) return { text: '—', cls: 'muted' };
-    const date = new Date(r.dueMs).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    const days = Math.floor((startOfDay(Date.now()) - startOfDay(r.dueMs)) / DAY);
+    const date = r._dueDate || (r._dueDate = DUE_DATE.format(r.dueMs));
+    const days = Math.floor((today() - dueDay(r)) / DAY);
     if (days > 0) return { text: date, sub: `${days}d overdue`, cls: 'err' };
     if (days === 0) return { text: date, sub: 'due today', cls: 'warn' };
     return { text: date, sub: `in ${-days}d`, cls: days >= -2 ? 'warn' : 'muted' };
   }
   function startOfDay(ms) { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); }
+  let todayAt = 0;
+  let todayStart = 0;
+  const today = () => { const n = Date.now(); if (n - todayAt > 60000) { todayAt = n; todayStart = startOfDay(n); } return todayStart; };
+  const dueDay = r => r._dueDay ?? (r._dueDay = startOfDay(r.dueMs));
   const ageText = ms => { const d = Math.floor((Date.now() - ms) / DAY); return d >= 1 ? `${d}d` : `${Math.max(1, Math.floor((Date.now() - ms) / 3600000))}h`; };
 
   const QUEUE_CSS = `
@@ -4024,9 +4145,9 @@
     { key: 'all', label: 'All open', test: () => true },
   ];
   const DUE = {
-    overdue: { label: 'Overdue', test: r => r.dueMs && startOfDay(r.dueMs) < startOfDay(Date.now()) },
-    today: { label: 'Due today', test: r => r.dueMs && startOfDay(r.dueMs) === startOfDay(Date.now()) },
-    week: { label: 'Due in 7 days', test: r => r.dueMs && r.dueMs >= startOfDay(Date.now()) && r.dueMs < startOfDay(Date.now()) + 8 * DAY },
+    overdue: { label: 'Overdue', test: r => r.dueMs && dueDay(r) < today() },
+    today: { label: 'Due today', test: r => r.dueMs && dueDay(r) === today() },
+    week: { label: 'Due in 7 days', test: r => r.dueMs && r.dueMs >= today() && r.dueMs < today() + 8 * DAY },
     none: { label: 'No due date', test: r => !r.dueMs },
   };
   const FILTERS = [
@@ -4066,10 +4187,12 @@
 
     const wrap = h('div', { class: 'q' });
     root.append(h('style', { text: QUEUE_CSS }), wrap);
+    let searchTimer = 0;
     const searchInput = h('input', {
       type: 'text', placeholder: 'Search anything: tracking, entry, master bill, customer, item, HS code, note… (paste a list to match many)',
       'aria-label': 'Search the queue', autocomplete: 'off', spellcheck: 'false',
-      oninput: e => { S.q = e.target.value; S.extra = null; S.limit = 300; render(); },
+      // Redrawn once typing pauses (120 ms), not on every key
+      oninput: e => { S.q = e.target.value; S.extra = null; S.limit = 300; clearTimeout(searchTimer); searchTimer = setTimeout(render, 120); },
       onkeydown: e => {
         if (e.key === 'Escape') { searchInput.value = ''; S.q = ''; S.extra = null; render(); }
         if (e.key === 'Enter' && S.shown.length === 1) openRow(S.shown[0], e);
@@ -4155,16 +4278,20 @@
       }
       return rows;
     }
+    // Each row's sort values are worked out once, then compared (one shared collator, not a new one per comparison)
+    const COLLATE = new Intl.Collator(undefined, { numeric: true }).compare;
     function sortRows(rows) {
       const keys = S.sort.map(s => ({ col: COLS.find(c => c.key === s.key), dir: s.dir })).filter(s => s.col);
-      return rows.slice().sort((a, b) => {
-        for (const { col, dir } of keys) {
-          const x = col.val(a), y = col.val(b);
-          const c = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true });
-          if (c) return c * dir;
+      const decorated = rows.map(r => ({ r, v: keys.map(({ col }) => { const x = col.val(r); return typeof x === 'number' ? x : String(x); }) }));
+      decorated.sort((a, b) => {
+        for (let k = 0; k < keys.length; k++) {
+          const x = a.v[k], y = b.v[k];
+          const c = typeof x === 'number' && typeof y === 'number' ? x - y : COLLATE(String(x), String(y));
+          if (c) return c * keys[k].dir;
         }
-        return (a.dueMs ?? Infinity) - (b.dueMs ?? Infinity);
+        return (a.r.dueMs ?? Infinity) - (b.r.dueMs ?? Infinity);
       });
+      return decorated.map(d => d.r);
     }
     function groupOf(r) {
       if (S.group === 'customer') return r.customer || r.consignee || '(unknown customer)';
@@ -4177,12 +4304,12 @@
 
     // ---- drawing
     function render() {
-      host.dataset.theme = pageIsDark() ? 'dark' : 'light';
+      host.dataset.theme = pageIsDarkSoon() ? 'dark' : 'light';
       const me = S.me?.id;
       const rows = sortRows(visible());
       let ordered = rows;
+      const groups = new Map();
       if (S.group) {
-        const groups = new Map();
         for (const r of rows) { const g = groupOf(r); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(r); }
         ordered = [...groups.values()].flat();
       }
@@ -4235,7 +4362,7 @@
         h('div', { class: 'chips' }, h('span', { class: 'muted', style: 'font-size:12px', text: 'Classes:' }), byType.length ? byType.slice(0, 10).map(([k, n]) => chip('type', k, n)) : h('span', { class: 'muted', style: 'font-size:12px', text: 'none' })),
         viewsBar());
 
-      wrap.replaceChildren(top, scopes, bar, summary, h('div', { class: 'actionbar' }, bulkBar()), table(ordered), foot(ordered));
+      wrap.replaceChildren(top, scopes, bar, summary, h('div', { class: 'actionbar' }, bulkBar()), table(ordered, groups), foot(ordered));
       if (S.pop) { const p = root.querySelector('.pop input[type=search]'); if (p) p.focus(); }
       if (focusEl) { searchInput.focus(); }
     }
@@ -4323,7 +4450,7 @@
     }
     const selectedRows = () => S.rows.filter(r => S.sel.has(r.id));
 
-    function table(rows) {
+    function table(rows, groups = new Map()) {
       if (S.error) return h('div', { class: 'tablewrap' }, h('div', { class: 'empty err' }, `Couldn't load the queue: ${S.error} `, h('button', { class: 'btn small', type: 'button', text: 'Try again', onclick: () => load() })));
       if (!S.loadedAt && S.loading) return h('div', { class: 'tablewrap' }, h('div', { class: 'empty', text: 'Loading every open and waiting order…' }));
       const shown = rows.slice(0, S.limit);
@@ -4344,7 +4471,7 @@
           const g = groupOf(r);
           if (g !== lastGroup) {
             lastGroup = g;
-            const members = rows.filter(x => groupOf(x) === g);
+            const members = groups.get(g) || rows.filter(x => groupOf(x) === g);
             const on = members.every(x => S.sel.has(x.id));
             body.push(h('tr', { class: 'group' }, h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: on, 'aria-label': `Select all in ${g}`,
               onchange: e => { for (const x of members) e.target.checked ? S.sel.add(x.id) : S.sel.delete(x.id); render(); } })),
@@ -4439,7 +4566,10 @@
       if (!S.shown.length) return;
       S.focus = Math.max(0, Math.min(S.shown.length - 1, (S.focus < 0 ? -1 : S.focus) + step));
       if (S.focus >= S.limit) S.limit = S.focus + 50;
-      render();
+      // A row already on screen just takes the highlight; the whole queue is redrawn only when more rows are needed
+      const next = root.querySelector(`tr.row[data-i="${S.focus}"]`);
+      if (next) { root.querySelector('tr.row.focus')?.classList.remove('focus'); next.classList.add('focus'); }
+      else render();
       root.querySelector(`tr.row[data-i="${S.focus}"]`)?.scrollIntoView({ block: 'nearest' });
       root.querySelector(`tr.row[data-i="${S.focus}"]`)?.focus({ preventScroll: true });
     }
@@ -4536,11 +4666,20 @@
     }
 
     // ---- Prev / Next on order pages follow the queue exactly as you last left it
+    // Written only when the list changed (a new load, or a different order or filter), not on every redraw:
+    // it's up to 1,500 orders, and storing it is slow
+    let navSaved = '';
     function saveNav(rows) {
-      GM_setValue(NAV_KEY, { at: Date.now(), items: rows.slice(0, 1500).map(r => ({
+      const list = rows.slice(0, 1500);
+      const sig = `${S.loadedAt}|${list.map(r => r.id).join(',')}`;
+      if (sig === navSaved) return;
+      navSaved = sig;
+      const at = Date.now();
+      GM_setValue(NAV_KEY, { at, items: list.map(r => ({
         url: r.url, label: r.label, title: r.title, ref: r.ref, tracking: r.tracking, entryNo: r.entryNo, mbol: r.mbol, customer: r.customer || r.consignee,
         due: r.dueMs, status: r.status, assignee: r.assigneeName, escalatedTo: r.escalatedTo, problem: r.problem, id: r.id, created: r.createdMs,
       })) });
+      GM_setValue(NAV_AT_KEY, at);
     }
 
     // ---- showing it in place of the portal's own queue. The portal's queue is the default; the Tools queue is
@@ -4558,7 +4697,10 @@
       onclick: () => setEnhanced(true) });
     function placeSwitch() {
       if (!onQueuePage() || toolsQueueOn()) { switchBtn.remove(); return; }
-      const updated = [...(document.querySelector('main')?.querySelectorAll('div') || [])].find(e => /^Updated\s/.test(e.textContent.trim()) && e.textContent.length < 40 && e.children.length < 4);
+      const main = document.querySelector('main');
+      if (!main || (switchBtn.isConnected && main.contains(switchBtn))) return;   // already there: nothing to look for
+      // Small divs only (cheap test first), so the big wrappers' text is never read
+      const updated = [...main.querySelectorAll('div')].find(e => e.children.length < 4 && e.textContent.length < 60 && /^Updated\s/.test(e.textContent.trim()));
       if (updated && switchBtn.parentElement !== updated) updated.append(switchBtn);
     }
     function mount() {
@@ -4603,12 +4745,20 @@
   }
 
   // The order the current page is about, from the queue as you last left it
+  // (asked every second while Tools is open: the list is read again only when the queue saved a new one, and
+  // each order's place is looked up in a map)
+  let navCache = { at: -1, items: [], index: new Map() };
   function navPosition() {
-    const nav = GM_getValue(NAV_KEY, null);
-    if (!nav?.items?.length) return { items: [], i: -1 };
+    const at = GM_getValue(NAV_AT_KEY, 0);
+    if (at !== navCache.at || !at) {
+      const nav = GM_getValue(NAV_KEY, null);
+      const items = nav?.items || [];
+      navCache = { at: at || nav?.at || 0, items, index: new Map() };
+      items.forEach((it, i) => { const k = decodeURIComponent(it.url.split('?')[0]); if (!navCache.index.has(k)) navCache.index.set(k, i); });
+    }
+    if (!navCache.items.length) return { items: [], i: -1 };
     const here = decodeURIComponent(location.pathname).replace(/\/$/, '');
-    const i = nav.items.findIndex(it => decodeURIComponent(it.url.split('?')[0]) === here);
-    return { items: nav.items, i, at: nav.at };
+    return { items: navCache.items, i: navCache.index.get(here) ?? -1, at: navCache.at };
   }
 
   // The portal's own Classify / Quote rail on order pages is hidden: Classify and Quote are built into Tools.
@@ -4739,6 +4889,7 @@
           id lines { programId program { id code name programType authority }
             visibleQuestions { question { prompt displayOrder } answer { value label } } } } }`, { id }, { 'x-act-as-org': d.organizationId })
           .then(r => r.questionnaireSession).catch(e => { console.warn('[Tools] questionnaire session', id, e); return null; })))) if (s) sessions.set(s.id, s);
+      if (programsFor !== disputeId) return;   // moved on to another dispute while this loaded
       (d?.items || []).forEach((it, n) => {
         const s = sessions.get(it.questionnaireSessionId);
         if (!s) return;
@@ -5079,10 +5230,14 @@
       onclick: () => { if (panel.hidden) open(); else close(); } },
       h('span', { 'aria-hidden': 'true', text: '⚒' }), h('span', { text: 'Tools' }));
     const sideWrap = h('div', { class: 'px-2 pb-2', id: 'zt-side-wrap' }, sideBtn);
+    // (runs every second: when the button is already in place by References, nothing is looked for)
+    let refHolder = null;
     function placeLauncher() {
       const side = launcherMode() === 'sidebar';
+      if (side && refHolder?.isConnected && sideWrap.nextElementSibling === refHolder && refHolder.offsetParent) return;
       const ref = side && [...document.querySelectorAll('aside button, aside a')].find(e => /References/.test(e.textContent));
       const holder = ref?.parentElement;
+      refHolder = holder || null;
       // Back to the bubble if the sidebar isn't there (a narrow window hides it)
       const useSide = !!(holder && holder.offsetParent);
       launch.style.display = useSide ? 'none' : '';
@@ -5702,6 +5857,8 @@
     root.append(h('style', { text: PANEL_CSS }), h('div', { class: 'wrap' }, launch, panel));
 
     let view = 'dispute';
+    let drawQueued = 0;          // a Research redraw waiting for the next frame (see render)
+    let researchStale = false;   // Research changed while another tab was showing
     let lastView = 'dispute';
     let leftResearch = false;   // Tools moved off Research because the page has nothing to research
     function setView(name) {
@@ -5713,7 +5870,7 @@
       if (name === 'classify') renderClassify();
       if (name === 'quote') renderQuote();
       if (name === 'analytics') renderAnalytics();
-      if (name === 'dispute') showResearchIdle();
+      if (name === 'dispute') { showResearchIdle(); if (researchStale && state) render(); }
       refreshTools();
       if (name === 'entry') showEntryPage();
       if (name === 'doc') showDoc();
@@ -6147,11 +6304,16 @@
         if (s !== state) return;
         GM_setValue(SITE_PREFIX + s.data.org.toLowerCase(), s.website);
         render();
-        for (const item of s.data.items.filter(i => i.inDispute)) {
-          const found = await searchMerchant(s.site, queriesFor(item, s.data));
+        // Three items searched at a time
+        const items = s.data.items.filter(i => i.inDispute);
+        for (let i = 0; i < items.length; i += 3) {
+          await Promise.all(items.slice(i, i + 3).map(async item => {
+            const found = await searchMerchant(s.site, queriesFor(item, s.data));
+            if (s !== state) return;
+            if (found) s.matches[item.line] = found;
+            render();
+          }));
           if (s !== state) return;
-          if (found) s.matches[item.line] = found;
-          render();
         }
       } catch (e) {
         s.siteError = e.message;
@@ -6161,7 +6323,16 @@
       }
     }
 
+    // Redraws of the Research tab are batched: however many lookups, site searches and Notion updates finish at
+    // once, the tab is drawn once per frame, and not while another tab is showing (it's drawn on coming back).
+    // (drawQueued and researchStale are declared with `view`, since setView reads them during setup.)
     function render() {
+      if (view !== 'dispute') { researchStale = true; return; }
+      if (drawQueued) return;
+      drawQueued = requestAnimationFrame(() => { drawQueued = 0; if (state) draw(); });
+    }
+    function draw() {
+      researchStale = false;
       const s = state;
       const d = s.data;
       const isOrder = d.kind === 'workOrder';
@@ -6284,9 +6455,9 @@
       const replyBlock = reply && h('div', { class: 'reply-ready' },
         h('p', { class: 'reply-title', text: `Claude's answer is ready${replyVerdicts ? ` (${replyVerdicts})` : ''}` }),
         h('p', { class: 'hint', style: 'margin:0 0 6px', text: `From the chat opened ${shortDate(reply.at)}. Saving shares it with everyone on this ${word}.` }),
-        h('details', { open: !!s.replyPreview, ontoggle: e => { s.replyPreview = e.currentTarget.open; } },
+        h('details', { open: !!s.replyPreview, ontoggle: e => { s.replyPreview = e.currentTarget.open; lazyMd(e.currentTarget, reply.text); } },
           h('summary', { text: 'Preview' }),
-          h('div', { class: 'md saved' }, renderMarkdown(reply.text))),
+          lazyMdBody(!!s.replyPreview, reply.text)),
         h('div', { class: 'row', style: 'margin-top:8px' },
           h('button', { class: 'primary', type: 'button', text: 'Save answer', onclick: () => { GM_deleteValue(replyKey); storeAnswer(reply.text, replyLines); } }),
           h('button', { class: 'secondary', type: 'button', text: 'Dismiss', onclick: () => { GM_deleteValue(replyKey); render(); } })));
@@ -6303,9 +6474,9 @@
           shared && a.pending && 'waiting to sync',
           a.rejected && `not shared: ${a.rejected}`,
         ].filter(Boolean).join(' · ');
-        return h('details', { class: `answer-card${a.mine === false ? ' theirs' : ''}`, open: !!s.openAnswers[a.id], ontoggle: e => { s.openAnswers[a.id] = e.currentTarget.open; } },
+        return h('details', { class: `answer-card${a.mine === false ? ' theirs' : ''}`, open: !!s.openAnswers[a.id], ontoggle: e => { s.openAnswers[a.id] = e.currentTarget.open; lazyMd(e.currentTarget, a.text); } },
           h('summary', { text: summary }),
-          h('div', { class: 'md saved' }, renderMarkdown(a.text)),
+          lazyMdBody(!!s.openAnswers[a.id], a.text),
           h('div', { class: 'note-meta' },
             note && noteLink('Copy note', () => copyNote(note)),
             noteLink('Copy Markdown', () => { GM_setClipboard(a.text, 'text'); setStatus('Answer copied as Markdown.', 'ok'); }),
@@ -6555,10 +6726,16 @@
     }
 
     // The prompt treats the ticked files as attached, since you'll attach them by hand
+    // At most 15 seconds: a lookup still running then is marked as not run, so the prompt tells Claude to look
+    // that code up itself instead of the button hanging on a slow server
     async function waitForFacts() {
-      if (!state.factsPromise) return;
+      const s = state;
+      if (!s.factsPromise) return;
       setStatus('Waiting for the HTS lookups…');
-      await state.factsPromise;
+      const late = await Promise.race([s.factsPromise.then(() => false), sleep(15000).then(() => true)]);
+      if (!late) return;
+      for (const [k, f] of Object.entries(s.facts || {})) if (f?.loading) s.facts[k] = { error: 'it took too long', kind: 'timeout' };
+      setStatus('Some HTS lookups took too long; the prompt asks Claude to look those codes up.', 'warn');
     }
 
     async function copyPrompt() {
@@ -6637,9 +6814,7 @@
   function initDashboard() {
     // Shows in DevTools (F12 > Console), so it's easy to confirm the script is running at all
     console.info(`[Dispute Researcher] v${typeof GM_info !== 'undefined' ? GM_info.script.version : '?'} running on ${location.pathname}`);
-    purgeOldHandoffs();
-    purgeOldRecords();
-    purgeOldReports();
+    purgeSometimes(purgeOldHandoffs, purgeOldRecords, purgeOldReports);
     trimStoredAnswers();
     let ui = null;
     let lastPath = null;
@@ -6689,6 +6864,7 @@
     // Keys anywhere on the portal, never while typing: \ Tools, Shift+C Classify, Shift+Q Quote, [ ] previous / next order
     window.addEventListener('keydown', e => {
       if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      if (!['\\', 'C', 'Q', '[', ']'].includes(e.key)) return;   // the only keys handled here: nothing else is looked at
       const t = e.composedPath()[0];
       if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
       if (document.querySelector('[role="dialog"]:not([hidden])')) return;
