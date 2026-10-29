@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.17.0
+// @version      7.18.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -2491,6 +2491,8 @@
   // - "Research in Claude Code" puts the research prompt on the case as a Notion task, Claude Code runs it,
   //   and its answer comes back into this panel (and the shared answers) by itself.
   // In the portal's TEST MODE nothing is written to Notion unless "Write in test mode" is ticked.
+  // Others that want the portal's replies as they come (Batch work's "Work as one"): fn(op, status, json)
+  const replyWatchers = new Set();
   const desk = (() => {
     // Notion ids and the cloud routine all come from Setup (none are built in)
     const DS = () => cfg().projectsDs;        // Notion "Projects" data source (one row per case)
@@ -2593,6 +2595,7 @@
       captured.push({ op, at: Date.now(), json });
       captureSeq++;
       if (captured.length > 60) captured.shift();
+      for (const fn of replyWatchers) { try { fn(op, status, json); } catch (e) { console.warn('[Tools]', e); } }
       if (!(enabled() || sheetsOn()) || status >= 300 || !json?.data || json.errors?.length) return;
       if (ACTIONS[op]) {
         const v = varsByOp[op] && Date.now() - varsByOp[op].at < 15000 ? varsByOp[op].vars : {};
@@ -5523,12 +5526,15 @@
     HS_CODE: 'HS code', COUNTRY_OF_ORIGIN: 'Country of origin', DECLARED_VALUE: 'Declared value', DESCRIPTION: 'Description',
     TARIFF_LINE: 'Tariff line', DUTY_EXCLUSION: 'Duty exclusion', QUANTITY: 'Quantity', WEIGHT: 'Weight', QUESTIONNAIRE: 'Questionnaire',
   };
+  const CLAIM_VALUES = 'countryOfOrigin currencyCode declaredValue description dutyExclusion hsCode programId quantity quantityUnit tariffLineCode weight weightUnit';
   const DISPUTE_FIELDS = `id status outcome organizationId
     items { id disputed questionnaireSessionId original { hsCode description countryOfOrigin }
       claims { id type justification
-        proposed { countryOfOrigin currencyCode declaredValue description dutyExclusion hsCode programId quantity quantityUnit tariffLineCode weight weightUnit }
-        review { verdict reasons suggestedFix } decision { verdict note } } }`;
+        proposed { ${CLAIM_VALUES} }
+        review { verdict reasons suggestedFix } decision { verdict note adjusted { ${CLAIM_VALUES} } } } }`;
   const sameText = v => clean(String(v ?? '')).toLowerCase();
+  // What has to match for two disputes to be the same: the text exactly as written (only spacing evened out)
+  const exactText = v => clean(String(v ?? ''));
   // The automated review's verdict: its own when it gave one, else the model's ("MODEL_VERDICT_DENIED")
   const modelVerdict = c => (VERDICT_LABELS[c.review?.verdict] ? c.review.verdict
     : (c.review?.reasons || []).map(r => (String(r).match(/^MODEL_VERDICT_(\w+)/) || [])[1]).find(v => VERDICT_LABELS[v]) || '');
@@ -5538,23 +5544,58 @@
     const prog = c.proposed?.programId;
     return p.length ? p.join(' · ') : prog ? programs[prog] || 'questionnaire answers' : '';
   };
-  // A dispute's shape: everything that has to match for two disputes to get the same answer, and its claims in
-  // a fixed order, so claim n of one copy is claim n of every other
+  // A dispute's shape: everything that has to match for two disputes to get the same answer (the company, and
+  // each disputed line's HS code, description, origin, questionnaire answers and claims with the merchant's
+  // reasons, all exactly), and its claims in a fixed order, so claim n of one copy is claim n of every other.
+  // Only disputes of the same company are ever grouped. A questionnaire that couldn't be read matches nothing.
   function disputeShape(d, qa) {
     const claimKey = c => [c.type, ...Object.entries(c.proposed || {}).filter(([, v]) => v != null && v !== '')
-      .sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${sameText(v)}`), `why=${sameText(c.justification)}`].join('|');
+      .sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${exactText(v)}`), `why=${exactText(c.justification)}`].join('|');
     const items = (d.items || []).filter(i => i.disputed || i.claims?.length).map(i => {
       const o = i.original || {};
       const claims = (i.claims || []).map(c => ({ c, k: claimKey(c) })).sort((a, b) => a.k.localeCompare(b.k));
-      const head = [sameText(o.hsCode).replace(/\D/g, ''), sameText(o.description), sameText(o.countryOfOrigin), `qa=${i.questionnaireSessionId ? qa[i.questionnaireSessionId] ?? `?${i.questionnaireSessionId}` : ''}`];
+      const head = [exactText(o.hsCode).replace(/\D/g, ''), exactText(o.description), exactText(o.countryOfOrigin), `qa=${i.questionnaireSessionId ? qa[i.questionnaireSessionId] ?? `?${i.questionnaireSessionId}` : ''}`];
       return { i, k: [...head, ...claims.map(x => x.k)].join('§'), claims };
     }).sort((a, b) => a.k.localeCompare(b.k));
-    return { key: items.map(x => x.k).join('¶'), slots: items.flatMap(x => x.claims.map(({ c }) => ({ claim: c, item: x.i }))) };
+    return { key: [`org=${d.organizationId || `?${d.id}`}`, ...items.map(x => x.k)].join('¶'), slots: items.flatMap(x => x.claims.map(({ c }) => ({ claim: c, item: x.i }))) };
   }
-  // Another class's order: its class, problem text (less the tracking and bill numbers, which every order has
-  // its own of) and CBP codes
-  const orderShape = r => [r.type, String(r.detail || '').split('\n').filter(l => !/^\s*tracking\b/i.test(l)).join('\n')
-    .replace(/\bmBOL:\S+\s*\|\s*hBOL:\S+?:\s*/gi, '').replace(/\s+/g, ' ').trim().toLowerCase(), [...r.codes].sort().join(',')].join('¶');
+  // Another class's order: its company, class, problem text (less the tracking and bill numbers, which every
+  // order has its own of) and CBP codes
+  const orderShape = r => [`org=${r.orgId || `?${r.id}`}`, r.type, String(r.detail || '').split('\n').filter(l => !/^\s*tracking\b/i.test(l)).join('\n')
+    .replace(/\bmBOL:\S+\s*\|\s*hBOL:\S+?:\s*/gi, '').replace(/\s+/g, ' ').trim(), [...r.codes].sort().join(',')].join('¶');
+
+  // The portal's calls for one dispute, on behalf of its company
+  const asOrg = org => (org ? { 'x-act-as-org': org } : {});
+  const fetchDispute = (id, org) => portal.gql('BrokerageDutyDispute', `query BrokerageDutyDispute($id: ID!) { brokerageDutyDispute(id: $id) { ${DISPUTE_FIELDS} } }`,
+    { id }, asOrg(org)).then(x => x.brokerageDutyDispute);
+  const decideDispute = (id, org, claims) => portal.gql('BrokerageDutyDisputeClaimsDecide',
+    `mutation BrokerageDutyDisputeClaimsDecide($input: BrokerageDutyDisputeClaimsDecideInput!) { brokerageDutyDisputeClaimsDecide(input: $input) { ${DISPUTE_FIELDS} } }`,
+    { input: { id, claims } }, asOrg(org)).then(x => x.brokerageDutyDisputeClaimsDecide);
+  const completeDispute = (id, org) => portal.gql('BrokerageDutyDisputeComplete', `mutation BrokerageDutyDisputeComplete($id: ID!) { brokerageDutyDisputeComplete(id: $id) { ${DISPUTE_FIELDS} } }`,
+    { id }, asOrg(org)).then(x => x.brokerageDutyDisputeComplete);
+  // A questionnaire's answers as text, program by program, question by question (exactly as answered).
+  // `programs` collects program id -> name.
+  async function questionnaireText(id, org, programs = {}) {
+    const s = (await portal.gql('QuestionnaireSessionForDutyDispute', `query QuestionnaireSessionForDutyDispute($id: ID!) { questionnaireSession(id: $id) {
+      id lines { programId program { id name } visibleQuestions { question { prompt displayOrder } answer { value label } } } } }`, { id }, asOrg(org))).questionnaireSession;
+    if (!s) throw new Error('No questionnaire.');
+    for (const l of s.lines || []) if (l.program?.name) programs[l.programId] = l.program.name;
+    return (s.lines || []).map(l => `${l.programId}:${[...(l.visibleQuestions || [])].sort((a, b) => (a.question?.displayOrder ?? 0) - (b.question?.displayOrder ?? 0))
+      .map(q => `${exactText(q.question?.prompt)}=${exactText(answerText(q.answer))}`).join(';')}`).sort().join('|');
+  }
+  // An accepted claim's changed value ("accept with changes"), sent the way the portal sends it: only the
+  // claim type's own fields
+  const ADJUSTED_FIELDS = { HS_CODE: ['hsCode'], DESCRIPTION: ['description'], COUNTRY_OF_ORIGIN: ['countryOfOrigin'], TARIFF_LINE: ['tariffLineCode'],
+    DECLARED_VALUE: ['declaredValue', 'currencyCode'], QUANTITY: ['quantity', 'quantityUnit'], WEIGHT: ['weight', 'weightUnit'] };
+  function adjustedInput(type, adjusted) {
+    const set = Object.entries(adjusted || {}).filter(([, v]) => v != null);
+    if (!set.length) return null;
+    const keys = ADJUSTED_FIELDS[type];
+    if (!keys) throw new Error(`a changed ${(CLAIM_TYPE_LABELS[type] || human2(type)).toLowerCase()} can't be copied from here`);
+    return Object.fromEntries(set.filter(([k]) => keys.includes(k)));
+  }
+  // Two decisions are the same when verdict, note and changed value all are
+  const decisionKey = d => JSON.stringify([d?.verdict || '', d?.note || '', Object.entries(d?.adjusted || {}).filter(([, v]) => v != null).sort()]);
 
   function batchTool({ group, note, say, btn }) {
     const saved = { cls: 'DUTY_DISPUTE_REVIEW', customer: '', count: '', ...GM_getValue(BATCH_KEY, {}) };
@@ -5665,16 +5706,7 @@
       });
     }
 
-    // ---- your orders of the class, grouped by exact sameness
-    const fetchDispute = (id, org) => portal.gql('BrokerageDutyDispute', `query BrokerageDutyDispute($id: ID!) { brokerageDutyDispute(id: $id) { ${DISPUTE_FIELDS} } }`,
-      { id }, org ? { 'x-act-as-org': org } : {}).then(x => x.brokerageDutyDispute);
-    async function questionnaireText(id, org) {
-      const s = (await portal.gql('QuestionnaireSessionForDutyDispute', `query QuestionnaireSessionForDutyDispute($id: ID!) { questionnaireSession(id: $id) {
-        id lines { programId program { id name } visibleQuestions { question { prompt displayOrder } answer { value label } } } } }`, { id }, org ? { 'x-act-as-org': org } : {})).questionnaireSession;
-      for (const l of s?.lines || []) if (l.program?.name) S.programs[l.programId] = l.program.name;
-      return (s?.lines || []).map(l => `${l.programId}:${[...(l.visibleQuestions || [])].sort((a, b) => (a.question?.displayOrder ?? 0) - (b.question?.displayOrder ?? 0))
-        .map(q => `${sameText(q.question?.prompt)}=${sameText(answerText(q.answer))}`).join(';')}`).sort().join('|');
-    }
+    // ---- your orders of the class, grouped by exact sameness (never across companies)
     async function buildGroups() {
       const rows = mine();
       if (clsSelect.value !== 'DUTY_DISPUTE_REVIEW') {
@@ -5699,7 +5731,7 @@
       for (const d of ds.values()) for (const i of d?.items || []) if (i.questionnaireSessionId && !(i.questionnaireSessionId in S.qa)) sessions.set(i.questionnaireSessionId, d.organizationId);
       n = 0;
       await inBatches([...sessions], 10, async ([id, org]) => {
-        try { S.qa[id] = await questionnaireText(id, org); } catch { delete S.qa[id]; }
+        try { S.qa[id] = await questionnaireText(id, org, S.programs); } catch { delete S.qa[id]; }
         progress(++n, sessions.size);
         say(status, `Reading questionnaire answers… ${n} of ${sessions.size}`);
       });
@@ -5720,7 +5752,8 @@
       const m0 = g.members[0];
       if (!m0.slots?.length) return g;
       g.drafts = m0.slots.map(({ claim: c }) => {
-        if (VERDICT_LABELS[c.decision?.verdict]) return { verdict: c.decision.verdict, note: c.decision.note || '', from: 'saved' };
+        // A saved "accept with changes" keeps its changed value unless the verdict is changed here
+        if (VERDICT_LABELS[c.decision?.verdict]) return { verdict: c.decision.verdict, note: c.decision.note || '', adjusted: c.decision.adjusted || null, from: 'saved' };
         const v = modelVerdict(c);
         return { verdict: v, note: v ? c.review?.suggestedFix || '' : '', from: v ? 'review' : '' };
       });
@@ -5738,22 +5771,25 @@
     }
     const refreshMember = (m, d) => { if (!d?.id) return; m.d = d; m.slots = disputeShape(d, S.qa).slots; };
 
-    // ---- the actions; each goes to every copy in the group, one at a time (so each is logged as its own case)
-    async function saveGroups(groups) {
-      const work = groups.flatMap(g => disputeState(g).toSave.map(m => ({ g, m })));
+    // ---- the actions; each goes to every copy in the group, five at a time (each is still its own request, so
+    // each is logged as its own case, and Stop takes effect within five)
+    const ALL_AT_ONCE = 5;
+    async function eachCopy(work, verb, fn) {
       const failed = [];
       let n = 0;
-      for (const { g, m } of work) {
-        if (S.stop) break;
-        say(status, `Saving decisions… ${n + 1} of ${work.length}`);
-        try {
-          refreshMember(m, (await portal.gql('BrokerageDutyDisputeClaimsDecide',
-            `mutation BrokerageDutyDisputeClaimsDecide($input: BrokerageDutyDisputeClaimsDecideInput!) { brokerageDutyDisputeClaimsDecide(input: $input) { ${DISPUTE_FIELDS} } }`,
-            { input: { id: m.d.id, claims: m.slots.map((s, i) => ({ claimId: s.claim.id, verdict: g.drafts[i].verdict, note: g.drafts[i].note.trim(), adjusted: null })) } },
-            { 'x-act-as-org': m.d.organizationId })).brokerageDutyDisputeClaimsDecide);
-        } catch (e) { failed.push(`${m.r.ref}: ${e.message}`); }
+      await inBatches(work, ALL_AT_ONCE, async w => {
+        if (S.stop) return;
+        try { await fn(w); } catch (e) { failed.push(`${w.m.r.ref}: ${e.message}`); }
         progress(++n, work.length);
-      }
+        say(status, `${verb}… ${n} of ${work.length}`);
+      });
+      return { n, failed };
+    }
+    async function saveGroups(groups) {
+      const work = groups.flatMap(g => disputeState(g).toSave.map(m => ({ g, m })));
+      const { n, failed } = await eachCopy(work, 'Saving decisions', async ({ g, m }) => refreshMember(m, await decideDispute(m.d.id, m.d.organizationId,
+        m.slots.map((s, i) => ({ claimId: s.claim.id, verdict: g.drafts[i].verdict, note: g.drafts[i].note.trim(),
+          adjusted: g.drafts[i].verdict === 'ACCEPTED' ? adjustedInput(s.claim.type, g.drafts[i].adjusted) : null })))));
       return result(`${S.stop ? 'Stopped. ' : ''}Saved decisions on`, plural(n - failed.length, 'dispute'), failed);
     }
     function saveAll(groups) {
@@ -5767,17 +5803,7 @@
       if (!ms.length) return;
       if (!confirm(`Complete ${plural(ms.length, 'dispute')} in ${portal.mode().toUpperCase()} mode?\n\nEach is completed with the decisions saved on it, the same as the portal's Complete button. This can't be undone from here.`)) return;
       run(async () => {
-        const failed = [];
-        let n = 0;
-        for (const m of ms) {
-          if (S.stop) break;
-          say(status, `Completing… ${n + 1} of ${ms.length}`);
-          try {
-            refreshMember(m, (await portal.gql('BrokerageDutyDisputeComplete', `mutation BrokerageDutyDisputeComplete($id: ID!) { brokerageDutyDisputeComplete(id: $id) { ${DISPUTE_FIELDS} } }`,
-              { id: m.d.id }, { 'x-act-as-org': m.d.organizationId })).brokerageDutyDisputeComplete);
-          } catch (e) { failed.push(`${m.r.ref}: ${e.message}`); }
-          progress(++n, ms.length);
-        }
+        const { n, failed } = await eachCopy(ms.map(m => ({ m })), 'Completing', async ({ m }) => refreshMember(m, await completeDispute(m.d.id, m.d.organizationId)));
         return result(`${S.stop ? 'Stopped. ' : ''}Completed`, plural(n - failed.length, 'dispute'), failed);
       });
     }
@@ -5807,7 +5833,7 @@
       const link = m => h('a', { href: m.r.url, target: '_blank', rel: 'noopener', text: m.r.ref });
       const n = g.members.length;
       return [
-        h('div', { class: 'bt-head' }, n > 1 ? h('span', { class: 'chip bt-count', text: `×${n}`, title: `${n} orders exactly the same: what you do here is done to all ${n}` }) : null,
+        h('div', { class: 'bt-head' }, n > 1 ? h('span', { class: 'chip bt-count', text: `×${n}`, title: `${n} orders of the same company, exactly the same: what you do here is done to all ${n}` }) : null,
           h('b', { text: m0.r.title }), h('span', { class: 'hint', style: 'margin:0', text: m0.r.customer || m0.r.consignee || '' })),
         n > 1 ? h('details', { class: 'bt-members' }, h('summary', { class: 'hint', style: 'margin:0', text: `${n} identical: ${g.members.slice(0, 3).map(m => m.r.ref).join(', ')}${n > 3 ? '…' : ''}` }),
           h('div', { class: 'bt-links' }, g.members.map(link)))
@@ -5841,20 +5867,28 @@
         const o = s.item.original || {};
         const v = modelVerdict(c);
         const from = h('span', { class: 'hint', style: 'margin:0', text: dr.from === 'review' ? 'filled from the automated review' : dr.from === 'saved' ? 'saved decision' : '' });
-        const touched = () => { dr.from = ''; from.textContent = ''; update(); };
+        const touched = () => { dr.from = ''; from.textContent = ''; if (!dr.adjusted && changes) changes.hidden = true; update(); };
+        const changes = proposedText({ proposed: dr.adjusted }) ? h('div', { class: 'hint', style: 'margin:0', text: `Accepted with changes: ${proposedText({ proposed: dr.adjusted })}` }) : null;
         return h('div', { class: 'bt-claim' },
           h('div', {}, h('b', { text: CLAIM_TYPE_LABELS[c.type] || human2(c.type) }), proposedText(c, S.programs) ? h('span', { text: ` → ${proposedText(c, S.programs)}` }) : null),
           h('div', { class: 'hint', style: 'margin:0', text: [o.description, o.hsCode && `HS ${o.hsCode}`, o.countryOfOrigin].filter(Boolean).join(' · ') }),
           c.justification ? h('div', { class: 'hint', style: 'margin:0', text: `Merchant: ${c.justification}` }) : null,
           v ? h('div', { class: 'hint', style: 'margin:0', text: `Automated review: ${VERDICT_LABELS[v].toLowerCase()}${c.review?.suggestedFix ? `. ${c.review.suggestedFix}` : ''}` }) : null,
+          changes,
           h('div', { class: 'row', style: 'align-items:center' },
-            h('select', { class: 'field', style: 'width:auto', 'aria-label': 'Decision', onchange: e => { dr.verdict = e.target.value; touched(); } },
+            h('select', { class: 'field', style: 'width:auto', 'aria-label': 'Decision', onchange: e => { dr.verdict = e.target.value; dr.adjusted = null; touched(); } },
               h('option', { value: '', text: 'Decide…' }), Object.entries(VERDICT_LABELS).map(([k, t]) => h('option', { value: k, text: t, selected: dr.verdict === k }))),
             from),
           h('textarea', { class: 'field', rows: 2, placeholder: 'Note (required)', 'aria-label': 'Decision note', value: dr.note, oninput: e => { dr.note = e.target.value; touched(); } }));
       });
       update();
-      return h('div', { class: 'bt-card' }, membersOf(g), claims, stateEl, h('div', { class: 'row' }, saveB, doneB));
+      // Two or more open copies can be worked as one, on the portal's own page for one of them
+      const open = disputeState(g).open.length;
+      const asOne = merged.record()?.key === g.key;
+      const oneB = open > 1 ? h('button', { class: 'secondary', type: 'button', text: asOne ? 'Open the one you work ↗' : `Work as one (${open}) ↗`,
+        title: `Opens one of these ${open} in the portal. What you save or submit there with the portal's own buttons is done to the other ${open - 1} too.`,
+        onclick: () => { if (asOne) window.open(merged.record().leadUrl, '_blank'); else { merged.start(g); draw(); } } }) : null;
+      return h('div', { class: 'bt-card' }, membersOf(g), claims, stateEl, h('div', { class: 'row', style: 'flex-wrap:wrap' }, saveB, doneB, oneB));
     }
     function orderCard(g) {
       const m0 = g.members[0];
@@ -5873,13 +5907,13 @@
       const n = S.groups.reduce((a, g) => a + g.members.length, 0);
       const disputes = S.groups[0].kind === 'dispute';
       list.replaceChildren(...[
-        h('p', { class: 'hint', style: 'margin:0', text: `${plural(n, 'order')} of yours in ${plural(S.groups.length, 'group')}. Orders that are exactly the same show once (×N), and what you do to it is done to all of them.` }),
+        h('p', { class: 'hint', style: 'margin:0', text: `${plural(n, 'order')} of yours in ${plural(S.groups.length, 'group')}. Orders of the same company that are exactly the same (for disputes: every disputed line's HS code, description, origin, claims, merchant reasons and questionnaire answers) show once (×N), and what you do to it is done to all of them. "Work as one" opens one in the portal and copies what you do there to the rest.` }),
         disputes && h('div', { class: 'row' }, btn('Save all decisions', () => saveAll(S.groups)), btn('Complete all saved…', () => completeAll(S.groups))),
         ...S.groups.map(g => (g.kind === 'dispute' ? disputeCard(g) : orderCard(g))),
       ].filter(Boolean));
     }
 
-    const el = group('Batch work', 'Claim every unclaimed order of one class (for one customer, up to a count), then decide them in bulk. Saving decisions never completes anything: Complete and Resolve are their own buttons, and ask first.',
+    const el = group('Batch work', 'Claim every unclaimed order of one class (for one customer, up to a count), then decide them in bulk, or work identical ones as one dispute. Saving decisions never completes anything: Complete and Resolve are their own buttons, and ask first.',
       h('div', { class: 'row', style: 'align-items:center' }, h('span', { class: 'hint', style: 'margin:0', text: 'Portal mode:' }), modeChip, h('span', { style: 'flex:1' }), reloadBtn),
       h('div', { class: 'row' }, clsSelect),
       h('div', { class: 'row' }, customerInput, customers),
@@ -5890,6 +5924,183 @@
     summarize();
     return el;
   }
+
+  /* ---- working identical disputes as one (Batch work's "Work as one") */
+
+  // One dispute of an identical group stands for all of them: you work it on the portal's own page, and when the
+  // portal saves decisions on it or completes it, the same is done to every other copy. Each copy is read again
+  // first (its lines, claims and questionnaire answers) and only one still exactly the same as the dispute you
+  // worked, of the same company and still open, gets anything. Completing the copies asks first.
+  const MERGED_KEY = 'zt:batch:merged';
+  const merged = (() => {
+    const record = () => GM_getValue(MERGED_KEY, null);
+    // Saved only while it's still the same group (ending it in another tab wins)
+    const keep = m => { if (record()?.lead === m.lead) GM_setValue(MERGED_KEY, m); };
+    const R = { running: false, again: '', stop: false, msg: '', kind: '' };
+    let host = null, box = null, lastPath = '';
+
+    function start(g) {
+      const open = g.members.filter(m => m.d && DECIDABLE.has(m.d.status)).sort((a, b) => (a.r.dueMs ?? Infinity) - (b.r.dueMs ?? Infinity));
+      if (open.length < 2) return;
+      const [lead, ...rest] = open;
+      const cur = record();
+      if (cur && cur.key !== g.key && !confirm(`You're already working ${cur.leadRef} as one (×${cur.copies.length + 1}). Stop that and work this group as one instead?`)) return;
+      if (!confirm(`Work these ${open.length} identical disputes as one?\n\n${lead.r.ref} opens in a new tab. Work it with the portal's own buttons: the decisions you save there are copied to the other ${rest.length}, and when you press Submit there you're asked whether to submit them too.\n\nEach copy is read again first and left alone if it no longer matches exactly.\n\nPortal mode: ${portal.mode().toUpperCase()}`)) return;
+      GM_setValue(MERGED_KEY, {
+        lead: lead.d.id, leadRef: lead.r.ref, leadUrl: lead.r.url, org: lead.d.organizationId, customer: lead.r.customer || lead.r.consignee || '',
+        key: g.key, mode: portal.mode(), copies: rest.map(m => ({ id: m.d.id, ref: m.r.ref, url: m.r.url })), results: {}, pending: '', at: Date.now(),
+      });
+      window.open(lead.r.url, '_blank');
+    }
+    function end() {
+      const m = record();
+      if (R.running) { R.stop = true; R.again = ''; }
+      if (m && !confirm(`Stop working ${m.leadRef} as one? Nothing already copied is undone; from now on what you do there stays on that dispute only.`)) return;
+      GM_deleteValue(MERGED_KEY);
+      R.msg = '';
+      draw();
+    }
+
+    // The portal's own reply to a save or complete on the dispute you work
+    function onReply(op, status, json) {
+      if (op !== 'BrokerageDutyDisputeClaimsDecide' && op !== 'BrokerageDutyDisputeComplete') return;
+      const m = batchUnlocked() ? record() : null;
+      const d = json?.data && Object.values(json.data)[0];
+      if (!m || status >= 300 || json.errors?.length || d?.id !== m.lead) return;
+      queue(op === 'BrokerageDutyDisputeComplete' ? 'complete' : 'decide');
+    }
+    // One copy run at a time; a save made while one runs is copied right after it
+    function queue(kind) {
+      if (R.running) { if (kind === 'complete' || !R.again) R.again = kind; return; }
+      run(kind);
+    }
+    async function run(kind) {
+      let m = record();
+      if (!m) return;
+      if (kind === 'complete' && !confirm(`${m.leadRef} is submitted. Submit the other ${m.copies.length} identical disputes too, with the same decisions?\n\nPortal mode: ${portal.mode().toUpperCase()}. This can't be undone from here.\n\nCancel copies the decisions only; you can submit them later from the bar at the bottom.`)) kind = 'decide';
+      Object.assign(R, { running: true, stop: false, kind, msg: '' });
+      m.pending = kind;
+      keep(m);
+      draw();
+      try {
+        R.msg = await copy(m, kind === 'complete');
+        m = record() ? { ...record(), results: m.results, pending: '', completeLater: kind !== 'complete' && m.leadDone } : null;
+        if (m) keep(m);
+      } catch (e) {
+        R.msg = e.message;
+        console.warn('[Tools] work as one', e);
+        const cur = record();
+        if (cur) keep({ ...cur, results: m.results, pending: '' });
+      }
+      R.running = false;
+      draw();
+      const next = R.again;
+      R.again = '';
+      if (next && record()) run(next);
+    }
+    async function copy(m, complete) {
+      if (portal.mode() !== m.mode) throw new Error(`The portal is in ${portal.mode().toUpperCase()} mode, but these disputes were grouped in ${m.mode.toUpperCase()} mode. Nothing was copied.`);
+      const qa = {};
+      const shapeOf = async d => {
+        for (const i of d.items || []) {
+          const s = i.questionnaireSessionId;
+          if (s && !(s in qa)) { try { qa[s] = await questionnaireText(s, d.organizationId); } catch { /* unreadable: matches nothing */ } }
+        }
+        return disputeShape(d, qa);
+      };
+      say('Reading the dispute you worked again…');
+      const lead = await fetchDispute(m.lead, m.org);
+      const ls = await shapeOf(lead);
+      if (ls.key !== m.key) throw new Error(`${m.leadRef} no longer matches the group it was picked from (a line, claim or answer changed there), so nothing was copied. Stop working as one and group them again in Batch work.`);
+      m.leadDone = !DECIDABLE.has(lead.status);
+      if (complete && !m.leadDone) throw new Error(`${m.leadRef} isn't submitted, so the others weren't either.`);
+      const want = ls.slots.map(s => s.claim.decision);
+      if (!want.some(d => d?.verdict)) return 'No decisions saved on it yet: nothing to copy.';
+      const todo = m.copies.filter(c => m.results[c.id]?.state !== 'completed');
+      let n = 0;
+      for (let i = 0; i < todo.length && !R.stop; i += 5) {
+        await Promise.all(todo.slice(i, i + 5).map(async c => {
+          try {
+            let d = await fetchDispute(c.id, m.org);
+            if (d.organizationId !== m.org) throw new Error('belongs to another company');
+            if (!DECIDABLE.has(d.status)) { m.results[c.id] = { state: 'closed', why: human2(d.status) }; return; }
+            const s = await shapeOf(d);
+            if (s.key !== m.key) throw new Error('no longer exactly the same');
+            if (s.slots.some((x, j) => want[j]?.verdict && decisionKey(x.claim.decision) !== decisionKey(want[j]))) {
+              d = await decideDispute(d.id, d.organizationId, s.slots.map((x, j) => [x, want[j]]).filter(([, w]) => w?.verdict)
+                .map(([x, w]) => ({ claimId: x.claim.id, verdict: w.verdict, note: w.note ?? '', adjusted: adjustedInput(x.claim.type, w.adjusted) })));
+            }
+            if (complete) { await completeDispute(d.id, d.organizationId); m.results[c.id] = { state: 'completed' }; }
+            else m.results[c.id] = { state: 'decided' };
+          } catch (e) { m.results[c.id] = { state: 'skipped', why: e.message }; }
+          say(`${complete ? 'Submitting' : 'Copying decisions to'} the others… ${++n} of ${todo.length}`);
+        }));
+      }
+      const counts = {};
+      for (const c of m.copies) { const st = m.results[c.id]?.state || 'waiting'; counts[st] = (counts[st] || 0) + 1; }
+      return [R.stop ? 'Stopped.' : '', counts.completed && `${counts.completed} submitted`, counts.decided && `${counts.decided} with the same decisions`,
+        counts.closed && `${counts.closed} already closed`, counts.skipped && `${counts.skipped} left alone (see below)`, counts.waiting && `${counts.waiting} not reached`].filter(Boolean).join(' · ');
+    }
+
+    // ---- the bar at the bottom of the page: on the dispute you work, on its copies, and while copying
+    const BAR_CSS = `
+      :host { all: initial; --bg:#ffffff; --fg:#18181b; --muted:#71717a; --line:#e4e4e7; --soft:#f4f4f5; --accent:#b45309; --accent-fg:#ffffff; --warn:#b45309; --err:#b91c1c; }
+      :host([data-theme="dark"]) { --bg:#18181b; --fg:#f4f4f5; --muted:#a1a1aa; --line:#3f3f46; --soft:#27272a; --accent:#f59e0b; --accent-fg:#111111; --warn:#fbbf24; --err:#f87171; }
+      .bar { position: fixed; z-index: 2147482990; left: 50%; bottom: 16px; transform: translateX(-50%); width: min(620px, calc(100vw - 32px)); max-height: 50vh; overflow-y: auto;
+        font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+        border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.3); padding: 10px 14px; box-sizing: border-box; }
+      b { font-weight: 600; } p { margin: 4px 0 0; } .muted { color: var(--muted); } .warn { color: var(--warn); } .err { color: var(--err); }
+      .row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+      button { font: inherit; cursor: pointer; background: transparent; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; }
+      button:hover { background: var(--soft); } button.primary { background: var(--accent); color: var(--accent-fg); border: 0; font-weight: 600; }
+      button:disabled { opacity: .55; cursor: default; }
+      a { color: inherit; } summary { cursor: pointer; color: var(--muted); margin-top: 6px; } ul { margin: 4px 0 0; padding-left: 18px; }`;
+    function say(text) { R.msg = text; draw(); }
+    function draw() {
+      const m = batchUnlocked() ? record() : null;
+      const id =(location.pathname.match(/^\/duty-disputes\/([^/?#]+)/) || [])[1] || '';
+      const onLead = m && id === m.lead;
+      const onCopy = m && !onLead && m.copies.some(c => c.id === id);
+      if (!m || !(onLead || onCopy || R.running || m.pending)) { if (host) host.hidden = true; return; }
+      if (!host) {
+        host = h('div', { id: 'zt-merged-host' });
+        const root = host.attachShadow({ mode: 'open' });
+        root.append(h('style', { text: BAR_CSS }), box = h('div', { class: 'bar', role: 'status' }));
+      }
+      if (!host.isConnected) document.body.append(host);
+      host.hidden = false;
+      host.dataset.theme = pageIsDark() ? 'dark' : 'light';
+      const all = m.copies.length + 1;
+      const skipped = m.copies.filter(c => m.results[c.id]?.state === 'skipped');
+      const btn = (text, onclick, cls = '') => h('button', { type: 'button', class: cls, text, disabled: R.running && !/Stop/.test(text), onclick });
+      const lead = h('a', { href: m.leadUrl, text: m.leadRef });
+      box.replaceChildren(...[
+        h('div', {}, h('b', { text: `Working as one · ×${all}` }), h('span', { class: 'muted', text: ` · ${m.customer} · ${m.mode.toUpperCase()}` })),
+        onCopy ? h('p', { class: 'warn' }, `This dispute is one of the ${all} being worked as one through `, lead, '. Work that one: what you do there is copied here.')
+          : onLead ? h('p', { text: `This dispute stands for ${all} identical disputes. Decide the claims and press Submit here as usual: decisions are copied to the other ${m.copies.length} as you save them, and Submit asks whether to submit them too.` })
+            : h('p', {}, 'Copying from ', lead, ' to its identical copies.'),
+        R.msg ? h('p', { class: /no longer|isn't|mode, but|nothing was/i.test(R.msg) ? 'err' : '', text: R.msg }) : null,
+        !R.running && m.pending ? h('p', { class: 'warn', text: 'Copying stopped part-way (the page was closed or reloaded).' }) : null,
+        skipped.length ? h('details', {}, h('summary', { text: `${skipped.length} left alone` }),
+          h('ul', {}, skipped.slice(0, 50).map(c => h('li', {}, h('a', { href: c.url, target: '_blank', text: c.ref }), `: ${m.results[c.id].why}`)))) : null,
+        h('div', { class: 'row' }, ...[
+          R.running ? btn('Stop', () => { R.stop = true; R.again = ''; }) : null,
+          !R.running && onLead ? btn('Copy decisions now', () => queue('decide')) : null,
+          !R.running && m.pending ? btn('Finish copying', () => queue(m.pending), 'primary') : null,
+          !R.running && !m.pending && m.completeLater ? btn(`Submit the other ${m.copies.length}…`, () => queue('complete'), 'primary') : null,
+          btn('Stop working as one', end),
+        ].filter(Boolean))].filter(Boolean));
+    }
+    // Called on every route check: redraws only when the page changed
+    function onRoute() {
+      if (host && !host.hidden && !host.isConnected) document.body.append(host);   // the app re-rendered <body>
+      if (location.pathname === lastPath) return;
+      lastPath = location.pathname;
+      draw();
+    }
+    replyWatchers.add(onReply);
+    return { record, start, onRoute };
+  })();
 
   /* ------------------------------------------------- dashboard: the panel */
 
@@ -7775,6 +7986,7 @@
       showPrograms();
       if (onQueuePage()) { queue = queue || createQueue(); queue.mount(); }
       else queue?.unmount();
+      merged.onRoute();
       if (location.pathname === lastPath) return;
       lastPath = location.pathname;
       desk.onRoute();
