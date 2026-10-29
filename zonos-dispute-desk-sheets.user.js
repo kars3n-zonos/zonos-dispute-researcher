@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.13.0
+// @version      7.13.1
 // @description  Sheets edition: cases go to the team Google Sheet, each with a Google Doc of its answers and decisions. Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -2760,15 +2760,28 @@
       const isLog = b => b.type === 'toggle' && (b.toggle.rich_text || []).map(t => t.plain_text).join('') === LOG_TITLE;
       let i = -1;
       for (let k = kids.length - 1; k >= 0; k--) if (isLog(kids[k])) { i = k; break; }
+      let out;
       if (i < 0) {
         const r = await notion('PATCH', `/blocks/${pageId}/children`, { children: [logToggle([])] });
-        return { log: r.results[0].id, prev: kids.length ? kids[kids.length - 1].id : null };
-      }
-      return { log: kids[i].id, prev: i > 0 ? kids[i - 1].id : null };
+        out = { log: r.results[0].id, prev: kids.length ? kids[kids.length - 1].id : null };
+      } else out = { log: kids[i].id, prev: i > 0 ? kids[i - 1].id : null };
+      logIds[pageId] = out.log;
+      GM_setValue(LOG_IDS, logIds);
+      return out;
     }
+    // Each case page's Case log toggle, once found, so a log line is one call instead of reading the whole page
+    const LOG_IDS = 'desk:logIds';
+    const logIds = GM_getValue(LOG_IDS, {});
     async function addLog(pageId, lines) {
+      const children = lines.map(logItem);
+      if (logIds[pageId]) {
+        // If the toggle was deleted in Notion, it's found (or made) again below
+        const ok = await notion('PATCH', `/blocks/${logIds[pageId]}/children`, { children }).then(() => true, () => false);
+        if (ok) return;
+        delete logIds[pageId];
+      }
       const { log } = await pageLayout(pageId);
-      await notion('PATCH', `/blocks/${log}/children`, { children: lines.map(logItem) });
+      await notion('PATCH', `/blocks/${log}/children`, { children });
     }
     async function addAboveLog(pageId, blocks) {
       if (!blocks.length) return;
@@ -2777,11 +2790,15 @@
     }
 
     const rowCache = GM_getValue(ROWS, {});
+    // The case's row as last found on this computer (one call, no search), or null
+    async function cachedRow(id) {
+      if (!rowCache[id]) return null;
+      const p = await notion('GET', `/pages/${rowCache[id]}`).catch(() => null);
+      return p && !p.in_trash && !p.archived ? p : null;
+    }
     async function findRow(ctx) {
-      if (rowCache[ctx.id]) {
-        const p = await notion('GET', `/pages/${rowCache[ctx.id]}`).catch(() => null);
-        if (p && !p.in_trash && !p.archived) return p;
-      }
+      const known = await cachedRow(ctx.id);
+      if (known) return known;
       const q = filter => notion('POST', `/data_sources/${DS()}/query`, { filter, page_size: 3 }).then(r => r.results || []);
       let rows = await q({ property: 'Dashboard', url: { contains: ctx.id } });
       for (const t of ctx.tracking.slice(0, 2)) {
@@ -2856,8 +2873,13 @@
       Object.assign(props, claimProps(assign, me, name));
       if (resolution) props.Resolution = { rich_text: resolutionText(resolution, me, name) };
       if (Object.keys(props).length) page = await notion('PATCH', `/pages/${page.id}`, { properties: props });
-      await addAboveLog(page.id, [...(withSnapshot ? [snapshot(ctx)] : []), ...(extra || [])]);
-      await addLog(page.id, [logLine]);
+      // New blocks go just above the Case log (one read of the page's blocks finds where), the line inside it
+      const above = [...(withSnapshot ? [snapshot(ctx)] : []), ...(extra || [])];
+      if (above.length) {
+        const { log: logId, prev } = await pageLayout(page.id);
+        await notion('PATCH', `/blocks/${page.id}/children`, prev ? { after: prev, children: above } : { position: { type: 'start' }, children: above });
+        await notion('PATCH', `/blocks/${logId}/children`, { children: [logItem(logLine)] });
+      } else await addLog(page.id, [logLine]);
       return page;
     }
 
@@ -3010,22 +3032,40 @@
         return;
       }
       if (!ent || !enabled()) { if (ent) D.state = 'off'; changed(); return; }
-      await sleep(3000);   // let the portal load its data
-      if (D.ent !== ent) return;
       try {
-        const ctx = caseContext(ent);
-        const page = await findRow(ctx);
+        // A case seen before on this computer is found straight away by its saved row. A new one is searched for
+        // by its link and tracking numbers, which needs the portal's data, so that waits for the portal to load.
+        let page = await cachedRow(ent.id);
         if (D.ent !== ent) return;
+        if (!page) {
+          await sleep(3000);
+          if (D.ent !== ent) return;
+          page = await findRow(caseContext(ent));
+          if (D.ent !== ent) return;
+        }
         if (page) {
           D.row = page;
           D.state = 'tracked';
+          changed();   // the card and the comments show now; the rest happens behind them
+          pollAnswers(true);
           const k = `desk:opened:${ent.id}`;
           if (Date.now() - GM_getValue(k, 0) > OPEN_LOG_THROTTLE_MS) {
             GM_setValue(k, Date.now());
-            await apply(ctx, { log: `Opened ${midSentence(ctx.kind)} ${ent.id}.`, withSnapshot: true });
-            D.msg = dryRun() ? 'Test mode: would log this visit' : 'Visit logged in Notion';
+            // The visit's portal snapshot needs the portal's data. It's added only when that data changed since the
+            // last snapshot on this computer; otherwise the visit is just a line in the Case log.
+            sleep(3000)
+              .then(() => {
+                if (D.ent !== ent) return null;
+                const ctx = caseContext(ent);
+                const facts = ctx.hasData ? ctx.facts.join('\n') : '';
+                const snapKey = `desk:snapshot:${ent.id}`;
+                const fresh = !!facts && GM_getValue(snapKey, '') !== facts;
+                return apply(ctx, { log: `Opened ${midSentence(ctx.kind)} ${ent.id}.${fresh ? '' : ' (Portal data unchanged since the last snapshot.)'}`, withSnapshot: fresh })
+                  .then(p => { if (p && fresh && !dryRun()) GM_setValue(snapKey, facts); return p; });
+              })
+              .then(p => { if (p && D.ent === ent) { D.msg = dryRun() ? 'Test mode: would log this visit' : 'Visit logged in Notion'; changed(); } })
+              .catch(e => console.warn('[Dispute Desk] logging the visit', e));
           }
-          pollAnswers(true);
         } else {
           // Not in Notion yet: nothing is created until you press "Research in Claude Code" (or "Start case now")
           D.state = 'untracked';
