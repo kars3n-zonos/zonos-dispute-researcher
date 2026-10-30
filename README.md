@@ -76,7 +76,7 @@ Every section folds open:
   - HS codes on the page opening in the Entry Assistant tab
   - questionnaire program ids replaced with what they are
   - keyboard shortcuts
-- **Entry Assistant:** your own token, for the HTS facts in research prompts.
+- **Entry Assistant:** your own token, for the HTS facts in research prompts, including the duty calculator: each line's HTS code, origin and value are run through it, and the prompt lists every duty with its Chapter 99 code and the open questions (each naming the Chapter 99 code a yes brings) as research points. The reply answers each one from the research, and Tools runs the calculator again with those answers: the resulting Chapter 99 codes show in the Research tab and go in the case doc.
 - **Google Sheet:** the team sheet's web app address and secret (from the setup block). Each case you claim gets a row and a Google Doc; the Research tab shows the case's comments, and you can post your own.
 - **Prompts:** the research prompts' fixed text, editable by the team in the sheet's Prompts tab (**Set up Prompts** adds it).
 - **Claude Code research** (optional): a "Research in Claude Code" button that puts the request in the sheet's Research tab and starts your cloud routine; the answer comes back to the panel and the case doc.
