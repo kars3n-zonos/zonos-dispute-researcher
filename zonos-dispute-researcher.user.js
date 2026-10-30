@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.50.0
+// @version      7.51.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1350,7 +1350,9 @@
     return L;
   }
 
-  function factLines(f) {
+  // `shown`: what earlier lines of the same prompt already listed (Chapter 99 lists, calculator questions, the
+  // calculator note), so a prompt with several lines says each once
+  function factLines(f, shown = { lists: [], questions: new Set(), calcNote: false }) {
     const L = [];
     if (f.codes.length) {
       const release = f.codes.find(c => c.release)?.release;
@@ -1385,20 +1387,23 @@
       }
     }
     for (const c of f.calc || []) {
-      if (c === f.calc[0]) L.push('', "Duty calculator results (Entry Assistant API) may not be 100% correct: double-check them against the HTS and CBP guidance, and say so in the reply.");
+      if (!shown.calcNote) { shown.calcNote = true; L.push('', "Duty calculator results (Entry Assistant API) may not be 100% correct: double-check them against the HTS and CBP guidance, and say so in the reply."); }
       L.push('', `Duty calculator (Entry Assistant API${c.release ? `, ${c.release}` : ''}) for the ${c.role.toLowerCase()} \`${c.code}\`${c.origin ? ` made in ${regionName(c.origin)}` : ', origin not given (the costliest country assumed)'}${c.value ? ` at ${c.value}` : ' (value not known: $100 stands in, so only the codes count, not the amounts)'}:`);
       if (c.error) { L.push(`- It couldn't work this line out: ${c.error}`); continue; }
       L.push('- Duties, with every open question taken the costlier way:',
         ...c.parts.map(p => `  - \`${p.code}\` ${p.name}: ${p.rate}${p.assumed ? ' (rests on an open question below)' : ''}${p.note ? `. ${p.note}` : ''}`));
-      if (c.questions.length) L.push('- Open questions it couldn\'t settle (each names the Chapter 99 code a yes brings):',
-        ...c.questions.map(q => `  - ${q.text}${q.why ? ` ${q.why.replace(/,\s*Section/, ' under Section')}.` : ''}`));
+      const newQs = c.questions.filter(q => !shown.questions.has(q.id));
+      if (newQs.length) L.push('- Open questions it couldn\'t settle (each names the Chapter 99 code a yes brings):',
+        ...newQs.map(q => `  - ${q.text}${q.why ? ` ${q.why.replace(/,\s*Section/, ' under Section')}.` : ''}`));
+      if (c.questions.length > newQs.length) L.push(`- ${newQs.length ? 'Also' : 'Open questions:'} the ${c.questions.length - newQs.length} question${c.questions.length - newQs.length === 1 ? '' : 's'} already listed above.`);
+      c.questions.forEach(q => shown.questions.add(q.id));
     }
-    // One list per code and origin; a list identical to one already shown is skipped
-    const shownLists = [];
+    // One list per code and origin; a list identical to one already shown (here or for an earlier line) is skipped
+    const shownLists = shown.lists;
     for (const c of [...f.codes, ...f.origins.slice(1)]) {
       if (!c.chapter99?.length) continue;
       const key = c.chapter99.map(x => x.code).join(',');
-      if (shownLists.includes(key)) continue;
+      if (shownLists.includes(key)) { L.push('', `Chapter 99 headings for the ${c.role.toLowerCase()} ${c.code}: the same list as above.`); continue; }
       shownLists.push(key);
       const metalRule = c.extraDuties.some(e => /232/.test(e.what || ''))
         ? "Which one applies depends on the metal, how much of the weight is metal, what the item is used for, and where it's made:"
@@ -1694,6 +1699,9 @@
 
   function buildPrompt(d, s, attachedNames) {
     const L = [];
+    // Facts shared across the lines, each said once (see factLines)
+    const shownFacts = { lists: [], questions: new Set(), calcNote: false };
+    const seenFacts = new Map();
     const items = d.items.filter(i => i.inDispute);
     const allDocs = [...d.items.flatMap(i => i.docs), ...d.orderDocs].map(x => x.name);
     const notAttached = allDocs.filter(n => !attachedNames.includes(n));
@@ -1734,7 +1742,12 @@
         });
       }
       const facts = s.facts?.[item.line];
-      if (facts?.data) L.push(...factLines(facts.data));
+      if (facts?.data) {
+        const fl = factLines(facts.data, shownFacts);
+        const same = seenFacts.get(JSON.stringify([facts.data.codes.map(c => c.code), facts.data.origins.map(o => o.from), (facts.data.calc || []).map(c => [c.code, c.origin, c.value])]));
+        if (same) L.push('', `HTS facts, duty calculator and Chapter 99 headings: the same as for line ${same} (the same codes, origin and value).`);
+        else { seenFacts.set(JSON.stringify([facts.data.codes.map(c => c.code), facts.data.origins.map(o => o.from), (facts.data.calc || []).map(c => [c.code, c.origin, c.value])]), item.line); L.push(...fl); }
+      }
       else if (facts?.error) L.push('', `HTS facts: the script's lookup didn't run (${LOOKUP_FAILED[facts.kind] || 'the lookup failed'}). Look the codes up with the entry-assistant skill if you have it, otherwise use your own HTS knowledge, and say which in the reply.`);
       const matches = s.matches[item.line];
       if (matches?.length) {
@@ -2532,8 +2545,9 @@
       const sl = desk.screeningLines();
       if (sl.length) L.push('', '## Screening data (from the portal)', '(The screening service\'s own record of the hit: scores from 0 to 100%, "no match / partial / exact" per field, and the listed record as the screening list holds it.)', ...sl);
     }
+    const orderShown = { lists: [], questions: new Set(), calcNote: false };
     for (const f of facts.filter((x, i) => x.data || facts.findIndex(y => y.error) === i)) {
-      if (f.data) L.push(...factLines(f.data));
+      if (f.data) L.push(...factLines(f.data, orderShown));
       else if (f.error) L.push('', `HTS facts: the script's lookup didn't run (${LOOKUP_FAILED[f.kind] || 'the lookup failed'}). Look the codes up with the entry-assistant skill if you have it, otherwise use your own HTS knowledge, and say which in the reply.`);
     }
     // Every code's calculator facts together, so its questions are research points and the reply answers each
@@ -3168,8 +3182,29 @@
 
     // The request goes in the sheet's Research tab, and the cloud session is told how to read it and
     // send its answer back, with that one request's own token (never the sheet's secret)
+    // A Google Sheets cell holds 50,000 characters. A prompt longer than the sheet's 49,000 has its longest reference
+    // text shortened (Chapter 99 heading wording, product descriptions from the merchant's site, long questionnaire
+    // answers and notes), never the instructions or the reply template. Past that, it says so.
+    const SHEET_PROMPT_MAX = 48500;
+    function fitForSheet(prompt) {
+      if (prompt.length <= SHEET_PROMPT_MAX) return prompt;
+      const clip = (l, n) => (l.length > n ? `${l.slice(0, n)}… (cut to fit the sheet)` : l);
+      const steps = [
+        l => (/^- 99\d\d\.\d\d\.\d\d: /.test(l) ? clip(l, 180) : l),          // Chapter 99 heading wording
+        l => (/^ {2}Description: /.test(l) ? clip(l, 240) : l),                    // the merchant's product descriptions
+        l => (/^ {4,6}(A|Q): |^ {2}- .*: (?!<)/.test(l) ? clip(l, 300) : l),     // questionnaire answers, calculator notes
+        l => (/^- (Where they split|What decides it|CBP rulings)|^ {2}- [A-Z]\w{2,}\d/.test(l) ? clip(l, 220) : l),
+      ];
+      let out = prompt;
+      for (const step of steps) {
+        out = out.split('\n').map(step).join('\n');
+        if (out.length <= SHEET_PROMPT_MAX) return out;
+      }
+      throw new Error(`This research prompt is ${out.length.toLocaleString()} characters even shortened, more than a Google Sheet cell holds (49,000). Untick some lines and research them in two goes.`);
+    }
     async function queueSheetResearch(ctx, { prompt, docs, lines, label, openTab, what }) {
       const ent = D.ent;
+      prompt = fitForSheet(prompt);
       const who = GM_getValue(AUTHOR_KEY, '') || (await portalName()) || '';
       const r = await sheetsCall('research', ctx, { request: {
         prompt, lines, what, who, label: `${label}${testMode() ? ' [test mode]' : ''}`,
