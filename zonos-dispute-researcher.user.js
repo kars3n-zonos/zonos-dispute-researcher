@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.54.0
+// @version      7.55.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1952,19 +1952,42 @@
   // codes on it, and the buttons it offers) and the research brief comes from the class's guide below.
   const WORK_ORDER_PATH = /^\/entry-writer-queue\/([A-Z][A-Z_]+)\/([^/]+)\/?$/;
   const isCasePage = () => DISPUTE_PATH.test(location.pathname) || WORK_ORDER_PATH.test(location.pathname);
-  // Work orders whose page is named by the work order's own id but whose case is its subject (an AD/CVD review's
-  // manifest line, as the queue names it): { workOrderId: subject }, learned from the queue and the portal's replies
+  // The portal opens a work order's page by the work order's own id (a dispute, an entry or a manifest line too), but
+  // its case is its subject, as the queue names it: { workOrderId: subject }, learned from the queue and the portal's
+  // replies. A dispute review's page also names its dispute in its heading.
   const WO_SUBJECT_KEY = 'zt:woSubjects';
-  const caseIdOf = pathId => GM_getValue(WO_SUBJECT_KEY, {})[pathId] || pathId;
+  let woSubjects = null;
+  let woSubjectsSave = 0;
+  const woSubjectMap = () => woSubjects || (woSubjects = GM_getValue(WO_SUBJECT_KEY, {}));
+  function caseIdOf(pathId) {
+    let id = woSubjectMap()[pathId];
+    if (!id && /^\d+$/.test(pathId)) id = (woSubjects = GM_getValue(WO_SUBJECT_KEY, {}))[pathId];   // learned in another tab
+    if (!id && /^\d+$/.test(pathId) && /^\/entry-writer-queue\/DUTY_DISPUTE_REVIEW\//.test(location.pathname)) {
+      id = (clean(document.querySelector('main h1')?.textContent).match(/^duty_dispute_(?!item_)[A-Za-z0-9]+$/) || [])[0];
+    }
+    return id || pathId;
+  }
   function rememberSubject(woId, sid) {
-    if (!woId || !sid || String(woId) === sid) return false;
-    const m = GM_getValue(WO_SUBJECT_KEY, {});
+    if (!woId || !sid || String(woId) === sid || !/^\d+$/.test(String(woId))) return false;
+    const m = woSubjectMap();
     if (m[woId] === sid) return false;
     m[woId] = sid;
-    const keys = Object.keys(m);
-    for (const k of keys.slice(0, Math.max(0, keys.length - 3000))) delete m[k];
-    GM_setValue(WO_SUBJECT_KEY, m);
+    if (!woSubjectsSave) woSubjectsSave = setTimeout(() => {
+      woSubjectsSave = 0;
+      const all = { ...GM_getValue(WO_SUBJECT_KEY, {}), ...woSubjects };
+      const keys = Object.keys(all);
+      for (const k of keys.slice(0, Math.max(0, keys.length - 5000))) delete all[k];
+      woSubjects = all;
+      GM_setValue(WO_SUBJECT_KEY, all);
+    }, 2000);
     return true;
+  }
+  // The dispute on this page: /duty-disputes/<id>, or a dispute review's work order page
+  function disputeIdHere() {
+    if (DISPUTE_PATH.test(location.pathname)) return location.pathname.split('/').filter(Boolean).pop();
+    const m = WORK_ORDER_PATH.exec(location.pathname);
+    const id = m?.[1] === 'DUTY_DISPUTE_REVIEW' ? caseIdOf(decodeURIComponent(m[2])) : '';
+    return /^duty_dispute_/.test(id) ? id : '';
   }
 
   // Safe-side rules shared by every class
@@ -2737,7 +2760,7 @@
       captured.push({ op, at: Date.now(), json });
       captureSeq++;
       let learned = false;
-      for (const o of walk(json)) if (isWorkOrder(o) && !o.subject?.id && o.subjectKey && /^\d+$/.test(String(o.id))) learned = rememberSubject(String(o.id), o.subjectKey) || learned;
+      for (const o of walk(json)) if (isWorkOrder(o)) learned = rememberSubject(String(o.id), subjectId(o)) || learned;
       if (learned) changed();
       if (captured.length > 60) captured.shift();
       const sent = varsByOp[op] && Date.now() - varsByOp[op].at < 15000 ? varsByOp[op].vars : null;
@@ -3709,7 +3732,7 @@
     const dd = n.type === 'DUTY_DISPUTE_REVIEW' && /^duty_dispute_/.test(sid);
     // An AD/CVD review's subject is a manifest line, which the portal no longer opens by: its page is the work order's
     const at = !n.subject?.id && /^\d+$/.test(String(n.id)) ? n.id : sid;
-    if (at !== sid) rememberSubject(String(n.id), sid);
+    rememberSubject(String(n.id), sid);
     const url = dd ? `/duty-disputes/${sid}`
       : `${QUEUE_PATH}/${n.type}/${encodeURIComponent(at)}${n.consignment?.id ? `?consignment=${n.consignment.id}` : ''}`;
     const lines = (n.detail || '').split('\n').map(clean).filter(Boolean);
@@ -5683,15 +5706,45 @@
     const t = clean(b.textContent);
     return t && (t.length < 40 || / · \d{4}/.test(t)) && !b.closest('[role="dialog"], nav, header') && !/\([A-Z]{2}\)$/.test(t) && !b.getAttribute('aria-haspopup') && b.getAttribute('role') !== 'combobox';
   });
+  // A dispute page's folds: each item, its questionnaires ("USMCA certification of origin 4 changed"), its HS code
+  // details ("Order item — …") and Notes. The bar has the items and Notes.
+  const disputeFold = t => (/^Order item — /.test(t) ? 'details' : /\d+ changed$|unchanged$/i.test(t) ? 'questionnaire' : /^(Notes|Audit trail)/i.test(t) ? 'section' : 'item');
+  const disputeSections = main => [...main.querySelectorAll('button[aria-expanded]')].filter(b => !b.closest('[role="dialog"], nav, header') && !b.getAttribute('aria-haspopup')
+    && ['item', 'section'].includes(disputeFold(clean(b.textContent))));
   let glanceSig = '';
   let glanceFolded = '';
+  // What Advanced folded, by page and label. The portal remembers what's folded, so it's opened again by Normal, or
+  // the next time the page opens without Advanced.
+  const GLANCE_FOLDS_KEY = 'zt:glanceFolds';
+  function noteFolded(label) {
+    const all = GM_getValue(GLANCE_FOLDS_KEY, {});
+    const k = location.pathname;
+    all[k] = [...new Set([...(all[k] || []), label])];
+    const keys = Object.keys(all);
+    for (const old of keys.slice(0, Math.max(0, keys.length - 500))) delete all[old];
+    GM_setValue(GLANCE_FOLDS_KEY, all);
+  }
+  let foldsRestored = '';
+  function restoreFolds(now = false) {
+    const k = location.pathname;
+    if (!now && foldsRestored === k) return;
+    const btns = [...document.querySelectorAll('main button[aria-expanded]')];
+    if (!btns.length) return;   // not drawn yet
+    foldsRestored = k;
+    const all = GM_getValue(GLANCE_FOLDS_KEY, {});
+    if (!all[k]) return;
+    for (const b of btns) if (b.getAttribute('aria-expanded') === 'false' && all[k].includes(clean(b.textContent))) b.click();
+    delete all[k];
+    GM_setValue(GLANCE_FOLDS_KEY, all);
+  }
   function orderGlance() {
     const main = document.querySelector('main');
-    // Dispute reviews have their own summary cards on the page
-    if (!main || !WORK_ORDER_PATH.test(location.pathname) || /^\/entry-writer-queue\/DUTY_DISPUTE/.test(location.pathname)) { undoGlance(); return; }
-    const g0 = desk.glance();
+    if (!main || !WORK_ORDER_PATH.test(location.pathname)) { undoGlance(); return; }
+    // A dispute review has its own summary cards on the page: no At a glance card, and its bar jumps between items
+    const isDispute = /^\/entry-writer-queue\/DUTY_DISPUTE/.test(location.pathname);
+    const g0 = isDispute ? null : desk.glance();
     const g = g0 && (g0.tracking || g0.entryNo || g0.items.length) ? g0 : null;
-    const secs = pageSections(main);
+    const secs = isDispute ? disputeSections(main) : pageSections(main);
     if (!g && !secs.length) return;
     const page = main.firstElementChild;
     if (!page) return;
@@ -5734,7 +5787,10 @@
       for (const b of secs) {
         let t = clean(b.textContent);
         if (t.length % 2 === 0 && t.slice(0, t.length / 2) === t.slice(t.length / 2)) t = t.slice(0, t.length / 2);   // "ConsigneeConsignee"
-        if (/ · /.test(t)) {
+        const st = t.match(/^(.+?)(\d+) decisions? pending|^(.+?)(No changes claimed)/);
+        if (st) {
+          chips.push({ b, name: (st[1] || st[3]).trim().slice(0, 34) + ((st[1] || st[3]).trim().length > 34 ? '…' : ''), n: st[2] ? `${st[2]} pending` : 'no claims' });
+        } else if (/ · /.test(t)) {
           const it = chips.find(c => c.items);
           if (it) it.n = String(+it.n + 1); else chips.push({ b, name: 'Items', n: '1', items: true });
         } else {
@@ -5760,20 +5816,29 @@
       if (bar.previousElementSibling !== card) card.after(bar);
     }
     // The long, rarely needed sections start folded, once each time an order opens
-    if (glanceFolded !== location.pathname && secs.length) {
+    if (isDispute && glanceFolded !== location.pathname && secs.length) {
+      glanceFolded = location.pathname;
+      for (const b of main.querySelectorAll('button[aria-expanded="true"]')) {
+        const t = clean(b.textContent);
+        if (disputeFold(t) === 'details' || (disputeFold(t) === 'item' && /No changes claimed/.test(t))) { b.click(); noteFolded(t); }
+      }
+    }
+    if (!isDispute && glanceFolded !== location.pathname && secs.length) {
       glanceFolded = location.pathname;
       for (const b of secs) {
         const t = clean(b.textContent);
         const box = b.closest('section, [class*="rounded"]') || b.parentElement;
         const fold = /^(Parties|Status history)/i.test(t) || (/^Handling units\s*0$/i.test(t))
           || (/^Landed cost/i.test(t) && /not yet assessed/i.test(box?.textContent || '') && !/\$\d/.test((box?.textContent || '').replace(/Landed cost est\.\s*—/, '')));
-        if (fold && b.getAttribute('aria-expanded') === 'true') b.click();
+        if (fold && b.getAttribute('aria-expanded') === 'true') { b.click(); noteFolded(t); }
       }
     }
   }
   function undoGlance() {
     document.getElementById('zt-glance')?.remove();
     document.getElementById('zt-jump')?.remove();
+    restoreFolds(true);
+    glanceFolded = '';
     glanceSig = '';
   }
   function undoReadable() {
@@ -5835,8 +5900,8 @@
   const programLabel = p => [p.name, [p.type, p.code].filter(Boolean).join(' · ')].filter(Boolean).join(' — ');
   function showPrograms() {
     const main = document.querySelector('main');
-    if (!main || !DISPUTE_PATH.test(location.pathname)) return;
-    const id = location.pathname.split('/').filter(Boolean).pop();
+    const id = disputeIdHere();
+    if (!main || !id) return;
     if (programsFor !== id) { loadPrograms(id); return; }   // loaded either way: the research prompt uses it
     const on = GM_getValue(PROGRAMS_KEY, false);
     // Turned off: the ids come back and the questionnaire lists go
@@ -5869,8 +5934,7 @@
   }
   // For the research prompt: each program claimed on this dispute, with its questions and answers
   function programLines() {
-    const here = location.pathname.split('/').filter(Boolean).pop();
-    if (!questionnaires.length || programsFor !== here) return [];
+    if (!questionnaires.length || programsFor !== disputeIdHere()) return [];
     const L = ['', '## Questionnaire answers, by disputed line', '(From the dispute\'s questionnaire sessions: which program each line claims (what the "Disputed program" ids on the page are) and the merchant\'s answer to each question. The answers are the merchant\'s claims, not proof: check each one against the documents, the photos and the real listing, and say per line which answers are matched, contradicted or unsupported.)'];
     for (const qn of questionnaires) {
       L.push(`- Line ${qn.line}${qn.item ? `: ${qn.item}` : ''}`);
@@ -8945,7 +9009,7 @@
       await waitFor(() => document.querySelector('main section h2, main h1, main button[title="Look up in the HTS"]'));
       if (path !== location.pathname) return;
       const wm = WORK_ORDER_PATH.exec(path);
-      if (wm?.[1] === 'ADCVD_REVIEW' && /^\d+$/.test(wm[2])) await waitFor(() => caseIdOf(wm[2]) !== wm[2], { timeout: 6000 });
+      if (/^\d+$/.test(wm?.[2] || '')) await waitFor(() => caseIdOf(wm[2]) !== wm[2], { timeout: 6000 });
       const data = await readWorkOrderOpen();
       // A duty dispute review from the queue is a dispute too: load its questionnaire answers for the prompt
       if (data?.type === 'DUTY_DISPUTE_REVIEW' && /^duty_dispute_/.test(data.workOrderId) && programsFor !== data.workOrderId) await loadPrograms(data.workOrderId);
@@ -9634,6 +9698,7 @@
       ui?.keepAttached();
       if (GM_getValue(READABLE_KEY, false)) makeReadable();
       if (GM_getValue(GLANCE_KEY, false)) orderGlance();
+      else if (isCasePage()) restoreFolds();
       fixListLinks();
       showPrograms();
       if (onQueuePage()) { queue = queue || createQueue(); queue.mount(); }
