@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.39.0
+// @version      7.40.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3139,6 +3139,42 @@
       }
       return null;
     }
+    // A case with research in the sheet's Research tab but no row in Cases (the row was deleted): the card offers to add
+    // it back, with Claude Code's answers in a new case doc
+    async function orphanResearch(ent) {
+      const { requests = [] } = await sheetsCall('researchStatus', caseContext(ent)).catch(() => ({}));
+      if (D.ent !== ent || !requests.length) return;
+      D.orphan = { id: ent.id, requests, busy: false };
+      changed();
+    }
+    async function addToSheet() {
+      const ent = D.ent;
+      const o = D.orphan;
+      if (!ent || o?.id !== ent.id || o.busy) return;
+      if (dryRun()) { D.msg = "The portal is in test mode, so nothing is written to the team's sheet."; changed(); return; }
+      o.busy = true;
+      D.msg = 'Adding it to the Google Sheet…';
+      changed();
+      try {
+        const ctx = caseContext(ent);
+        const who = await portalName();
+        // Yours: back with your name on it; anyone else's or nobody's: just the row
+        const mine = !!D.me && dataFor(ent).wo?.assigneeId === D.me;
+        await sheetsCall(mine ? 'claim' : 'links', ctx, mine ? { who } : { create: true });
+        const done = o.requests.filter(q => q.status === 'Done' && q.answer);
+        for (const q of done) {
+          await sheetsCall('answer', ctx, { text: q.answer, sentence: finalSentence(q.answer), who: 'Claude Code', kind: `Claude Code answer · ${q.id} (asked ${q.asked})` });
+        }
+        D.orphan = null;
+        D.state = 'tracked';
+        D.msg = `Added to the Google Sheet${done.length ? `, with Claude Code's ${done.length === 1 ? 'answer' : `${done.length} answers`} in its case doc` : ''}.`;
+      } catch (e) {
+        o.busy = false;
+        D.state = 'error';
+        D.msg = e.message;
+      }
+      changed();
+    }
     // A finished case's open tasks (research requests, deadlines) are done too
     async function closeTasks(pageId) {
       if (!TASKS()) return;
@@ -3197,7 +3233,10 @@
       // Sheets edition: is this case in the sheet already (for the card's sheet and doc links)
       if (ent && sheetsOn()) {
         await sleep(3000);
-        if (D.ent === ent) await sheetsCall('find', caseContext(ent)).catch(e => console.warn('[Dispute Desk] sheet', e));
+        if (D.ent === ent) {
+          const j = await sheetsCall('find', caseContext(ent)).catch(e => { console.warn('[Dispute Desk] sheet', e); return null; });
+          if (j && !j.doc && D.ent === ent) orphanResearch(ent);   // researched, but its row is gone?
+        }
         if (D.ent === ent) pollAnswers(true);   // an answer that came in while you were away
         return;
       }
@@ -3607,7 +3646,14 @@
         const a = (href, text) => h('a', { href, target: '_blank', rel: 'noopener', text });
         return h('div', { class: 'section' }, h('p', { class: 'label', text: `Case · ${kindOf(ent.type)}` }),
           h('div', { class: 'order-card' },
-            h('p', { class: 'hint', style: 'margin:0', text: sc ? 'In the Google Sheet.' : 'Not in the Google Sheet yet: claiming it adds it.' }),
+            (() => {
+              const o = !sc && D.orphan?.id === ent.id ? D.orphan : null;
+              if (!o) return h('p', { class: 'hint', style: 'margin:0', text: sc ? 'In the Google Sheet.' : 'Not in the Google Sheet yet: claiming it adds it.' });
+              const n = o.requests.length;
+              return [h('p', { class: 'hint warn', style: 'margin:0', text: `Researched ${n === 1 ? 'once' : `${n} times`} in Claude Code, but not in the Google Sheet (its row may have been deleted).` }),
+                h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'secondary', type: 'button', text: o.busy ? 'Adding…' : 'Add to the Google Sheet', disabled: o.busy,
+                  title: "Adds the case's row back, and puts Claude Code's answers in a new case doc", onclick: () => addToSheet() }))];
+            })(),
             sc && h('div', { class: 'row', style: 'gap:12px;margin-top:6px' }, sc.sheet && a(sc.sheet, 'Sheet'), sc.doc && a(sc.doc, 'Case doc'), sc.links?.chat && a(sc.links.chat, 'Claude chat')),
             // Research out with Claude Code: when, its session, and whether the session started
             (() => {
