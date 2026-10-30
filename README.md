@@ -47,6 +47,7 @@ For the maintainer:
 - **Classify / Quote:** the same requests as the portal's own Classify and Quote boxes, usable on every page:
   - **Classify** gives the code, its description, confidence, a check of a code you enter, and alternates.
   - **Quote** gives the additional Chapter 99 codes that apply.
+  - Or, with **Quote tab: use my duty calculator** ticked under Settings > Panel and pages, the tab becomes **Duties**: the Entry Assistant duty calculator, laid out like the website's. It fills in from the order (each line's HTS code, origin and value, the currency, the order date, how it shipped and when it arrived, and what a dispute's order was charged), works out what the entry owes as you type, shows every duty with its Chapter 99 code, and lists the questions it can't settle, answered right there with Yes / No / Not sure. Its results may not be 100% correct: double-check them.
 - **Analytics:** from every work order's own history in the portal: who resolved (and submitted) the most, who claimed, released, marked waiting, escalated and added notes, and the typical time from claim to resolve, for today, 7, 30 or 90 days or 12 months, by class. Also who holds how many right now (overdue and waiting), unclaimed orders, how orders were resolved, and new orders by company. **Export** gives every event as a CSV.
 - **Entry Assistant:** the Entry Assistant site, for looking up and comparing codes, notes and rulings.
 - **Advanced View** (optional; there's an orange **⚡ Advanced View** switch at the top right of the portal's queue):

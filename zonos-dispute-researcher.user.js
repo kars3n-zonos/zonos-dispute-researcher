@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.45.0
+// @version      7.46.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3425,6 +3425,21 @@
       setImporter: fn => { importer = fn; },
       screeningLines,
       // "Item n: …" lines for the open order, from the portal's data (not the page)
+      // For the duty calculator: the order's lines (the consignment's items), how it travels, when it arrived, and what
+      // the dispute's original order was charged in duties
+      calcPrefill: () => {
+        try {
+          const ent = D.ent || currentEntity();
+          if (!ent) return {};
+          const { cm, dd } = dataFor(ent);
+          const lines = (cm?.consignmentItems || []).map(it => ({ code: it.hsCode || '', origin: it.countryOfOrigin || '', value: it.amount != null ? String(it.amount) : '', currency: it.currencyCode || '' }));
+          const tm = String(cm?.consolidation?.transportationMode || '').toUpperCase();
+          const mode = [['AIR', 'air'], ['OCEAN', 'ocean'], ['VESSEL', 'ocean'], ['TRUCK', 'truck'], ['ROAD', 'truck'], ['RAIL', 'rail'], ['MAIL', 'mail'], ['POST', 'mail']].find(([k]) => tm.includes(k))?.[1] || '';
+          const o = dd?.originalOrder;
+          const charged = o?.amountSubtotals?.duties != null ? { what: 'duties', amount: String(o.amountSubtotals.duties), inUsd: (o.currencyCode || 'USD') === 'USD' } : null;
+          return { lines, mode, charged, entryDate: d10(cm?.consolidation?.arrivalDate), currency: lines[0]?.currency || o?.currencyCode || '' };
+        } catch { return {}; }
+      },
       portalItems: () => { try { const e = D.ent || currentEntity(); return e ? caseContext(e).facts.filter(f => /^Item \d+:/.test(f)) : []; } catch { return []; } },
       debug: () => ({ caseContext, currentEntity, captured, describe, entityFromWorkOrder, screenings, D }),
     };
@@ -6550,6 +6565,79 @@
     .bt-progress > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
     .chip.mode-live { color: var(--err); border-color: currentColor; }
     .chip.mode-test { color: var(--ok); border-color: currentColor; }
+    .dc { --dc-blue: #0066cc; --dc-fill: #0071e3; }
+    :host([data-theme="dark"]) .dc { --dc-blue: #2997ff; --dc-fill: #2997ff; }
+    .dc .dc-kicker { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+    .dc h2.dc-title { margin: 2px 0 0; font-size: 20px; font-weight: 600; }
+    .dc-experimental { display: inline-block; margin: 8px 0 0; padding: 5px 10px; font-size: 12.5px; color: #b54708; background: #fdeee3; border-radius: 8px; }
+    :host([data-theme="dark"]) .dc-experimental { color: #fbbf24; background: rgba(245,158,11,.15); }
+    .dc-sub { font-size: 12px; color: var(--muted); }
+    .dc-section { margin-top: 18px; }
+    .dc-section > h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+    .dc-line { padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+    .dc-line + .dc-line { margin-top: 8px; }
+    .dc-line-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .dc-line-num { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+    .dc-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 8px; align-items: end; }
+    .dc-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .dc-grid > label { display: grid; gap: 3px; min-width: 0; font-size: 11.5px; color: var(--muted); }
+    .dc-grid input, .dc-grid select { width: 100%; min-width: 0; height: 32px; padding: 0 8px; font: inherit; font-size: 13px; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; }
+    .dc-grid input:focus, .dc-grid select:focus { outline: none; border-color: var(--dc-blue); }
+    .dc-mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+    .dc-line-result { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+    .dc-line-sum { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .dc-line-what { flex: 1 1 auto; min-width: 0; font-size: 12.5px; overflow-wrap: anywhere; }
+    .dc-code { padding: 0; border: 0; background: none; color: var(--dc-blue); font: inherit; font-family: ui-monospace, Consolas, monospace; cursor: pointer; }
+    .dc-code:hover { text-decoration: underline; }
+    .dc-line-duty { flex: none; text-align: right; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .dc-line-duty .dc-sub { display: block; font-weight: 400; }
+    .dc-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .dc-chip { border: 1px solid var(--line); background: var(--bg); color: var(--fg); border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+    .dc-chip:hover { border-color: var(--dc-blue); color: var(--dc-blue); }
+    .dc-chip.ghost { border-color: transparent; color: var(--muted); }
+    .dc-chip.on { color: #ffffff; background: var(--dc-fill); border-color: var(--dc-fill); }
+    a.dc-chip { text-decoration: none; }
+    .dc-total { margin-top: 18px; padding: 14px 16px; border-radius: 12px; background: var(--soft); }
+    .dc-total h3 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+    .dc-total-num { margin-top: 2px; font-size: 28px; font-weight: 600; line-height: 1.15; font-variant-numeric: tabular-nums; }
+    .dc-total-parts, .dc-total-low { margin: 6px 0 0; font-size: 12.5px; color: var(--muted); }
+    .dc-verdict { margin: 8px 0 0; font-size: 13px; font-weight: 600; }
+    .dc-verdict.over { color: var(--ok); } .dc-verdict.under { color: var(--err); }
+    .dc-qs-head { display: flex; align-items: baseline; gap: 6px; margin: 18px 0 2px; }
+    .dc-qs-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
+    .dc-qs { list-style: none; margin: 8px 0 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    .dc-q { padding: 10px 12px; background: var(--bg); }
+    .dc-q + .dc-q { border-top: 1px solid var(--line); }
+    .dc-qs.done .dc-q { opacity: .8; }
+    .dc-q-text { font-size: 12.5px; overflow-wrap: anywhere; }
+    .dc-q-line { margin-right: 6px; font-size: 11px; font-weight: 600; color: var(--muted); }
+    .dc-q-why { margin-top: 2px; font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+    .dc-q-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; margin-top: 6px; }
+    .dc-q-answers { display: flex; gap: 6px; }
+    .dc-q-stake { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .dc-folds { margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    .dc-fold + .dc-fold { border-top: 1px solid var(--line); }
+    .dc-fold > summary { display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: pointer; font-size: 13px; list-style: none; }
+    .dc-fold > summary::-webkit-details-marker { display: none; }
+    .dc-fold > summary::before { content: "›"; color: var(--muted); transition: transform .12s; }
+    .dc-fold[open] > summary::before { transform: rotate(90deg); }
+    .dc-fold > summary:hover { background: var(--soft); }
+    .dc-fold-title { flex: none; font-weight: 600; }
+    .dc-fold-meta { min-width: 0; margin-left: auto; overflow: hidden; font-size: 11.5px; color: var(--muted); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+    .dc-fold-body { padding: 0 12px 12px; font-size: 12.5px; }
+    .dc-line .dc-fold > summary { padding: 6px 0 0; color: var(--dc-blue); font-size: 12.5px; }
+    .dc-line .dc-fold > summary:hover { background: none; text-decoration: underline; }
+    .dc-line .dc-fold-body { padding: 4px 0 0; }
+    .dc-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .dc-table td { padding: 5px 0; border-top: 1px solid var(--line); vertical-align: top; }
+    .dc-table td.num { padding-left: 8px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .dc-row-total td { font-weight: 600; }
+    .dc-pill { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px; font-size: 10.5px; color: #b54708; background: #fdeee3; }
+    :host([data-theme="dark"]) .dc-pill { color: #fbbf24; background: rgba(245,158,11,.15); }
+    .dc-tip { margin: 6px 0 0; }
+    .dc-tip b { display: block; }
+    .dc-tip.red b { color: var(--err); }
+    .dc-hint { margin: 8px 0 0; font-size: 12.5px; color: var(--muted); }
   `;
 
   function createPanel() {
@@ -7326,6 +7414,228 @@
       showAnalytics();
     }
 
+    // ---- Duty calculator: the Entry Assistant site's calculator, in place of Quote (Settings > Panel and pages), with
+    // the site's layout and look. It's filled in from the order (its lines' HTS codes, origins and values, how it ships,
+    // when it was ordered and arrived, and what the dispute's order was charged), works out as you type, and the
+    // questions it can't settle are answered right here. It changes nothing anywhere: the calculator only calculates.
+    const DUTY_CALC_KEY = 'zt:dutyCalcQuote';
+    const dutyCalcOn = () => GM_getValue(DUTY_CALC_KEY, false) === true;
+    const DC_MODES = [['unknown', 'Not sure (ocean)'], ['ocean', 'Ocean'], ['air', 'Air or courier'], ['truck', 'Truck'], ['rail', 'Rail'], ['mail', 'Mail']];
+    const DC_ENTRY = [['unknown', 'Not sure (formal)'], ['formal', 'Formal'], ['informal', 'Informal ($2,500 or less)']];
+    const usd = n => (typeof n === 'number' ? `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—');
+    let DC = null;
+    let dcCurrencies = null;
+    function dcPrefill() {
+      const ship = { currency: 'USD', exportDate: new Date().toLocaleDateString('sv-SE'), entryDate: '', mode: 'unknown', entryType: 'unknown', freight: '' };
+      let lines = [];
+      const d = state && state.path === location.pathname ? state.data : null;
+      // A dispute: its disputed lines as the page shows them, the order date, and mail for a postal tracking number
+      if (d && d.kind !== 'workOrder') {
+        for (const i of d.items.filter(x => x.inDispute)) {
+          const fv = re => i.fields.find(x => re.test(x.label))?.current;
+          const money = parseMoney(fv(/^declared value$/i));
+          lines.push({ code: tidyCode(hsCodeIn(fv(/^hs code$/i))), origin: isoCountry(fv(/^country of origin$/i)), value: money ? String(money.value) : '' });
+          if (money && lines.length === 1) ship.currency = money.currency;
+        }
+        const t = Date.parse(d.ordered);
+        if (t) ship.exportDate = new Date(t).toLocaleDateString('sv-SE');
+        if (d.postedIn) ship.mode = 'mail';
+      }
+      // The portal's own data: a work order's consignment items, how it travels and when it arrived
+      const p = desk.calcPrefill();
+      if (!lines.length && p.lines?.length) { lines = p.lines.map(({ code, origin, value }) => ({ code: tidyCode(code), origin: isoCountry(origin), value })); ship.currency = p.currency || ship.currency; }
+      if (!lines.length && d?.kind === 'workOrder') lines = d.codes.map(c => ({ code: c.code, origin: c.from || '', value: '' }));
+      if (p.mode && ship.mode === 'unknown') ship.mode = p.mode;
+      if (d?.postedIn && ship.mode === 'unknown') ship.mode = 'mail';
+      if (p.entryDate) ship.entryDate = p.entryDate;
+      return { for: location.pathname, lines: lines.length ? lines.slice(0, 20) : [{ code: '', origin: '', value: '' }], ship,
+        charged: p.charged || { what: 'duties', amount: '', inUsd: true }, answers: {}, seen: {}, result: null, error: '', busy: false, seq: 0, filled: lines.length > 0 };
+    }
+    let dcTimer = 0;
+    const dcSoon = () => { clearTimeout(dcTimer); dcTimer = setTimeout(dcRun, 600); };
+    async function dcRun() {
+      const S = DC;
+      if (!S) return;
+      const used = S.lines.map((l, i) => ({ i, code: tidyCode(l.code), origin: l.origin || '', value: Number(String(l.value).replace(/,/g, '')) }))
+        .filter(l => l.code && l.value > 0);
+      S.used = used;
+      if (!used.length) { S.result = null; S.error = ''; dcDrawResults(); return; }
+      const amount = Number(String(S.charged.amount).replace(/,/g, ''));
+      const body = { currency: S.ship.currency || 'USD', exportDate: S.ship.exportDate || new Date().toLocaleDateString('sv-SE'), mode: S.ship.mode, entryType: S.ship.entryType,
+        ...(S.ship.entryDate ? { entryDate: S.ship.entryDate } : {}), ...(Number(S.ship.freight) > 0 ? { freight: Number(S.ship.freight) } : {}),
+        lines: used.map(({ code, origin, value }) => ({ code, origin, value })), answers: S.answers,
+        ...(amount > 0 ? { charged: { [S.charged.what]: amount, inUsd: !!S.charged.inUsd } } : {}) };
+      const seq = ++S.seq;
+      S.busy = true;
+      dcDrawResults();
+      try {
+        const j = await entryApi('calculate', 30000, body);
+        if (seq !== S.seq || DC !== S) return;
+        S.result = j; S.error = '';
+        for (const q of j?.questions || []) S.seen[q.id] = q;
+      } catch (e) { if (seq === S.seq && DC === S) S.error = e.message; }
+      if (seq === S.seq && DC === S) { S.busy = false; dcDrawResults(); }
+    }
+    const dcSel = (opts, value, onchange, label) => h('select', { 'aria-label': label, onchange }, opts.map(([v, t]) => h('option', { value: v, text: t, selected: v === value })));
+    const dcFold = (title, meta, body, open = false, key = '') => h('details', { class: 'dc-fold', open, 'data-k': key || null },
+      h('summary', {}, h('span', { class: 'dc-fold-title', text: title }), meta ? h('span', { class: 'dc-fold-meta' }, meta) : null), h('div', { class: 'dc-fold-body' }, body));
+    let dcLinesEl = null, dcResultsEl = null, dcDetailsEl = null;
+    const dcSlots = [];
+    function dcLineCard(l, i) {
+      const S = DC;
+      const set = (k, v) => { l[k] = v; S.touched = true; dcSoon(); };
+      const slot = h('div');
+      dcSlots[i] = slot;
+      return h('div', { class: 'dc-line' },
+        h('div', { class: 'dc-line-head' }, h('span', { class: 'dc-line-num', text: `Line ${i + 1}` }),
+          S.lines.length > 1 ? h('button', { class: 'dc-chip ghost', type: 'button', text: 'Remove', onclick: () => { S.lines.splice(i, 1); S.touched = true; dcDrawForm(); dcRun(); } }) : null),
+        h('div', { class: 'dc-grid' },
+          h('label', {}, 'HTS code', h('input', { class: 'dc-mono', type: 'text', placeholder: '8418.10.00.10', value: l.code, spellcheck: 'false', oninput: e => set('code', e.target.value) })),
+          h('label', {}, 'Country of origin', h('select', { onchange: e => set('origin', e.target.value) }, h('option', { value: '', text: 'Not sure (the costliest)' }),
+            COUNTRIES.map(c => [c, regionName(c)]).sort((a, b) => a[1].localeCompare(b[1])).map(([c, n]) => h('option', { value: c, text: n, selected: c === l.origin })))),
+          h('label', {}, `Value (${S.ship.currency || 'USD'})`, h('input', { type: 'text', inputmode: 'decimal', placeholder: '0.00', value: l.value, oninput: e => set('value', e.target.value) }))),
+        slot);
+    }
+    function dcDrawForm() {
+      const S = DC;
+      dcSlots.length = 0;
+      dcLinesEl.replaceChildren(...S.lines.map(dcLineCard));
+      dcDrawResults();
+    }
+    function dcDrawResults() {
+      const S = DC;
+      const j = S.result;
+      // Each line's own result, in its card
+      S.lines.forEach((l, i) => {
+        const slot = dcSlots[i];
+        if (!slot) return;
+        const k = (S.used || []).findIndex(u => u.i === i);
+        const r = k >= 0 && j?.lines?.[k];
+        if (!r) { slot.replaceChildren(); return; }
+        const origin = typeof r.origin === 'object' ? r.origin : { code: r.origin };
+        slot.replaceChildren(h('div', { class: 'dc-line-result' },
+          r.error ? h('p', { class: 'hint err', style: 'margin:0', text: r.error }) : [
+            h('div', { class: 'dc-line-sum' },
+              h('div', { class: 'dc-line-what' },
+                h('button', { class: 'dc-code', type: 'button', text: tidyCode(r.code) || r.code, title: 'Open it in the Entry Assistant tab', onclick: () => showEntry({ codes: [tidyCode(r.code)], from: origin.code || '' }) }),
+                ` ${r.desc || ''}`, h('span', { class: 'dc-sub', text: ` · ${origin.name || origin.code || 'origin not sure'}${origin.assumed ? ' (the costliest)' : ''} · ${usd(r.usd)}` })),
+              h('div', { class: 'dc-line-duty' }, usd(r.duty), h('span', { class: 'dc-sub', text: `Duty, ${typeof r.pct === 'number' ? `${Math.round(r.pct * 100) / 100}%` : '?'} of the value` }))),
+            dcFold("How it's worked out", '', [
+              h('table', { class: 'dc-table' }, h('tbody', {},
+                (r.parts || []).map(p => h('tr', {},
+                  h('td', {}, h('button', { class: 'dc-code', type: 'button', text: p.code, onclick: () => showEntry({ codes: [p.code], from: isChapter99(p.code) ? '' : origin.code || '' }) }),
+                    ` ${p.name}`, p.assumed ? h('span', { class: 'dc-pill', text: 'assumed', title: 'An open question below decides it; counted the costlier way' }) : null,
+                    p.note ? h('div', { class: 'dc-sub', text: p.note }) : null),
+                  h('td', { class: 'num', text: p.rate }), h('td', { class: 'num', text: usd(p.amount) }))),
+                h('tr', { class: 'dc-row-total' }, h('td', { text: 'Duty' }), h('td'), h('td', { class: 'num', text: usd(r.duty) })))),
+              ...(r.notes || []).filter(n => !/needs review/.test(n)).slice(0, 4).map(n => h('p', { class: 'dc-sub', style: 'margin:6px 0 0', text: n })),
+            ]),
+          ]));
+      });
+      // The total, the questions, and the details
+      const kids = [];
+      if (S.error) kids.push(h('p', { class: 'hint err', text: S.error }));
+      if (!j && !S.error) kids.push(h('p', { class: 'dc-hint', text: S.busy ? 'Working it out…' : 'Enter an HTS code and the value to work out what the entry owes.' }));
+      if (j) {
+        const c = j.charged;
+        kids.push(h('div', { class: 'dc-total' },
+          h('h3', { text: S.busy ? 'Owed · updating…' : 'Owed' }),
+          h('div', { class: 'dc-total-num', text: usd(j.total) }),
+          h('p', { class: 'dc-total-parts', text: `Duties ${usd(j.duty)} · Fees ${usd(j.feeTotal)}` }),
+          typeof j.lowest === 'number' && j.lowest < j.total ? h('p', { class: 'dc-total-low', text: `As low as ${usd(j.lowest)} if every open question goes the cheaper way. The total above counts each the costlier way.` }) : null,
+          c ? h('p', { class: `dc-verdict ${c.verdict}`, text: c.verdict === 'over' ? `Charged ${usd(c.amount)} in ${c.what}: overpaid by ${usd(c.difference)}.`
+            : c.verdict === 'under' ? `Charged ${usd(c.amount)} in ${c.what}: ${usd(-c.difference)} less than owed.` : `Charged ${usd(c.amount)} in ${c.what}: matches.` }) : null));
+        const open = j.questions || [];
+        const answered = Object.keys(S.answers).map(id => S.seen[id]).filter(Boolean);
+        const lineOf = q => (q.lines || []).map(k => S.used?.[k] ? `Line ${S.used[k].i + 1}` : '').filter(Boolean).join(', ');
+        const qItem = q => h('li', { class: 'dc-q' },
+          h('div', { class: 'dc-q-text' }, lineOf(q) ? h('span', { class: 'dc-q-line', text: lineOf(q) }) : null, q.text),
+          q.why ? h('div', { class: 'dc-q-why', text: q.why }) : null,
+          h('div', { class: 'dc-q-row' },
+            h('div', { class: 'dc-q-answers' }, [['yes', 'Yes'], ['no', 'No'], ['', 'Not sure']].map(([v, t]) => h('button', {
+              class: `dc-chip${(S.answers[q.id] || '') === v ? ' on' : ''}`, type: 'button', text: t,
+              onclick: () => { if (v) S.answers[q.id] = v; else delete S.answers[q.id]; dcRun(); } }))),
+            typeof q.ifYes === 'number' ? h('span', { class: 'dc-q-stake', text: `If yes: ${usd(q.ifYes)} · If no: ${usd(q.ifNo)}` }) : null));
+        if (open.length || answered.length) {
+          kids.push(h('div', { class: 'dc-qs-head' }, h('h3', { text: 'Questions' }), h('span', { class: 'dc-sub', text: `· ${open.length} open` })),
+            h('p', { class: 'dc-sub', style: 'margin:0', text: 'Most money first. Until it’s answered, each counts the way that costs more.' }));
+          if (open.length) kids.push(h('ul', { class: 'dc-qs' }, open.map(qItem)));
+          if (answered.length) kids.push(h('p', { class: 'dc-sub', style: 'margin:10px 0 0', text: 'Answered' }), h('ul', { class: 'dc-qs done' }, answered.map(qItem)));
+        }
+      }
+      dcResultsEl.replaceChildren(...kids);
+      dcDrawDetails();
+    }
+    function dcDrawDetails() {
+      const S = DC;
+      const j = S.result;
+      const sh = S.ship;
+      const set = (k, v) => { sh[k] = v; S.touched = true; dcSoon(); };
+      const modeT = DC_MODES.find(([v]) => v === sh.mode)?.[1] || sh.mode;
+      const entryT = DC_ENTRY.find(([v]) => v === sh.entryType)?.[1] || sh.entryType;
+      const curOpts = (dcCurrencies || [{ id: 'USD', label: 'U.S. dollar (USD)' }]).map(c => [c.id, c.label]);
+      if (!curOpts.some(([v]) => v === sh.currency)) curOpts.push([sh.currency, sh.currency]);
+      const tips = [...(j?.suggestions || []).map(t => ({ tone: t.tone, title: t.title, text: t.text })),
+        ...(j?.warnings || []).filter(w => !/needs review/.test(w)).map(w => ({ tone: 'gray', title: '', text: w }))];
+      const was = DC_DETAILS_OPEN;
+      dcDetailsEl.replaceChildren(h('p', { class: 'dc-line-num', style: 'margin:18px 0 0', text: 'More details' }),
+        h('div', { class: 'dc-folds' },
+          dcFold('The shipment', `${sh.currency} · exported ${sh.exportDate} · ${modeT} · ${entryT}`, h('div', { class: 'dc-grid two' },
+            h('label', {}, 'Currency of the values', dcSel(curOpts, sh.currency, e => { set('currency', e.target.value); dcDrawForm(); }, 'Currency')),
+            h('label', {}, 'Export date', h('input', { type: 'date', value: sh.exportDate, onchange: e => set('exportDate', e.target.value) })),
+            h('label', {}, 'Entry date (optional)', h('input', { type: 'date', value: sh.entryDate, onchange: e => set('entryDate', e.target.value) })),
+            h('label', {}, 'How it came in', dcSel(DC_MODES, sh.mode, e => set('mode', e.target.value), 'Mode')),
+            h('label', {}, 'Entry type', dcSel(DC_ENTRY, sh.entryType, e => set('entryType', e.target.value), 'Entry type')),
+            h('label', {}, `Freight and insurance in the values (${sh.currency})`, h('input', { type: 'text', inputmode: 'decimal', placeholder: '0.00', value: sh.freight, oninput: e => set('freight', e.target.value) }))), was.ship, 'ship'),
+          dcFold('What was charged', Number(S.charged.amount) > 0 ? `${S.charged.what} ${S.charged.amount}${S.charged.inUsd ? ' USD' : ` ${sh.currency}`}` : 'Optional', h('div', { class: 'dc-grid' },
+            h('label', {}, 'What it was', dcSel([['duties', 'Duties'], ['fees', 'Fees'], ['total', 'Duties and fees']], S.charged.what, e => { S.charged.what = e.target.value; dcSoon(); }, 'What was charged')),
+            h('label', {}, 'Amount', h('input', { type: 'text', inputmode: 'decimal', placeholder: '0.00', value: S.charged.amount, oninput: e => { S.charged.amount = e.target.value; dcSoon(); } })),
+            h('label', {}, 'In', dcSel([['usd', 'U.S. dollars'], ['inv', `The values' currency (${sh.currency})`]], S.charged.inUsd ? 'usd' : 'inv', e => { S.charged.inUsd = e.target.value === 'usd'; dcSoon(); }, 'Currency charged'))), was.charged, 'charged'),
+          j ? dcFold('Fees on the entry', usd(j.feeTotal), h('table', { class: 'dc-table' }, h('tbody', {},
+            (j.fees || []).map(fe => h('tr', {}, h('td', {}, fe.name, fe.assumed ? h('span', { class: 'dc-pill', text: 'assumed' }) : null), h('td', { class: 'num', text: fe.rate }), h('td', { class: 'num', text: usd(fe.amount) }))))), was.fees, 'fees') : null,
+          j && tips.length ? dcFold('Worth knowing', h('span', { class: 'dc-pill', text: `${tips.length} to check` }),
+            tips.slice(0, 12).map(t => h('div', { class: `dc-tip ${t.tone}` }, t.title ? h('b', { text: t.title }) : null, t.text)), was.tips, 'tips') : null,
+          j ? dcFold('Worked out from', '', [
+            ...(j.sources || []).map(src => h('p', { class: 'dc-tip' }, src.url ? h('a', { href: src.url, target: '_blank', rel: 'noopener', text: src.name }) : src.name, src.edition ? `: ${src.edition}` : '')),
+            j.fx && j.fx.currency !== 'USD' ? h('p', { class: 'dc-tip', text: `${j.fx.label}: ${j.fx.perUsd} per U.S. dollar (${j.fx.date}). ${j.fx.source || ''}` }) : null,
+          ], was.from, 'from') : null));
+      // Which folds are open is kept across redraws
+      dcDetailsEl.querySelectorAll('.dc-fold[data-k]').forEach(el => el.addEventListener('toggle', () => { DC_DETAILS_OPEN[el.dataset.k] = el.open; }));
+    }
+    const DC_DETAILS_OPEN = {};
+    function renderDutyCalc(fresh = false) {
+      const body = quoteBody;
+      if (!entryToken()) {
+        body.replaceChildren(h('p', { class: 'muted', text: 'The duty calculator needs your Entry Assistant token.' }),
+          h('p', { class: 'hint' }, 'Save it in ', h('button', { class: 'linkish', type: 'button', text: 'Settings', onclick: () => setView('settings') }), ' (the cog), under Entry Assistant.'));
+        return;
+      }
+      if (fresh || !DC || DC.for !== location.pathname) DC = dcPrefill();
+      const S = DC;
+      if (!dcCurrencies) entryApi('currencies').then(c => { dcCurrencies = c?.currencies || null; if (DC === S && dcDetailsEl?.isConnected) dcDrawDetails(); }).catch(() => {});
+      dcLinesEl = h('div');
+      dcResultsEl = h('div');
+      dcDetailsEl = h('div');
+      body.replaceChildren(h('div', { class: 'dc' },
+        h('div', { class: 'dc-kicker', text: 'Entry Assistant' }),
+        h('h2', { class: 'dc-title', text: 'Duty calculator' }),
+        h('p', { class: 'dc-experimental', role: 'note' }, h('b', { text: 'Experimental:' }), ' double check your info'),
+        h('p', { class: 'dc-sub', style: 'margin:8px 0 0', text: 'What an entry owes in duties and fees, in U.S. dollars. Anything not known is counted the costlier way and asked below.' }),
+        h('div', { class: 'dc-section' }, h('h3', { text: 'The goods' }), dcLinesEl,
+          h('div', { class: 'dc-chips' },
+            h('button', { class: 'dc-chip', type: 'button', text: 'Add a line', onclick: () => { S.lines.push({ code: '', origin: '', value: '' }); dcDrawForm(); } }),
+            isCasePage() ? h('button', { class: 'dc-chip', type: 'button', text: 'Fill from this order', title: 'Fill in the lines and shipment again from the order on this page', onclick: () => renderDutyCalc(true) }) : null,
+            h('button', { class: 'dc-chip ghost', type: 'button', text: 'Start over', onclick: () => { DC = { ...dcPrefill(), lines: [{ code: '', origin: '', value: '' }], charged: { what: 'duties', amount: '', inUsd: true } }; renderDutyCalc(); } }),
+            h('a', { class: 'dc-chip ghost', href: `${entrySite()}?calculator=1`, target: '_blank', rel: 'noreferrer', text: 'On the website ↗' })),
+          !S.filled && isCasePage() ? h('p', { class: 'dc-hint', text: 'Nothing to fill in from this page yet: press Fill from this order once it has loaded.' }) : null),
+        dcResultsEl, dcDetailsEl));
+      dcDrawForm();
+      dcRun();
+      // Opened before the order was read: filled in once it is (unless you've started typing)
+      if (!S.filled && isCasePage()) waitFor(() => state && state.path === location.pathname && state.data, { timeout: 30000 })
+        .then(ok => { if (ok && DC === S && !S.touched && view === 'quote') renderDutyCalc(true); });
+    }
+
     function openTool(name) {
       if (panel.hidden) open();
       setView(name);
@@ -7347,6 +7657,8 @@
       hideRail(GM_getValue(HIDE_RAIL_KEY, false));
       const onOrder = isCasePage();
       analyticsBtn.setAttribute('aria-pressed', String(view === 'analytics'));
+      tabs.quote.textContent = dutyCalcOn() ? 'Duties' : 'Quote';
+      tabs.quote.title = dutyCalcOn() ? 'Duty calculator (Entry Assistant): what the entry owes, its Chapter 99 codes and the questions that settle them' : '';
       toolstrip.hidden = !onOrder;
       // Research only exists on a dispute or an order; elsewhere Tools opens on Classify, and comes back to
       // Research once you open one
@@ -7372,6 +7684,7 @@
           h('option', { value: 'portal', text: "Default Portal: the portal's own queue", selected: queueView() === 'portal' }),
           h('option', { value: 'classic', text: 'Portal+: the portal\'s queue in one sortable list, with search, one-click claim and bulk actions', selected: queueView() === 'classic' }),
           h('option', { value: 'tools', text: 'Advanced View: dense, with summaries, grouping and saved views', selected: queueView() === 'tools' }))),
+      check("Quote tab: use my duty calculator (Entry Assistant) instead of the portal's quoter, filled in from the order, with its questions to answer", dutyCalcOn(), on => { GM_setValue(DUTY_CALC_KEY, on); refreshTools(); }),
       check('Easier-to-read order pages (labeled details, CBP messages in plain English)', GM_getValue(READABLE_KEY, false), on => { GM_setValue(READABLE_KEY, on); if (on) makeReadable(); else undoReadable(); }),
       check("Hide the portal's own Classify / Quote rail", GM_getValue(HIDE_RAIL_KEY, false), on => { GM_setValue(HIDE_RAIL_KEY, on); refreshTools(); }),
       check('Denied-party reviews: "Listed on" opens the official list (and copies the name) instead of a Google search', GM_getValue(LIST_LINKS_KEY, false), on => { GM_setValue(LIST_LINKS_KEY, on); fixListLinks(); }),
@@ -7480,7 +7793,7 @@
       for (const [k, el] of Object.entries(tabs)) el.setAttribute('aria-selected', String(k === name));
       gear.setAttribute('aria-pressed', String(name === 'settings'));
       if (name === 'classify') renderClassify();
-      if (name === 'quote') renderQuote();
+      if (name === 'quote') { if (dutyCalcOn()) renderDutyCalc(); else renderQuote(); }
       if (name === 'analytics') renderAnalytics();
       if (name === 'settings') checkUpdate();
       // The view can be changed from the queue's own picker since Settings was drawn
