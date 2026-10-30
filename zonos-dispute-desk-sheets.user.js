@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.43.0
+// @version      7.44.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1112,18 +1112,25 @@
 
   const entryToken = () => GM_getValue(TOKEN_KEY, '') || TEAM.entryToken || '';
 
-  async function entryApi(path, timeout = 30000) {
+  // `body`: sent as a POST (the duty calculator); without it, a GET
+  async function entryApi(path, timeout = 30000, body = null) {
     const token = entryToken();
     if (!token) throw apiError('no-token', 'No Entry Assistant token is saved. Add it under Settings (the cog in Tools).');
     let r;
     try {
-      r = await gmRequest({ url: `${entryBase()}/api/v1/${path}`, headers: { Accept: 'application/json', Authorization: `Bearer ${token}` }, timeout });
+      r = await gmRequest({ url: `${entryBase()}/api/v1/${path}`, timeout,
+        headers: { Accept: 'application/json', Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        ...(body ? { method: 'POST', data: JSON.stringify(body) } : {}) });
     } catch (e) {
       throw apiError('unreachable', `${e.message}. If Tampermonkey asked whether to allow the connection, allow it.`);
     }
     if (r.status === 401 || r.status === 403) throw apiError('bad-token', 'Entry Assistant rejected the token. Check it under Settings (the cog in Tools).');
     if (r.status === 404) return null;
-    if (r.status < 200 || r.status >= 300) throw apiError('server', `Entry Assistant answered ${r.status}.`);
+    if (r.status < 200 || r.status >= 300) {
+      let why = '';
+      try { why = JSON.parse(r.responseText)?.error || ''; } catch { /* not JSON */ }
+      throw apiError('server', `Entry Assistant answered ${r.status}${why ? `: ${why}` : '.'}`);
+    }
     try {
       return JSON.parse(r.responseText);
     } catch {
@@ -1221,14 +1228,59 @@
   const factsCache = new Map();
   async function gatherFacts(item, opts = {}) {
     const field = re => item.fields.find(f => re.test(f.label));
-    const key = JSON.stringify([field(/^hs code$/i)?.current, field(/^hs code$/i)?.claimed, field(/^country of origin$/i)?.current, field(/^country of origin$/i)?.claimed, opts]);
+    const key = JSON.stringify([field(/^hs code$/i)?.current, field(/^hs code$/i)?.claimed, field(/^country of origin$/i)?.current, field(/^country of origin$/i)?.claimed, field(/^declared value$/i)?.current, opts]);
     const known = factsCache.get(key);
     if (known && Date.now() - known.at < 30 * 60 * 1000) return known.facts;
     const facts = await gatherFactsNow(item, opts);
     if (!facts.problems?.length) factsCache.set(key, { at: Date.now(), facts });
     return facts;
   }
-  async function gatherFactsNow(item, { roles = ['Current code', "Merchant's code"], rulings = false, extended = false } = {}) {
+  // A declared value as the portal shows it ("70.16 USD", "6.91 USD · 10.00 AUD", "$12.00"): the first amount and its currency
+  function parseMoney(text) {
+    const m = String(text || '').replace(/,/g, '').match(/(\$)?\s*(\d+(?:\.\d+)?)\s*([A-Z]{3})?/);
+    return m && +m[2] > 0 ? { value: +m[2], currency: m[3] || 'USD' } : null;
+  }
+  // The duty calculator (POST /calculate, which keeps and changes nothing) for one line: every duty on it with its
+  // Chapter 99 code and rate, and what it couldn't settle as yes / no questions, each naming the Chapter 99 code a yes
+  // brings. How it shipped (postal or not) is answered from the page; the questions about the goods are left for the
+  // research. Without a known value, $100 stands in: the codes don't depend on it, only the amounts do.
+  // `answers`: { <question id>: 'yes' | 'no' }, from the research (calcAnswers)
+  async function dutyCalc({ role, code, origin, money, date, mode, answers = {} }) {
+    const line = { code: tidyCode(code), origin: isoCountry(origin) || '', value: money?.value || 100 };
+    const j = await entryApi('calculate', 30000, { currency: money?.currency || 'USD', exportDate: date || new Date().toLocaleDateString('sv-SE'),
+      mode: mode || 'unknown', entryType: 'unknown', lines: [line], answers });
+    const l = j?.lines?.[0] || {};
+    return {
+      role, code: line.code, origin: line.origin, value: money ? `${money.value} ${money.currency}` : '', error: l.error || (j ? '' : 'no answer'),
+      parts: (l.parts || []).map(p => ({ code: p.code, name: p.name, rate: p.rate, assumed: !!p.assumed, note: p.note || '' })),
+      // Only the questions about the goods and their claims: the entry type and mode only move the fees
+      questions: (j?.questions || []).filter(q => !/^(entry|ship):/.test(q.id)).map(q => ({ id: q.id, text: q.text, why: q.why || '', yes: q.ifYes, no: q.ifNo })),
+      release: typeof j?.sources === 'object' ? j.sources.hts || j.sources.release || '' : '',
+      input: { role, code, origin, money, date, mode },   // to ask again with the research's answers
+    };
+  }
+  // The calculator's open questions on a line's facts, each once (the same question can come up for several codes)
+  const calcQuestions = facts => [...new Map((facts?.calc || []).flatMap(c => c.questions || []).map(q => [q.id, q])).values()];
+  // The research's answers to them, from the reply's "Duty calculator answers" block: "- <the question>: yes — <source>".
+  // A question is matched by its words; "can't tell" (or no answer) leaves it open.
+  const qWords = t => String(t || '').toLowerCase().replace(/[^a-z0-9%]+/g, ' ').trim();
+  function calcAnswers(text, questions) {
+    const said = [];
+    for (const l of String(text || '').split('\n')) {
+      const m = /^\s*[-*]\s*(.+?)\s*[:：]\s*[*_]*\s*(yes|no|can['’]?t tell|unknown)\b/i.exec(plainText(l));
+      if (m) said.push({ q: qWords(m[1]), a: m[2].toLowerCase() });
+    }
+    const out = {};
+    for (const q of questions) {
+      const w = qWords(q.text);
+      const hit = said.find(x => x.q === w || (x.q.length > 20 && (w.startsWith(x.q) || x.q.startsWith(w))));
+      if (hit && (hit.a === 'yes' || hit.a === 'no')) out[q.id] = hit.a;
+    }
+    return out;
+  }
+  // The Chapter 99 codes of a calculation, in a line
+  const calcCodes = c => (c.parts || []).filter(p => /^99/.test(p.code)).map(p => `${p.code} (${p.rate})`).join(', ') || 'no Chapter 99 duties';
+  async function gatherFactsNow(item, { roles = ['Current code', "Merchant's code"], rulings = false, extended = false, calc = null } = {}) {
     const hs = item.fields.find(f => /^hs code$/i.test(f.label));
     const origin = item.fields.find(f => /^country of origin$/i.test(f.label));
     const current = hsCodeIn(hs?.current);
@@ -1265,6 +1317,15 @@
         async () => { facts.origins = [{ ...facts.codes[0], from }, { ...(await lookupCode(current, claimedFrom)), from: claimedFrom, role: 'Current code' }]; }),
     ]);
     await Promise.all([...found, ...facts.origins.slice(1)].map(addChapter99));
+    // The duty calculator: the entry as filed, the merchant's code (with their origin, if they claim one) and the
+    // current code from the merchant's origin. A Chapter 99 code on its own isn't a line the calculator takes.
+    if (calc && current) {
+      const money = parseMoney(item.fields.find(f => /^declared value$/i.test(f.label))?.current);
+      const runs = [{ role: `${roles[0]} as filed`, code: current, origin: from }];
+      if (claimed && !isChapter99(claimed) && !sameCode(claimed, current)) runs.push({ role: roles[1], code: claimed, origin: claimedFrom || from });
+      if (claimedFrom && claimedFrom !== from) runs.push({ role: `${roles[0]} if made in ${claimedFrom}`, code: current, origin: claimedFrom });
+      facts.calc = (await Promise.all(runs.map(x => attempt(`Duty calculator for ${x.code}`, () => dutyCalc({ ...x, money, ...calc }), null)))).filter(Boolean);
+    }
     return facts;
   }
 
@@ -1322,6 +1383,14 @@
       for (const o of f.origins) {
         L.push(`- Made in ${o.originName || o.from}: ${o.notFound ? 'no answer' : `${o.originRate || o.general || 'no rate listed'}${o.extra ? `; extra: ${o.extra}` : ''}`}`);
       }
+    }
+    for (const c of f.calc || []) {
+      L.push('', `Duty calculator (Entry Assistant API${c.release ? `, ${c.release}` : ''}) for the ${c.role.toLowerCase()} \`${c.code}\`${c.origin ? ` made in ${regionName(c.origin)}` : ', origin not given (the costliest country assumed)'}${c.value ? ` at ${c.value}` : ' (value not known: $100 stands in, so only the codes count, not the amounts)'}:`);
+      if (c.error) { L.push(`- It couldn't work this line out: ${c.error}`); continue; }
+      L.push('- Duties, with every open question taken the costlier way:',
+        ...c.parts.map(p => `  - \`${p.code}\` ${p.name}: ${p.rate}${p.assumed ? ' (rests on an open question below)' : ''}${p.note ? `. ${p.note}` : ''}`));
+      if (c.questions.length) L.push('- Open questions it couldn\'t settle (each names the Chapter 99 code a yes brings):',
+        ...c.questions.map(q => `  - ${q.text}${q.why ? ` ${q.why.replace(/,\s*Section/, ' under Section')}.` : ''}`));
     }
     // One list per code and origin; a list identical to one already shown is skipped
     const shownLists = [];
@@ -1598,6 +1667,7 @@
     platform: "Name the e-commerce platform the merchant's site runs on (Shopify, WooCommerce and so on).",
     redFlags: "Collect every red flag: anything in the documents, the claim, the website or your research that contradicts the entry, the claim or itself, or that's missing when it should be there.",
     skill: SKILL_STEP,
+    calculator: "Use your research to answer every open duty calculator question (they're also under What to find): yes, no or can't tell, each with its source (the listing, a document, a photo, the questionnaire, the manufacturer), in the reply's Duty calculator answers block, copying each question as written there. Then give the Chapter 99 codes that apply, to the entry as filed and to what the merchant claims, from each question's \"If yes\" code and the duties listed. If you can call the Entry Assistant API (the entry-assistant skill in claude.ai, or `python3 worker.py calc` in a Claude Code session), send the calculator the same line with your answers by question id and use the codes it returns.",
     judge: "Then decide where this stands: what's proven, what isn't, and what to ask the merchant for. Without proof, the higher-duty option stands, especially for tariffs.",
     closing: [
       "If a page won't open, say which one and try another route: the site's search, its sitemap, or a web search limited to the site (site: plus the domain and the product number).",
@@ -1683,10 +1753,11 @@
         const host = new URL(s.site?.finalUrl || website).hostname;
         L.push('', "Search the merchant's site for it, for example with these web searches:", ...terms.map(t => `- site:${host} ${t}`));
       }
+      const calcQs = calcQuestions(s.facts?.[item.line]?.data);
       if (productClaim) {
         const guide = checklistFor(item);
-        L.push('', `What to find (based on ${guide.basis}):`, ...guide.points.map(p => `- ${p}`));
-      }
+        L.push('', `What to find (based on ${guide.basis}):`, ...guide.points.map(p => `- ${p}`), ...calcQs.map(q => `- For the duty calculator: ${q.text}`));
+      } else if (calcQs.length) L.push('', 'What to find for the duty calculator:', ...calcQs.map(q => `- ${q.text}`));
     }
 
     const ids = productNumbers(d);
@@ -1703,6 +1774,8 @@
 
     const allFacts = Object.values(s.facts || {}).filter(f => f.data).map(f => f.data);
     const hasChapter99 = allFacts.some(f => [...f.codes, ...f.origins].some(c => c.chapter99?.length));
+    // The duty calculator ran (its duties and open questions are under the line's HTS facts)
+    const hasCalc = allFacts.some(f => f.calc?.some(c => !c.error));
     // Metal matters when Section 232 can apply, or when the merchant's code is itself a Chapter 99 metal provision
     const metalMatters = allFacts.some(f => f.codes.some(c => /232|steel|aluminum|copper/i.test(c.extra || '')))
       || items.some(i => isChapter99(hsCodeIn(i.fields.find(f => /^hs code$/i.test(f.label))?.claimed)));
@@ -1734,6 +1807,7 @@
       platformUnknown && DP('platform'),
       DP('redFlags'),
       DP('skill'),
+      hasCalc && DP('calculator'),
       judgeStep,
     ].filter(Boolean);
     L.push(...programLines());
@@ -1804,6 +1878,18 @@
 
   // The bottom line first, then the red flags and the facts, what to ask for, and the verdict with its proof.
   // Lines for the code, origin, Section 232, tariffs, value, weight and quantity appear only for those disputes.
+  // The reply's duty calculator block: each open question word for word, for the research to answer (Tools reads the
+  // answers back and runs the calculator again with them), and the Chapter 99 codes that result
+  function calcReplyBlock(facts, codes) {
+    const runs = (facts?.calc || []).filter(c => !c.error);
+    if (!runs.length) return [];
+    const qs = calcQuestions(facts);
+    return [
+      ...(qs.length ? ['**Duty calculator answers**', ...qs.map(q => `- ${q.text.replace(/\.$/, '')}: <yes | no | can't tell> — <the evidence from your research, with its source>`)] : []),
+      `**Chapter 99:** <${codes}>`,
+      '',
+    ];
+  }
   function replyBlock(item, s, { platformUnknown }) {
     const facts = s.facts?.[item.line]?.data;
     const k = disputeKinds(item, facts);
@@ -1837,6 +1923,7 @@
       k.questionnaire && '- **Questionnaire check:** <each answer: matched | contradicted | unsupported, and what the listing or photos show>',
       platformUnknown && "- **Platform:** <what the merchant's site runs on>",
       '',
+      ...calcReplyBlock(facts, 'the Chapter 99 codes that apply as filed, and as the merchant claims, with these answers'),
       '**Ask the merchant for**',
       '1. <a specific document or fact> — <what it would prove; or "Nothing: the research settles it">',
       '',
@@ -2331,6 +2418,7 @@
     rules: ORDER_RULES,
     researchFirst: "**Research before you reply, every time.** Search the web and open the pages you find: do every step under \"How to research\", then check you didn't skip one. None of that goes in the reply. Don't fill in the template from this prompt or from memory: the page below is what you're checking. If you can't search the web in this chat, don't answer; reply only: \"I can't search the web in this chat. Turn on web search and send this again.\"",
     skill: ORDER_SKILL_STEP,
+    calculator: "Use your research to answer every open duty calculator question (they're also under What to find): yes, no or can't tell, each with its source (the listing, a document, a photo, the questionnaire, the manufacturer), in the reply's Duty calculator answers block, copying each question as written there. Then give the Chapter 99 codes that apply, from each question's \"If yes\" code and the duties listed. If you can call the Entry Assistant API (the entry-assistant skill in claude.ai, or `python3 worker.py calc` in a Claude Code session), send the calculator the same line with your answers by question id and use the codes it returns.",
     redFlags: "Collect every red flag: anything on the page or in your research that contradicts the entry or itself, or that's missing when it should be there.",
     decide: 'Then decide, using one of the choices on the page that settles the order (never waiting or escalating).',
     closing: 'Use as many searches as it takes. A thorough answer matters more than a fast one.',
@@ -2383,6 +2471,7 @@
       ['platform', "Step: the site's platform", "when the merchant's platform isn't known"],
       ['redFlags', 'Step: red flags', 'always'],
       ['skill', 'Step: entry-assistant skill', 'always'],
+      ['calculator', 'Step: duty calculator questions', 'when the duty calculator ran on the line'],
       ['judge', 'Step: decide', 'always, last (a note to trust the HTS facts is added when there are some)'],
     ]) add(`dispute.${k}`, D, name, DISPUTE_TEXT[k], step(when));
     add('dispute.closing', D, 'After the steps', DISPUTE_TEXT.closing, 'The lines after "How to research".');
@@ -2402,6 +2491,7 @@
     add('order.rules', Q, 'How I work these', ORDER_TEXT.rules, 'The rules under "How I work these:" in every queue order prompt (a class\'s own rules follow them).');
     add('order.researchFirst', Q, 'Research before you reply', ORDER_TEXT.researchFirst, 'The paragraph after the rules.');
     add('order.skill', Q, 'Step: entry-assistant skill', ORDER_TEXT.skill, 'A "How to research" step after the class\'s own steps.');
+    add('order.calculator', Q, 'Step: duty calculator questions', ORDER_TEXT.calculator, 'A "How to research" step, when the duty calculator ran on a code.');
     add('order.redFlags', Q, 'Step: red flags', ORDER_TEXT.redFlags, 'A "How to research" step.');
     add('order.decide', Q, 'Step: decide', ORDER_TEXT.decide, 'The last "How to research" step.');
     add('order.closing', Q, 'After the steps', ORDER_TEXT.closing, 'The line after "How to research".');
@@ -2419,6 +2509,7 @@
   function buildWorkOrderPrompt(d, s) {
     const g = guideText(d.type);
     const facts = Object.values(s.facts || {});
+    const hasCalc = facts.some(f => f.data?.calc?.some(c => !c.error));
     const L = [];
     // Class names read badly in a sentence ("a submission failed"), so the class is quoted
     L.push(`I'm a customs broker at Zonos working the Entry Writer Queue, on an order in the "${g.label}" class. ${g.goal} Do the fact-finding I'd otherwise do by hand, catch anything that doesn't add up, and end with a decision I can act on.`);
@@ -2444,14 +2535,18 @@
       if (f.data) L.push(...factLines(f.data));
       else if (f.error) L.push('', `HTS facts: the script's lookup didn't run (${LOOKUP_FAILED[f.kind] || 'the lookup failed'}). Look the codes up with the entry-assistant skill if you have it, otherwise use your own HTS knowledge, and say which in the reply.`);
     }
+    // Every code's calculator facts together, so its questions are research points and the reply answers each
+    const calcFacts = { calc: facts.flatMap(f => f.data?.calc || []) };
+    const calcQs = calcQuestions(calcFacts);
     if (d.type === 'HS_CODE_REVIEW' && d.current) {
       const guide = checklistFor({ fields: [{ label: 'HS code', current: d.current, claimed: d.pair[1] || null }] });
-      L.push('', `What to find (based on ${guide.basis}):`, ...guide.points.map(p => `- ${p}`));
-    }
+      L.push('', `What to find (based on ${guide.basis}):`, ...guide.points.map(p => `- ${p}`), ...calcQs.map(q => `- For the duty calculator: ${q.text}`));
+    } else if (calcQs.length) L.push('', 'What to find for the duty calculator:', ...calcQs.map(q => `- ${q.text}`));
     const steps = [
       ...g.find,
       !d.hasShipper && /HS_CODE|VALUE|DENIED/.test(d.type) && "The shipper isn't shown (the Parties section was closed); if the goods or the party can't be pinned down without it, say so.",
       OP('skill'),
+      hasCalc && OP('calculator'),
       OP('redFlags'),
       OP('decide'),
     ].filter(Boolean);
@@ -2484,6 +2579,7 @@
       '**What we found**',
       ...g.found,
       '',
+      ...calcReplyBlock(calcFacts, 'the Chapter 99 codes that apply with these answers'),
       '**What to do**',
       '1. <each step on the dashboard: which line and field, from what to what; or "Nothing beyond the decision">',
       '',
@@ -2687,8 +2783,6 @@
       const q = wo.consignment?.id ? `?consignment=${wo.consignment.id}` : '';
       return { type: wo.type, id: sid, url: `${location.origin}/entry-writer-queue/${wo.type}/${sid}${q}`, wo };
     }
-    // Before 7.11.1 a dispute claimed from the queue got an Entry Writer Queue link, which doesn't open; those are replaced
-    const badPortalLink = u => /\/entry-writer-queue\/DUTY_DISPUTE_REVIEW\/duty_dispute_/.test(u || '');
     function* walk(node, depth = 0) {
       if (!node || typeof node !== 'object' || depth > 14) return;
       yield node;
@@ -3185,31 +3279,28 @@
       if (!sheetsOn()) return chats.length ? h('div', { class: 'section' }, h('p', { class: 'label', text: `Case · ${kindOf(ent.type)}` }),
         h('div', { class: 'order-card' }, h('div', { class: 'row', style: 'gap:12px;flex-wrap:wrap' }, chats))) : null;
       // Whether the case is in the sheet yet, with its sheet and doc
-      {
-        const sc = D.sheetCase?.id === ent.id ? D.sheetCase : null;
-        const a = (href, text) => h('a', { href, target: '_blank', rel: 'noopener', text });
-        return h('div', { class: 'section' }, h('p', { class: 'label', text: `Case · ${kindOf(ent.type)}` }),
-          h('div', { class: 'order-card' },
-            (() => {
-              const o = !sc && D.orphan?.id === ent.id ? D.orphan : null;
-              if (!o) return h('p', { class: 'hint', style: 'margin:0', text: sc ? 'In the Google Sheet.' : 'Not in the Google Sheet yet: claiming it adds it.' });
-              const n = o.requests.length;
-              return [h('p', { class: 'hint warn', style: 'margin:0', text: `Researched ${n === 1 ? 'once' : `${n} times`} in Claude Code, but not in the Google Sheet (its row may have been deleted).` }),
-                h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'secondary', type: 'button', text: o.busy ? 'Adding…' : 'Add to the Google Sheet', disabled: o.busy,
-                  title: "Adds the case's row back, and puts Claude Code's answers in a new case doc", onclick: () => addToSheet() }))];
-            })(),
-            (sc || chats.length) && h('div', { class: 'row', style: 'gap:12px;margin-top:6px;flex-wrap:wrap' }, sc?.sheet && a(sc.sheet, 'Sheet'), sc?.doc && a(sc.doc, 'Case doc'), chats),
-            // Research out with Claude Code: when, its session, and whether the session started
-            (() => {
-              const r = D.research || GM_getValue(`desk:research:${ent.id}`, null);
-              if (!r) return null;
-              return h('p', { class: 'hint' }, `Research for Claude Code (${r.what}) sent ${shortDate(r.at)}. Its answer shows up below by itself. `,
-                r.session && a(r.session, 'Open the research session'),
-                r.fireError && h('span', { class: 'warn', text: `The cloud session didn't start (${r.fireError}). Press Research in Claude Code to try again.` }));
-            })(),
-            D.msg && h('p', { class: `hint ${D.state === 'error' ? 'err' : 'ok'}`, text: D.msg })));
-      }
-      return null;
+      const sc = D.sheetCase?.id === ent.id ? D.sheetCase : null;
+      const a = (href, text) => h('a', { href, target: '_blank', rel: 'noopener', text });
+      return h('div', { class: 'section' }, h('p', { class: 'label', text: `Case · ${kindOf(ent.type)}` }),
+        h('div', { class: 'order-card' },
+          (() => {
+            const o = !sc && D.orphan?.id === ent.id ? D.orphan : null;
+            if (!o) return h('p', { class: 'hint', style: 'margin:0', text: sc ? 'In the Google Sheet.' : 'Not in the Google Sheet yet: claiming it adds it.' });
+            const n = o.requests.length;
+            return [h('p', { class: 'hint warn', style: 'margin:0', text: `Researched ${n === 1 ? 'once' : `${n} times`} in Claude Code, but not in the Google Sheet (its row may have been deleted).` }),
+              h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'secondary', type: 'button', text: o.busy ? 'Adding…' : 'Add to the Google Sheet', disabled: o.busy,
+                title: "Adds the case's row back, and puts Claude Code's answers in a new case doc", onclick: () => addToSheet() }))];
+          })(),
+          (sc || chats.length) && h('div', { class: 'row', style: 'gap:12px;margin-top:6px;flex-wrap:wrap' }, sc?.sheet && a(sc.sheet, 'Sheet'), sc?.doc && a(sc.doc, 'Case doc'), chats),
+          // Research out with Claude Code: when, its session, and whether the session started
+          (() => {
+            const r = D.research || GM_getValue(`desk:research:${ent.id}`, null);
+            if (!r) return null;
+            return h('p', { class: 'hint' }, `Research for Claude Code (${r.what}) sent ${shortDate(r.at)}. Its answer shows up below by itself. `,
+              r.session && a(r.session, 'Open the research session'),
+              r.fireError && h('span', { class: 'warn', text: `The cloud session didn't start (${r.fireError}). Press Research in Claude Code to try again.` }));
+          })(),
+          D.msg && h('p', { class: `hint ${D.state === 'error' ? 'err' : 'ok'}`, text: D.msg })));
     }
 
     /* ---- Prompts: the team's edits to the research prompts, one row per piece (promptPieces) in the sheet's Prompts tab */
@@ -7674,9 +7765,12 @@
       if (!items.length) return;
       items.forEach(i => { s.facts[i.line] = { loading: true }; });
       render();
+      // The duty calculator works from the order date, and a postal tracking number means it came by mail
+      const ordered = Date.parse(s.data.ordered);
+      const calc = { date: ordered ? new Date(ordered).toLocaleDateString('sv-SE') : '', mode: s.data.postedIn ? 'mail' : 'unknown' };
       await Promise.all(items.map(async item => {
         try {
-          s.facts[item.line] = { data: await gatherFacts(item) };
+          s.facts[item.line] = { data: await gatherFacts(item, { calc }) };
         } catch (e) {
           console.warn('[Dispute Researcher] HTS lookup failed', e);
           s.facts[item.line] = { error: e.message, kind: e.kind || 'server' };
@@ -7697,10 +7791,14 @@
       targets.forEach((_, i) => { s.facts[i] = { loading: true }; });
       render();
       const review = d.type === 'HS_CODE_REVIEW';
+      // Each code's value for the duty calculator, from the portal's own items ("Item n: … | HS … | COO … | qty … | 12.5 USD")
+      const priced = desk.portalItems().map(l => l.split(' | ')).map(p => ({ hs: (p[1] || '').replace(/^HS /, ''), v: p[4] || '' }));
+      const calc = { date: '', mode: d.postedIn ? 'mail' : 'unknown' };
       await Promise.all(targets.map(async (x, i) => {
-        const item = { fields: [{ label: 'HS code', current: x.current, claimed: x.claimed || null }, { label: 'Country of origin', current: x.from || '', claimed: null }] };
+        const item = { fields: [{ label: 'HS code', current: x.current, claimed: x.claimed || null }, { label: 'Country of origin', current: x.from || '', claimed: null },
+          { label: 'Declared value', current: priced.find(p => sameCode(p.hs, x.current))?.v || '', claimed: null }] };
         try {
-          s.facts[i] = { data: await gatherFacts(item, { roles: review ? ['Current code', 'Suggested or corrected code'] : ['Code on the page', 'Second code'], rulings: review, extended: true }) };
+          s.facts[i] = { data: await gatherFacts(item, { roles: review ? ['Current code', 'Suggested or corrected code'] : ['Code on the page', 'Second code'], rulings: review, extended: true, calc }) };
         } catch (e) {
           console.warn('[Dispute Researcher] HTS lookup failed', e);
           s.facts[i] = { error: e.message, kind: e.kind || 'server' };
@@ -8030,9 +8128,42 @@
       const finalCard = finalText && h('div', { class: 'final-card' },
         h('p', { class: 'final-text', text: finalText }),
         h('p', { class: 'hint', style: 'margin:4px 0 0', text: `From the answer saved ${shortDate(newest.createdAt)}` }));
+      // The duty calculator again, with the research's answers to its questions (from the newest answer): the Chapter 99
+      // codes that result, here and once in the case doc
+      const calcRuns = Object.values(s.facts || {}).filter(f => f.data?.calc).flatMap(f => f.data.calc).filter(c => !c.error && c.input);
+      const calcAgain = (() => {
+        if (!newest || !calcRuns.length) return null;
+        const answers = calcAnswers(newest.text, [...new Map(calcRuns.flatMap(c => c.questions).map(q => [q.id, q])).values()]);
+        const n = Object.keys(answers).length;
+        if (!n) return null;
+        s.calcAgain = s.calcAgain || {};
+        const key = `${newest.id}:${JSON.stringify(answers)}`;
+        const got = s.calcAgain[key];
+        if (!got) {
+          s.calcAgain[key] = { loading: true };
+          Promise.all(calcRuns.map(c => dutyCalc({ ...c.input, answers }).catch(e => ({ ...c.input, error: e.message, parts: [], questions: [] }))))
+            .then(runs => {
+              s.calcAgain[key] = { runs };
+              const noted = `zt:calcNoted:${newest.id}`;
+              if (desk.caseDoc() && !desk.dryRun() && !GM_getValue(noted, false)) {
+                GM_setValue(noted, true);
+                desk.docNote(`Duty calculator with the research's answers (${n} answered): ${runs.map(r => `${r.role || 'code'} ${r.code}${r.origin ? ` from ${r.origin}` : ''}: ${r.error || calcCodes(r)}`).join('; ')}.`)
+                  .catch(e => { GM_deleteValue(noted); console.warn('[Tools] calculator note', e); });
+              }
+              if (s === state) render();
+            });
+        }
+        return h('div', { class: 'order-card', style: 'margin-bottom:8px' },
+          h('p', { class: 'label', style: 'margin:0 0 4px', text: `Chapter 99 · duty calculator with the research's ${n} answer${n === 1 ? '' : 's'}` }),
+          got?.runs ? got.runs.map(r => h('p', { class: 'hint', style: 'margin:2px 0' },
+            h('b', { text: `${r.role || 'Code'} ${r.code}${r.origin ? ` (${r.origin})` : ''}: ` }), r.error || calcCodes(r),
+            r.questions?.length ? ` · ${r.questions.length} question${r.questions.length === 1 ? '' : 's'} still open` : ''))
+            : h('p', { class: 'hint', style: 'margin:0', text: 'Working it out…' }));
+      })();
       const answerSection = (finalCard || replyBlock || newest) && h('div', { class: 'section' },
         h('p', { class: 'label', text: 'Answer' }),
         finalCard,
+        calcAgain,
         syncState,
         replyBlock,
         newest && h('div', { class: 'answers' }, answerCard(newest)));
