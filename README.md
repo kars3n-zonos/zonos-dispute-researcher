@@ -28,7 +28,7 @@ For the maintainer:
 
 - **The button:** an orange **Tools** button in the sidebar above References. On a window too narrow for the sidebar, press `\`.
 - **Fresh install:** nothing else on the portal changes until you turn it on in Settings.
-- **Quick research** (off until ticked under Settings > Panel and pages): on dispute and order pages, a button above Tools claims the order and starts research in one click: **Research in Claude Code** if it's set up for you, otherwise **Open in claude.ai**. Its progress shows above the button, and Tools opens once it's started.
+- **Quick research** (off until ticked under Settings > Panel and pages): on dispute and order pages, a **Research** button above Tools claims the order and starts research in one click: in Claude Code if it's set up for you, otherwise in claude.ai, with the chat opening in a new tab. Its progress shows above the button, and Tools opens once it's started.
 - **Research again:** if a case was already researched (by anyone; the Google Sheet's Research tab says), the Research buttons ask before starting another session, and bulk runs skip it.
 - **`\` key:** opens and closes it.
 - **Where it opens:** as an overlay beside the button. Drag the edge away from the button to resize it. The ◫ button docks it side by side with the page, and ⧉ floats it again.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.42.0
+// @version      7.43.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -6503,11 +6503,12 @@
     const QUICK_KEY = 'zt:quickResearch';
     const RESEARCH_LOG_KEY = 'zt:researchLog';   // Claude Code also writes its full research log for the case doc
     const AUTO_SAVE_KEY = 'zt:autoSaveChat';     // claude.ai answers are saved without pressing Save
-    const quickText = () => (desk.researchOn() ? 'Research in Claude Code' : 'Open in claude.ai');
+    // Just "Research"; how (Claude Code or claude.ai) is in its tooltip, and on the Research tab's own buttons
+    const quickTitle = () => `Claims this order and researches it ${desk.researchOn() ? 'in Claude Code' : 'in claude.ai'}, in a new tab`;
     const sideQuick = h('button', { type: 'button', id: 'zt-side-research', hidden: true,
       class: 'flex w-full items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors',
       style: 'border-color:#f59e0b;color:#ffffff;background:#d97706;font-weight:600;cursor:pointer;margin-bottom:6px',
-      onclick: () => quickResearch() }, h('span', { 'aria-hidden': 'true', text: '✦' }), h('span', { text: quickText() }));
+      onclick: () => quickResearch() }, h('span', { 'aria-hidden': 'true', text: '✦' }), h('span', { text: 'Research' }));
     const sideStatus = h('div', { id: 'zt-side-status', role: 'status', hidden: true, style: 'font-size:12px;line-height:1.35;margin:0 2px 6px;color:#b45309' });
     let quickBusy = false;
     let quietOpen = false;   // open() reads the page without showing the panel
@@ -6555,7 +6556,7 @@
         const claimed = await claimHere();
         if (desk.researchOn()) {
           quickSay(`${claimed ? `${claimed} · ` : ''}saving to the Google Sheet and starting Claude Code…`);
-          const r = await sendToClaudeCode({ openTab: false });
+          const r = await sendToClaudeCode();   // its session opens in a new tab, like the Research tab's button
           if (r?.skipped) { quickSay(`${claimed ? `${claimed} · ` : ''}not sent again: ${r.why}`); return; }
           if (!r?.session && !r?.dry) throw new Error(`${claimed ? `${claimed}, but ` : ''}the cloud session didn't start${r?.fireError ? ` (${r.fireError})` : ''}.`);
           quickSay(`${claimed ? `${claimed} · ` : ''}${r.dry ? 'test mode: nothing sent' : 'research started in Claude Code'} ✓`);
@@ -6576,9 +6577,9 @@
     function placeQuick() {
       const show = isCasePage() && GM_getValue(QUICK_KEY, false) === true;
       if (!show && !quickBusy) quickSay('');
-      const text = quickText();
+      const title = quickTitle();
       sideQuick.hidden = !show;
-      if (sideQuick.lastChild.textContent !== text) sideQuick.lastChild.textContent = text;
+      if (sideQuick.title !== title) sideQuick.title = title;
     }
     const sideWrap = h('div', { class: 'px-2 pb-2', id: 'zt-side-wrap' }, sideStatus, sideQuick, sideBtn);
     // (runs every second: when the button is already in place by References, nothing is looked for)
@@ -7273,7 +7274,7 @@
     // ---- the panel's own options, at the top of Settings (the cog), out of the way of the tabs
     const check =(label, on, change) => h('label', { class: 'doc' }, h('input', { type: 'checkbox', checked: on, onchange: e => change(e.target.checked) }), h('span', { text: label }));
     const prefsGroup = group('Panel and pages', "Changes to the portal's own pages are off until you turn them on here.",
-      check('A "Research in Claude Code" button above Tools on dispute and order pages: claims the order and starts research in one click', GM_getValue(QUICK_KEY, false) === true, on => { GM_setValue(QUICK_KEY, on); placeLauncher(); }),
+      check('A "Research" button above Tools on dispute and order pages: claims the order and starts research in one click (Claude Code when it\'s set up, else claude.ai), its chat in a new tab', GM_getValue(QUICK_KEY, false) === true, on => { GM_setValue(QUICK_KEY, on); placeLauncher(); }),
       h('label', { class: 'frow', style: 'margin-bottom:6px' }, h('span', { class: 'flabel', text: 'Entry Writer Queue page' }),
         h('select', { class: 'field', 'aria-label': 'Entry Writer Queue page', onchange: e => setQueueView(e.target.value) },
           h('option', { value: 'portal', text: "Default Portal: the portal's own queue", selected: queueView() === 'portal' }),
