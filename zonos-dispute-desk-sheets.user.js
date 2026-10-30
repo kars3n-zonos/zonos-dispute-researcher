@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.19.0
+// @version      7.22.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -2595,7 +2595,8 @@
       captured.push({ op, at: Date.now(), json });
       captureSeq++;
       if (captured.length > 60) captured.shift();
-      for (const fn of replyWatchers) { try { fn(op, status, json); } catch (e) { console.warn('[Tools]', e); } }
+      const sent = varsByOp[op] && Date.now() - varsByOp[op].at < 15000 ? varsByOp[op].vars : null;
+      for (const fn of replyWatchers) { try { fn(op, status, json, sent); } catch (e) { console.warn('[Tools]', e); } }
       if (!(enabled() || sheetsOn()) || status >= 300 || !json?.data || json.errors?.length) return;
       if (ACTIONS[op]) {
         const v = varsByOp[op] && Date.now() - varsByOp[op].at < 15000 ? varsByOp[op].vars : {};
@@ -4225,6 +4226,10 @@
     .pop label:hover { background: var(--soft); }
     .pop label span.n { margin-left: auto; color: var(--muted); font-size: 11px; }
     .pop input[type=search] { width: 100%; margin-bottom: 4px; background: var(--soft); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+    .pop .pop-mode { display: flex; gap: 2px; padding: 2px; margin-bottom: 6px; background: var(--soft); border-radius: 6px; }
+    .pop .pop-mode button { flex: 1; border: 0; background: transparent; color: var(--muted); border-radius: 4px; padding: 4px 8px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+    .pop .pop-mode button.on { background: var(--bg); color: var(--fg); box-shadow: 0 1px 2px rgba(0,0,0,.15); }
+    .pop.hiding label input:checked + span { text-decoration: line-through; color: var(--muted); }
     .pop .pop-actions { display: flex; justify-content: space-between; padding: 4px 6px 0; border-top: 1px solid var(--line); margin-top: 4px; }
     .linkish { background: none; border: 0; padding: 0; color: var(--accent); font-size: 12px; }
     .summary { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
@@ -4460,12 +4465,13 @@
     const skin = () => (queueView() === 'classic' ? 'classic' : 'tools');
     const defaults = { scope: 'mine', cscope: 'mine', filters: {}, sort: [{ key: 'due', dir: 1 }], group: '', views: [], auto: true, stack: true };
     const prefs = { ...defaults, ...GM_getValue(PREFS_KEY, {}) };
-    const savePrefs = () => GM_setValue(PREFS_KEY, { scope: S.scope, cscope: S.cscope, filters: S.filters, sort: S.sort, group: S.group, views: prefs.views, auto: S.auto, stack: S.stack });
+    const savePrefs = () => GM_setValue(PREFS_KEY, { scope: S.scope, cscope: S.cscope, filters: S.filters, sort: S.sort, group: S.group, views: prefs.views, auto: S.auto, stack: S.stack, excl: S.excl });
     const S = {
       rows: [], me: null, loadedAt: 0, loading: false, error: '', q: '', scope: prefs.scope, cscope: prefs.cscope, filters: prefs.filters || {}, sort: prefs.sort, group: prefs.group,
       auto: prefs.auto, sel: new Set(), anchor: -1, focus: -1, pop: '', popSearch: '', extra: null, extraFor: '', seenAt: GM_getValue(SEEN_KEY, 0), shown: [], limit: 300,
       open: new Set(),   // Portal+: rows with their details showing
-      stack: prefs.stack !== false, stackMsg: '',   // identical disputes shown as one row (with the access code)
+      stack: prefs.stack !== false, stackMsg: '',
+      excl: prefs.excl || {},   // filters set to Hide: the values picked are left out instead of the only ones shown   // identical disputes shown as one row (with the access code)
     };
     let autoTimer = null;
     // Follows the portal's light / dark switch as soon as it's flipped, without redrawing the list
@@ -4550,7 +4556,7 @@
       for (const f of filterList()) {
         const want = S.filters[f.key];
         if (f.key === ignore || !want?.length) continue;
-        rows = rows.filter(r => filterVals(f, r).some(v => want.includes(v)));
+        rows = rows.filter(r => filterVals(f, r).some(v => want.includes(v)) !== !!S.excl[f.key]);
       }
       if (pq.list) {
         const found = new Set();
@@ -4596,7 +4602,7 @@
     // ---- identical disputes as one row (with Batch work's access code): the same company, assignee and status, and
     // exactly the same disputed lines, claims and questionnaire answers. The first in the list's order stands for the
     // rest (r._copies); claiming or selecting it does all of them, and opening it works them as one (merged).
-    const stackOn = () => S.stack && batchUnlocked();
+    const stackOn = () => S.stack && stackAllowed();
     const idsOf = r => [r.id, ...(r._copies || []).map(c => c.id)];
     function stackKey(r) {
       const k = r.type === 'DUTY_DISPUTE_REVIEW' && shapes.key(r.sid);
@@ -4638,7 +4644,7 @@
     }
     function prepareOpen(r) { if (r._copies?.length) merged.adoptMany([{ lead: r, copies: r._copies }], 'queue'); }
     function stackToggle(cls) {
-      if (!batchUnlocked()) return null;
+      if (!stackAllowed()) return null;
       return h('label', { class: cls, title: 'Identical disputes (same company, assignee and status; exactly the same lines, claims and questionnaire answers) show as one row with ×N. Claim, select or open it, and what you do is done to all of them.' },
         h('input', { type: 'checkbox', checked: S.stack, onchange: e => {
           S.stack = e.target.checked; S.sel.clear(); S.limit = 300; savePrefs();
@@ -4654,7 +4660,7 @@
       const me = S.me?.id;
       const all = sortRows(visible());
       const rows = stack(all);
-      if (stackOn()) registerStacks(rows);
+      if (stackOn()) registerStacks(rows); else stackSig = '';
       fillShapes(all);
       if (skin() === 'classic') { S.shown = rows; saveNav(rows); renderClassic(rows); return; }
       moreObserver.disconnect();
@@ -4693,7 +4699,7 @@
         h('select', { class: 'btn', style: 'width:150px', 'aria-label': 'Group by', onchange: e => { S.group = e.target.value; savePrefs(); render(); } },
           Object.entries(GROUPS).map(([k, v]) => h('option', { value: k, text: k ? `Group: ${v}` : v, selected: S.group === k }))),
         // Always there (hidden when there's nothing to clear), so turning a filter on moves nothing
-        h('button', { class: 'linkish', type: 'button', text: 'Clear all', style: `width:56px;visibility:${Object.values(S.filters).some(v => v?.length) || S.q ? 'visible' : 'hidden'}`, onclick: () => { S.filters = {}; S.q = ''; searchInput.value = ''; savePrefs(); render(); } }));
+        h('button', { class: 'linkish', type: 'button', text: 'Clear all', style: `width:56px;visibility:${Object.values(S.filters).some(v => v?.length) || S.q ? 'visible' : 'hidden'}`, onclick: () => { S.filters = {}; S.excl = {}; S.q = ''; searchInput.value = ''; savePrefs(); render(); } }));
 
       // Summary: what's in front of you, each number a one-click filter
       const scoped = visible({ ignore: 'due' });
@@ -4767,7 +4773,7 @@
         CLASSIC_FILTERS.map(filterButton),
         h('label', { class: 'cq-search' }, h('span', { class: 'muted', text: '⌕' }), searchInput),
         h('button', { class: 'cq-clear', type: 'button', text: 'Clear all', style: `visibility:${anyFilter ? 'visible' : 'hidden'}`,
-          onclick: () => { for (const f of CLASSIC_FILTERS) delete S.filters[f.key]; S.filters = { ...S.filters }; S.q = ''; searchInput.value = ''; S.limit = 300; savePrefs(); render(); } }));
+          onclick: () => { for (const f of CLASSIC_FILTERS) { delete S.filters[f.key]; delete S.excl[f.key]; } S.filters = { ...S.filters }; S.excl = { ...S.excl }; S.q = ''; searchInput.value = ''; S.limit = 300; savePrefs(); render(); } }));
       const note = h('div', { class: 'cq-note' },
         S.missing?.length ? [h('b', { text: `Not found: ${S.missing.join(', ')}` }), ' · ', h('button', { class: 'linkish', type: 'button', text: 'Copy', onclick: () => copy(S.missing.join('\n'), 'Copied.') })]
           : ['Showing every ', h('b', { text: 'Open' }), ' and ', h('b', { text: 'Waiting' }), ' order in one list. Click a column to sort; Ctrl-click a row for a new tab; Shift-click checkboxes to select a range.']);
@@ -4889,8 +4895,10 @@
       const on = (S.filters[key] || []).includes(val);
       return h('button', { class: `chip${on ? ' on' : ''}`, type: 'button', onclick: () => toggleFilter(key, val, true), text: `${val} · ${n}` });
     }
+    // `only`: a chip or summary number, which always means "show only this"
     function toggleFilter(key, val, only = false) {
       const cur = S.filters[key] || [];
+      if (only && S.excl[key]) S.excl = { ...S.excl, [key]: false };
       S.filters = { ...S.filters, [key]: cur.includes(val) ? cur.filter(v => v !== val) : only ? [val] : [...cur, val] };
       S.limit = 300;
       savePrefs();
@@ -4898,10 +4906,11 @@
     }
     function filterButton(f) {
       const want = S.filters[f.key] || [];
+      const hiding = !!S.excl[f.key];
       // Same width picked or not: the count shows here, what's picked in the tooltip and the chips
       const btn = h('button', { type: 'button', class: want.length ? 'on' : '', 'aria-expanded': String(S.pop === f.key),
-        title: want.length ? `${f.label}: ${want.join(', ')}` : `Filter by ${f.label.toLowerCase()}`,
-        text: want.length ? `${f.label} · ${want.length} ▾` : `${f.label} ▾`,
+        title: want.length ? `${f.label}: ${hiding ? 'hiding ' : ''}${want.join(', ')}` : `Filter by ${f.label.toLowerCase()}`,
+        text: want.length ? `${f.label} · ${hiding ? `hiding ${want.length}` : want.length} ▾` : `${f.label} ▾`,
         onclick: e => { e.stopPropagation(); S.pop = S.pop === f.key ? '' : f.key; S.popSearch = ''; render(); } });
       const box = h('div', { class: 'filter' }, btn);
       if (S.pop === f.key) {
@@ -4909,7 +4918,13 @@
         for (const v of want) if (!opts.some(([k]) => k === v)) opts.push([v, 0]);
         const term = S.popSearch.toLowerCase();
         const list = opts.filter(([k]) => !term || k.toLowerCase().includes(term)).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-        box.append(h('div', { class: 'pop', onclick: e => e.stopPropagation() },
+        // Show only the ones ticked, or hide the ones ticked (and show everything else); what's ticked is kept
+        const mode = h('div', { class: 'pop-mode', role: 'group', 'aria-label': 'Ticked ones are' }, [['Show only', false], ['Hide', true]].map(([t, x]) =>
+          h('button', { type: 'button', class: hiding === x ? 'on' : '', 'aria-pressed': String(hiding === x), text: t,
+            title: x ? 'Hide what you tick; everything else shows' : 'Show only what you tick',
+            onclick: () => { S.excl = { ...S.excl, [f.key]: x }; S.limit = 300; savePrefs(); render(); } })));
+        box.append(h('div', { class: `pop${hiding ? ' hiding' : ''}`, onclick: e => e.stopPropagation() },
+          mode,
           f.searchable || opts.length > 12 ? h('input', { type: 'search', placeholder: `Find a ${f.label.toLowerCase()}`, value: S.popSearch, oninput: e => { S.popSearch = e.target.value; render(); } }) : null,
           list.slice(0, 200).map(([k, n]) => h('label', {},
             h('input', { type: 'checkbox', checked: want.includes(k), onchange: () => toggleFilter(f.key, k) }), h('span', { text: k }), h('span', { class: 'n', text: String(n) }))),
@@ -4932,12 +4947,12 @@
     function saveView() {
       const name = prompt('Name this view (scope, search, filters, sort and grouping are saved):');
       if (!name) return;
-      prefs.views = [...(prefs.views || []).filter(v => v.name !== name), { name: clean(name), scope: S.scope, q: S.q, filters: S.filters, sort: S.sort, group: S.group }];
+      prefs.views = [...(prefs.views || []).filter(v => v.name !== name), { name: clean(name), scope: S.scope, q: S.q, filters: S.filters, excl: S.excl, sort: S.sort, group: S.group }];
       savePrefs();
       render();
     }
     function applyView(v) {
-      Object.assign(S, { scope: v.scope, q: v.q || '', filters: v.filters || {}, sort: v.sort || defaults.sort, group: v.group || '' });
+      Object.assign(S, { scope: v.scope, q: v.q || '', filters: v.filters || {}, excl: v.excl || {}, sort: v.sort || defaults.sort, group: v.group || '' });
       searchInput.value = S.q;
       S.sel.clear();
       savePrefs();
@@ -5588,6 +5603,9 @@
   const BATCH_UNLOCK_KEY = 'zt:batch:unlocked';
   const BATCH_CODE_SHA = '1d0973dcbe8d66da8205d85099c968fd82a34a0927474cd9a8ddf7f3f6aa052f';   // SHA-256 of the access code (the code itself isn't in the script)
   const batchUnlocked = () => GM_getValue(BATCH_UNLOCK_KEY, '') === BATCH_CODE_SHA;
+  // Stacking identical disputes in the queue (and working each stack as one): off until turned on under the access code
+  const STACK_KEY = 'zt:batch:stack';
+  const stackAllowed = () => batchUnlocked() && GM_getValue(STACK_KEY, false) === true;
   async function sha256(text) {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
     return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -6120,9 +6138,23 @@
       draw();
     }
 
-    // The portal's own replies: a save or Submit on a dispute worked as one, a claim or release of its work order
-    // (from its page, one order at a time), or a correction (which changes what it is)
-    function onReply(op, status, json) {
+    // What's done to the work order of a dispute worked as one, on its page, is done to its copies' work orders,
+    // with what was sent (the note, the escalation target, the resolution, the assignee). Resolve waits 5 seconds,
+    // like Submit.
+    const WO_ACTIONS = {
+      BrokerageWorkOrderClaim: { doing: 'Claiming', done: 'Claimed' },
+      BrokerageWorkOrderRelease: { doing: 'Releasing', done: 'Released' },
+      BrokerageWorkOrderWait: { doing: 'Marking waiting', done: 'Marked waiting' },
+      BrokerageWorkOrderResume: { doing: 'Resuming', done: 'Resumed' },
+      BrokerageWorkOrderEscalate: { doing: 'Escalating', done: 'Escalated', needs: ['target', 'note'] },
+      BrokerageWorkOrderNote: { doing: 'Adding the note to', done: 'Added the note to', needs: ['note'] },
+      BrokerageWorkOrderAssign: { doing: 'Assigning', done: 'Assigned', needs: ['assigneeId'] },
+      BrokerageWorkOrderResolve: { doing: 'Resolving', done: 'Resolved', needs: ['resolution'], wait: true },
+    };
+    // The portal's own replies (with what was sent, `vars`, when the request was seen): a save or Submit on a
+    // dispute worked as one, an action on its work order (from its page, one order at a time), or a correction
+    // (which changes what it is)
+    function onReply(op, status, json, vars) {
       if (!batchUnlocked() || status >= 300 || !json?.data || json.errors?.length) return;
       const d = Object.values(json.data)[0];
       if (op === 'BrokerageDutyDisputeClaimsCorrect' && d?.id) { shapes.forget(d.id); return; }
@@ -6130,17 +6162,19 @@
         if (d?.id && record(d.id)) queue(d.id, op === 'BrokerageDutyDisputeComplete' ? 'complete' : 'decide');
         return;
       }
-      if (op === 'BrokerageWorkOrderClaim' || op === 'BrokerageWorkOrderRelease') {
-        const wos = [];
+      if (!WO_ACTIONS[op]) return;
+      let wos = Array.isArray(vars?.ids) ? vars.ids : null;
+      if (!wos) {
+        wos = [];
         (function walk(o, depth) {
           if (!o || typeof o !== 'object' || depth > 6) return;
           if (typeof o.id === 'string' && 'assigneeName' in o) wos.push(o.id);
           for (const v of Array.isArray(o) ? o : Object.values(o)) walk(v, depth + 1);
         })(json.data, 0);
-        if (wos.length !== 1 || held.has(wos[0])) return;
-        const m = Object.values(records()).find(x => x.leadWo === wos[0]);
-        if (m) queue(m.lead, op === 'BrokerageWorkOrderClaim' ? 'claim' : 'release');
       }
+      if (wos.length !== 1 || held.has(wos[0])) return;
+      const m = Object.values(records()).find(x => x.leadWo === wos[0]);
+      if (m) queue(m.lead, 'wo', { op, vars });
     }
     // Claims from the queue (the whole stack at once): their replies aren't copied again
     async function holding(woIds, fn) {
@@ -6149,10 +6183,10 @@
     }
     // One job at a time; a save made while one runs is copied right after it (Submit wins over a save)
     const isDecision = k => k === 'decide' || k === 'complete';
-    function queue(lead, kind) {
-      const same = jobs.find(j => j.lead === lead && (j.kind === kind || (isDecision(j.kind) && isDecision(kind))));
+    function queue(lead, kind, extra = {}) {
+      const same = isDecision(kind) && jobs.find(j => j.lead === lead && isDecision(j.kind));
       if (same) { if (kind === 'complete') same.kind = 'complete'; return; }
-      jobs.push({ lead, kind });
+      jobs.push({ lead, kind, ...extra });
       if (!R.job) next();
     }
     async function next() {
@@ -6163,7 +6197,7 @@
       Object.assign(R, { job, stop: false, cancel: false, counting: false });
       R.msgs[m.lead] = '';
       try {
-        if (job.kind === 'claim' || job.kind === 'release') R.msgs[m.lead] = await claimCopies(m, job.kind);
+        if (job.kind === 'wo') R.msgs[m.lead] = await workOrderCopies(m, job.op, job.vars);
         else {
           let complete = job.kind === 'complete';
           m.pending = job.kind;
@@ -6184,21 +6218,26 @@
       draw();
       next();
     }
-    // 5 seconds to cancel before the copies are submitted
-    async function countdown(m) {
+    // 5 seconds to cancel before the copies are submitted (or resolved)
+    async function countdown(m, doing = 'Submitting', cancelled = 'Not submitted: the copies keep the decisions only.') {
       R.counting = true;
-      for (let s = 5; s > 0 && !R.cancel; s--) { say(m, `Submitting the other ${m.copies.length} in ${s}s…`); await sleep(1000); }
+      for (let s = 5; s > 0 && !R.cancel; s--) { say(m, `${doing} the other ${m.copies.length} in ${s}s…`); await sleep(1000); }
       R.counting = false;
-      if (R.cancel) { say(m, 'Not submitted: the copies keep the decisions only.'); return false; }
+      if (R.cancel) { say(m, cancelled); return false; }
       return true;
     }
-    async function claimCopies(m, kind) {
+    async function workOrderCopies(m, op, vars) {
       if (portal.mode() !== m.mode) throw new Error(`The portal is in ${portal.mode().toUpperCase()} mode, but these disputes were stacked in ${m.mode.toUpperCase()} mode. Nothing was copied.`);
+      const a = WO_ACTIONS[op];
+      const { ids, ...rest } = vars || {};
+      // Without what was sent (a note, a target), the copies would get something different: nothing is done
+      if ((a.needs || []).some(k => rest[k] == null || rest[k] === '')) throw new Error(`${a.done} ${m.leadRef}, but couldn't see what was sent with it, so the other ${m.copies.length} weren't changed. Select its row in Portal+ and use the bulk bar instead.`);
       const wos = m.copies.map(c => c.wo).filter(Boolean);
       if (!wos.length) return '';
-      say(m, `${kind === 'claim' ? 'Claiming' : 'Releasing'} the other ${wos.length}…`);
-      const res = await holding(wos, () => portal.act(kind === 'claim' ? 'BrokerageWorkOrderClaim' : 'BrokerageWorkOrderRelease', wos));
-      return `${kind === 'claim' ? 'Claimed' : 'Released'} the other ${res.done.length}${res.failed.length ? ` · ${res.failed.length} failed: ${res.failed[0].error}` : ''}.`;
+      if (a.wait && !await countdown(m, a.doing, `Not ${a.done.toLowerCase()}: the other ${m.copies.length} stay as they were.`)) return R.msgs[m.lead];
+      say(m, `${a.doing} the other ${wos.length}${rest.note ? ` ("${String(rest.note).slice(0, 60)}")` : ''}…`);
+      const res = await holding(wos, () => portal.act(op, wos, rest));
+      return `${a.done} the other ${res.done.length}${rest.note ? `, with the same note` : ''}${res.failed.length ? ` · ${res.failed.length} failed: ${res.failed[0].error}` : ''}.`;
     }
     async function copy(m, complete) {
       if (portal.mode() !== m.mode) throw new Error(`The portal is in ${portal.mode().toUpperCase()} mode, but these disputes were stacked in ${m.mode.toUpperCase()} mode. Nothing was copied.`);
@@ -6283,7 +6322,7 @@
       box.replaceChildren(...[
         h('div', {}, h('span', { class: 'n', text: `×${all1}` }), h('b', { text: 'identical disputes, worked as one' }), h('span', { class: 'muted', text: ` · ${m.customer} · ${m.mode.toUpperCase()}` })),
         onCopy ? h('p', { class: 'warn' }, `This dispute is one of the ${all1} worked as one through `, lead, '. Work that one: what you do there is done here too.')
-          : onLead ? h('p', { text: `Claim, decide and Submit here as usual: each is done to the other ${m.copies.length} too. Decisions are copied as you save them; Submit submits the others after 5 seconds.` })
+          : onLead ? h('p', { text: `Work it here as usual: claim, release, mark waiting, resume, escalate, notes, decisions and Submit are each done to the other ${m.copies.length} too. Submit and Resolve do the others after 5 seconds.` })
             : h('p', {}, 'Copying from ', lead, ' to its identical copies.'),
         msg ? h('p', { class: /no longer|isn't|mode, but|nothing was|failed/i.test(msg) ? 'err' : '', text: msg }) : null,
         !busy && m.pending ? h('p', { class: 'warn', text: 'Copying stopped part-way (the page was closed or reloaded).' }) : null,
@@ -6777,12 +6816,23 @@
       onkeydown: e => { if (e.key === 'Enter') unlock(); } });
     const codeNote = note();
     let batchGroup = null;
+    // Stacking identical disputes into one row in the queue: only here, only once unlocked, and off until ticked
+    const stackBox = h('input', { type: 'checkbox', checked: GM_getValue(STACK_KEY, false) === true, onchange: e => {
+      GM_setValue(STACK_KEY, e.target.checked);
+      if (!e.target.checked) merged.dropFrom('queue');
+      queueCtl?.refreshView();
+    } });
+    const stackRow = h('label', { class: 'row', style: 'align-items:flex-start;gap:8px;cursor:pointer', hidden: true }, stackBox,
+      h('span', {}, h('b', { text: 'Stack identical disputes in the queue' }), h('span', { class: 'hint', style: 'display:block;margin:0',
+        text: 'Portal+ and the Tools queue show exact duplicates (same company, assignee and status; the same lines, claims and questionnaire answers) as one row with ×N. Whatever you do on that one (claim, waiting, notes, decisions, Submit) is done to all of them.' })));
     const accessGroup = group('Access code', 'Some features are only for the people given a code. Type it here to turn them on for this computer.',
       h('div', { class: 'row' }, codeInput, btn('Unlock', () => unlock()), btn('Lock', () => lock())),
-      codeNote);
+      codeNote, stackRow);
     function showLocked() {
       if (batchUnlocked() && !batchGroup) { batchGroup = batchTool({ group, note, say, btn }); accessGroup.after(batchGroup); }
       if (!batchUnlocked() && batchGroup) { batchGroup.remove(); batchGroup = null; }
+      stackRow.hidden = !batchUnlocked();
+      stackBox.checked = GM_getValue(STACK_KEY, false) === true;
       if (batchUnlocked()) say(codeNote, 'Unlocked on this computer: Batch work is below.', 'ok');
     }
     async function unlock() {
@@ -6794,6 +6844,8 @@
     }
     function lock() {
       GM_deleteValue(BATCH_UNLOCK_KEY);
+      merged.dropFrom('queue');
+      queueCtl?.refreshView();
       showLocked();
       say(codeNote, 'Locked. Batch work is hidden again.');
     }
