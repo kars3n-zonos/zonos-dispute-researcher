@@ -25,8 +25,10 @@ For the maintainer:
 
 ## Opening Tools
 
-- **The button:** an orange **Tools** button in the sidebar above References (the default), or an orange **⚒ Tools** bubble you can drag anywhere. Pick one in Settings.
-- **Quick research:** on dispute and order pages, a button above Tools starts research in one click: **Research in Claude Code** if it's set up for you, otherwise **Open in claude.ai**.
+- **The button:** an orange **Tools** button in the sidebar above References. On a window too narrow for the sidebar, press `\`.
+- **Fresh install:** nothing else on the portal changes until you turn it on in Settings.
+- **Quick research** (off until ticked under Settings > Panel and pages): on dispute and order pages, a button above Tools claims the order and starts research in one click: **Research in Claude Code** if it's set up for you, otherwise **Open in claude.ai**. Its progress shows above the button, and Tools opens once it's started.
+- **Research again:** if a case was already researched (by anyone; the Google Sheet's Research tab says), the Research buttons ask before starting another session, and bulk runs skip it.
 - **`\` key:** opens and closes it.
 - **Where it opens:** as an overlay beside the button. Drag the edge away from the button to resize it. The ◫ button docks it side by side with the page, and ⧉ floats it again.
 - **Header:**
@@ -46,16 +48,18 @@ For the maintainer:
   - **Quote** gives the additional Chapter 99 codes that apply.
 - **Analytics:** every order the portal has for a period, closed ones included, broken down by company, class, status / resolution, item / problem and assignee. **Export CSV** gives a file for bookkeeping.
 - **Entry Assistant:** the Entry Assistant site, for looking up and comparing codes, notes and rulings.
-- **Tools queue** (optional; there's an orange **⚡ Tools queue** switch at the top right of the portal's queue):
+- **Advanced View** (optional; there's an orange **⚡ Advanced View** switch at the top right of the portal's queue):
   - Search across everything, including a pasted list of tracking numbers.
   - Mine / Unclaimed / Waiting / Escalated / All open.
   - Filters, sorting, grouping, summary counts and saved views.
   - Bulk Claim, Release, Wait, Resume, Escalate, Note, Assign and Resolve (with the access code; without it you can still select and copy refs, links or a CSV). Each shows what will happen, and in which mode (LIVE / TEST), before anything is sent.
   - The view picker switches back to the portal's own queue, or to **Portal+**.
-- **Portal+** (optional): the portal's own queue as you know it, without its limits: one list that loads as you scroll, sortable columns, search on anything, one-click Claim, details at once, select and bulk actions, and your place kept when you come back from an order.
+- **Queue views:** **Default Portal** (the portal's own queue, the default), **Portal+** and **Advanced View**. Pick one under Settings > Panel and pages, or with the picker on Portal+ and the Advanced View.
+- **Portal+** (optional): the portal's own queue as you know it, without its limits: one list that loads as you scroll, sortable columns that stay in view, search on anything, one-click Claim, details at once, select and bulk actions, and your place kept when you come back from an order. Also: one-click counts (overdue, due today, due in 7 days, waiting, escalated, new), grouping (customer, class, assignee, status or due), compact rows, and ✦ on orders sent for research.
+  - **Claim & research** (bulk bar, with the access code): claims the selected orders nobody has and starts Claude Code research on each, in the same paced background run as Research all.
 - **Batch work** (behind an access code in Settings): claim every unclaimed order of one class, then decide identical orders together. Orders are only grouped within one company, and disputes only when every disputed line's HS code, description, origin, claims, merchant reasons and questionnaire answers match exactly.
   - **Research all shown** (a switch under Settings > Access code, off until ticked): a queue button that starts Claude Code research on every order the list shows, one per ×N stack, at most 28 an hour, in background tabs. Already researched ones are skipped.
-  - **Stack identical disputes in the queue** (a switch under Settings > Access code, shown only once unlocked, and off until ticked): in Portal+ and the Tools queue, identical disputes with the same assignee and status show as one row with ×N. Claim or select that row and all N are claimed or selected; open it and it's worked as one. Claim, release, saved decisions and Submit on its page are done to all N (Submit after a 5-second countdown you can cancel).
+  - **Stack identical disputes in the queue** (a switch under Settings > Access code, shown only once unlocked, and off until ticked): in Portal+ and the Advanced View, identical disputes with the same assignee and status show as one row with ×N. Claim or select that row and all N are claimed or selected; open it and it's worked as one. Claim, release, saved decisions and Submit on its page are done to all N (Submit after a 5-second countdown you can cancel).
   - **Work as one** opens one dispute of an identical group in the portal. Decisions you save there are copied to the rest, and when you press Submit you're asked whether to submit the rest too. Each copy is read again first and left alone if it no longer matches.
 
 ## Settings (⚙)
@@ -64,7 +68,7 @@ Every section folds open:
 
 - **Panel and pages.** Everything that changes the portal's own pages is off until you tick it:
   - the Tools button (bubble or sidebar)
-  - the Tools queue
+  - the Advanced View
   - easier-to-read order pages (labeled details, CBP messages in plain English)
   - hiding the portal's own Classify / Quote rail
   - denied-party "Listed on" links that open the official list (and copy the name) instead of a Google search

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.28.0
+// @version      7.29.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1752,7 +1752,7 @@
       ...DPL('replyRules'),
       `- After the last block, under **For the portal**, give the text I'll paste for each line in this reply, one line per box the decision asks for (${(() => { const f = textFieldsOn(document.querySelector('main')); return f.length ? f.join(', ') : 'the decision note'; })()}): "Line N · <box>: <text>", plain text, one sentence up to one short paragraph, stating the decision and why. Only the lines in this request.`,
       ...DPL('email'));
-    L.push(`- Start the whole reply with ${FINAL_LABEL} (once, before the first block): ${finalStyle('DUTY_DISPUTE')}`, '', `${FINAL_LABEL} <one sentence>`);
+    L.push(`- Start the whole reply with ${FINAL_LABEL} (once, before the first block): ${finalStyle('DUTY_DISPUTE')}`, REASON_RULE, '', `${FINAL_LABEL} <one sentence>`, `${REASON_LABEL} <one sentence>`);
     items.forEach((item, i) => L.push('', ...replyBlock(item, s, { platformUnknown: platformUnknown && i === 0 })));
     L.push('', '**For the portal**', ...items.map(i => `Line ${i.line} · <box>: <the text to paste>`));
     return L.filter(line => line !== false).join('\n');
@@ -1761,6 +1761,9 @@
   // The one-sentence answer at the top of every reply: what the panel shows first, and what the cloud
   // research writes to the case's "Claude Final Answer" in Notion. Plain words, the decision and why.
   const FINAL_LABEL = '**Final answer:**';
+  // Right under it, always: one sentence of why the decision went that way
+  const REASON_LABEL = '**Reasoning:**';
+  const REASON_RULE = `- ${REASON_LABEL} comes right after it, always: one plain sentence on why you decided what you did (the evidence that decided it, and what would have changed it), no Markdown.`;
   // How the Final answer sentence is worded, per kind of case (each editable in Prompts)
   const FINAL_STYLES = {
     DUTY_DISPUTE: '"The claim is substantiated because …", "The claim is somewhat substantiated because …" or "The claim is not substantiated because …" (for several lines, one sentence covering them)',
@@ -2469,8 +2472,10 @@
       ...OPL('replyRules'),
       `- End with the text for each box on the page (${fields.join(', ')}): what I'll paste in, plain text, no Markdown, one sentence up to one short paragraph, stating the decision and why. Never "waiting" or "needs more info".`,
       `- ${FINAL_LABEL} comes first: ${finalStyle(d.type)}`,
+      REASON_RULE,
       '',
       `${FINAL_LABEL} <one sentence>`,
+      `${REASON_LABEL} <one sentence>`,
       '',
       `### ${g.label}`,
       ...(g.header || []),
@@ -3298,12 +3303,27 @@
     }
 
     /* ---- research for Claude Code: a Notion task with the prompt; the answer comes back on the case page */
-    async function queueResearch({ prompt, docs, lines, label, openTab = true }) {
+    // The case's research so far, anyone's, from the sheet's Research tab (failed ones don't count): in words, or ''
+    async function priorResearch(ctx) {
+      const requests = ((await sheetsCall('researchStatus', ctx).catch(() => null))?.requests || []).filter(q => q.status !== 'Failed');
+      if (!requests.length) return '';
+      const running = requests.filter(q => q.status === 'Waiting' || q.status === 'Researching');
+      const last = requests[requests.length - 1];
+      return running.length ? `Research on this case is already running (asked ${running[running.length - 1].asked || 'earlier'}).`
+        : `This case was already researched${requests.length > 1 ? ` ${requests.length} times` : ''} (last asked ${last.asked || 'earlier'}; ${String(last.status).toLowerCase()}). Its answer is in the case doc.`;
+    }
+    // `ifDone`: what to do when the case was already researched (or still is): 'ask' (a person pressed the button),
+    // 'skip' (a bulk run), or 'go'
+    async function queueResearch({ prompt, docs, lines, label, openTab = true, ifDone = 'ask' }) {
       if (!D.ent) throw new Error('Open a dispute or a work order first.');
       if (!researchOn()) throw new Error(`Research in Claude Code still needs ${researchMissing().join(', ')}. Add it under Settings (the cog in Tools).`);
       const ctx = caseContext(D.ent);
       const what = lines.length ? `line${lines.length > 1 ? 's' : ''} ${lines.join(', ')}` : label;
-      if (EDITION === 'sheets') return queueSheetResearch(ctx, { prompt, docs, lines, label, openTab, what });
+      if (EDITION === 'sheets') {
+        const before = ifDone === 'go' ? '' : await priorResearch(ctx);
+        if (before && (ifDone === 'skip' || !confirm(`${before}\n\nResearch it again anyway? That starts another Claude Code session.`))) return { skipped: true, why: before };
+        return queueSheetResearch(ctx, { prompt, docs, lines, label, openTab, what });
+      }
       // Always written, test mode included: it's your click, and Claude Code needs the case to answer on
       const page = D.row || await apply(ctx, { status: 'In progress', hold: 'Research sent to Claude Code.', log: `Created from the broker portal by "Research in Claude Code" (${midSentence(ctx.kind)} ${ctx.id}).`, withSnapshot: true, create: true, explicit: true });
       if (!page) throw new Error("Couldn't create the case in Notion, so the research wasn't sent.");
@@ -4138,7 +4158,7 @@
   // without its limits) or the Tools queue (dense, with summaries and saved views)
   const QUEUE_VIEW_KEY = 'zt:queueView';
   const QUEUE_LAST_KEY = 'zt:queueViewLast';   // the last of ours used, for the switch on the portal's own queue
-  const QUEUE_VIEWS = { portal: "Portal's own", classic: 'Portal+', tools: 'Tools queue' };
+  const QUEUE_VIEWS = { portal: 'Default Portal', classic: 'Portal+', tools: 'Advanced View' };
   const queueView = () => { const v = GM_getValue(QUEUE_VIEW_KEY, 'portal'); return v in QUEUE_VIEWS ? v : 'portal'; };
   const toolsQueueOn = () => queueView() !== 'portal';
   function setQueueView(v) {
@@ -4485,6 +4505,26 @@
     .cq-more { text-align: center; padding: 16px; color: var(--muted); font-size: 13px; }
     .cq .copy { font-size: 12px; }
     .cq .empty { padding: 36px; }
+    .cq-stats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .cq-stat { display: inline-flex; align-items: baseline; gap: 5px; height: 28px; padding: 5px 12px 0; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); color: var(--muted); font-size: 12.5px; }
+    .cq-stat b { color: var(--fg); font-size: 13.5px; font-weight: 600; }
+    .cq-stat:not(:disabled):hover { background: var(--soft); }
+    .cq-stat:disabled { cursor: default; opacity: 1; }
+    .cq-stat.err b { color: var(--err); } .cq-stat.warn b { color: var(--warn); }
+    .cq-stat.on { border-color: var(--fg); background: var(--soft); }
+    .cq-view.on { border-color: var(--fg); }
+    .cq .cq-table { overflow: visible; }
+    .cq-t thead th { position: sticky; top: 0; z-index: 3; }
+    .cq.has-sel .cq-t thead th { top: 52px; }
+    .cq-t tr.row:hover td { background: var(--soft); }
+    .cq-t tr.row.sel:hover td { background: var(--sel); }
+    .cq-t tr.cq-group td { background: var(--tint); padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
+    .cq-t tr.cq-group td.cb { padding: 0 0 0 8px; }
+    .cq.dense .cq-t tr.row td { height: 40px; padding-top: 4px; padding-bottom: 4px; font-size: 13px; }
+    .cq.dense .cq-t .cq-small { display: none; }
+    .cq.dense .cq-t tr.row td .cq-who .muted { display: none; }
+    .cq-res { margin-left: 4px; color: #7c3aed; background: rgba(124,58,237,.1); border-color: rgba(124,58,237,.4); padding: 2px 7px; }
+    .cq-res-bad { color: var(--err); background: var(--red-bg); border-color: var(--red-line); }
     .cq-many, .badge.many { color: #ffffff; background: #b45309; border-color: #b45309; font-weight: 700; margin-right: 6px; }
     :host([data-theme="dark"]) .cq-many, :host([data-theme="dark"]) .badge.many { color: #111111; background: #f59e0b; border-color: #f59e0b; }
     .runbar { margin-top: 12px; padding: 10px 14px; border: 1px solid var(--line); border-left: 4px solid #b45309; border-radius: 8px; font-size: 13px; }
@@ -4502,13 +4542,14 @@
     const skin = () => (queueView() === 'classic' ? 'classic' : 'tools');
     const defaults = { scope: 'mine', cscope: 'mine', filters: {}, sort: [{ key: 'due', dir: 1 }], group: '', views: [], auto: true, stack: true };
     const prefs = { ...defaults, ...GM_getValue(PREFS_KEY, {}) };
-    const savePrefs = () => GM_setValue(PREFS_KEY, { scope: S.scope, cscope: S.cscope, filters: S.filters, sort: S.sort, group: S.group, views: prefs.views, auto: S.auto, stack: S.stack, excl: S.excl });
+    const savePrefs = () => GM_setValue(PREFS_KEY, { scope: S.scope, cscope: S.cscope, filters: S.filters, sort: S.sort, group: S.group, views: prefs.views, auto: S.auto, stack: S.stack, excl: S.excl, cgroup: S.cgroup, dense: S.dense });
     const S = {
       rows: [], me: null, loadedAt: 0, loading: false, error: '', q: '', scope: prefs.scope, cscope: prefs.cscope, filters: prefs.filters || {}, sort: prefs.sort, group: prefs.group,
       auto: prefs.auto, sel: new Set(), anchor: -1, focus: -1, pop: '', popSearch: '', extra: null, extraFor: '', seenAt: GM_getValue(SEEN_KEY, 0), shown: [], limit: 300,
       open: new Set(),   // Portal+: rows with their details showing
       stack: prefs.stack !== false, stackMsg: '',
-      excl: prefs.excl || {},   // filters set to Hide: the values picked are left out instead of the only ones shown   // identical disputes shown as one row (with the access code)
+      excl: prefs.excl || {},
+      cgroup: prefs.cgroup || '', dense: !!prefs.dense,   // Portal+: its grouping, and compact rows   // filters set to Hide: the values picked are left out instead of the only ones shown   // identical disputes shown as one row (with the access code)
     };
     let autoTimer = null;
     // Follows the portal's light / dark switch as soon as it's flipped, without redrawing the list
@@ -4627,12 +4668,12 @@
       });
       return decorated.map(d => d.r);
     }
-    function groupOf(r) {
-      if (S.group === 'customer') return r.customer || r.consignee || '(unknown customer)';
-      if (S.group === 'type') return r.label;
-      if (S.group === 'assignee') return r.assigneeName || 'Unclaimed';
-      if (S.group === 'status') return r.status === 'WAITING' ? 'Waiting' : r.escalatedTo ? 'Escalated' : 'Open';
-      if (S.group === 'due') return DUE.overdue.test(r) ? 'Overdue' : DUE.today.test(r) ? 'Due today' : DUE.week.test(r) ? 'Due in 7 days' : r.dueMs ? 'Later' : 'No due date';
+    function groupOf(r, by = S.group) {
+      if (by === 'customer') return r.customer || r.consignee || '(unknown customer)';
+      if (by === 'type') return r.label;
+      if (by === 'assignee') return r.assigneeName || 'Unclaimed';
+      if (by === 'status') return r.status === 'WAITING' ? 'Waiting' : r.escalatedTo ? 'Escalated' : 'Open';
+      if (by === 'due') return DUE.overdue.test(r) ? 'Overdue' : DUE.today.test(r) ? 'Due today' : DUE.week.test(r) ? 'Due in 7 days' : r.dueMs ? 'Later' : 'No due date';
       return '';
     }
 
@@ -4692,6 +4733,33 @@
         title: busy ? 'A research run is still going (see the bar above the list)' : 'Start Claude Code research on every order this list shows, one per ×N stack',
         onclick: () => researchAll(rows) });
     }
+    // The bulk bar's Claim & research: claim what nobody has (a ×N row's copies with it, kept out of the sheet),
+    // then research every selected row that isn't someone else's, in the background run (Research all's)
+    async function claimAndResearch() {
+      const me = S.me?.id;
+      const sel = selectedRows();
+      const leads = sel.filter(r => !copyIds.has(r.id));
+      const toClaim = sel.filter(r => r.status === 'OPEN' && !r.assigneeId);
+      const theirs = leads.filter(r => r.assigneeId && r.assigneeId !== me);
+      const research = leads.filter(r => !theirs.includes(r));
+      const copies = sel.length - leads.length;
+      if (!research.length) { toast('Nothing to do: everything selected is claimed by someone else.', true); return; }
+      if (!confirm(`Claim ${toClaim.length} and start Claude Code research on ${research.length}?\n\n`
+        + `${copies ? `The ${copies} identical copies behind ×N rows are claimed with them but not researched separately. ` : ''}${theirs.length ? `${theirs.length} claimed by someone else ${theirs.length === 1 ? 'is' : 'are'} left alone. ` : ''}`
+        + `Research starts in background tabs, at most ${FIRES_PER_HOUR} an hour, and ones already researched (by anyone) are skipped. Keep a queue tab open.\n\nPortal mode: ${portal.mode().toUpperCase()}`)) return;
+      if (toClaim.length) {
+        quietSheet(toClaim.filter(r => copyIds.has(r.id)).flatMap(r => [r.id, r.sid]));
+        const ids = toClaim.map(r => r.id);
+        const res = await merged.holding(ids, () => portal.act('BrokerageWorkOrderClaim', ids));
+        const done = new Set(res.done);
+        for (const r of toClaim) if (done.has(r.id)) Object.assign(r, { assigneeId: me || '', assigneeName: S.me?.name || 'You', claimedAt: new Date().toISOString(), _hay: '' });
+        if (res.failed.length) toast(`${res.failed.length} couldn't be claimed: ${res.failed[0].error}`, true);
+      }
+      bulk.start(research, { kind: 'selected' });
+      S.sel.clear();
+      render();
+      load({ quiet: true });
+    }
     function researchAll(rows) {
       const sent = rows.filter(r => GM_getValue(`desk:research:${r.sid}`, null)).length;
       const todo = rows.length - sent;
@@ -4718,7 +4786,7 @@
         h('div', { class: 'runbar-top' },
           h('b', { text: active ? (j.paused ? 'Research run paused' : 'Researching in Claude Code') : 'Research run finished' }),
           h('span', { class: 'muted', text: [c.started && `${c.started} started`, c.running && `${c.running} opening`, c.waiting && `${c.waiting} waiting`,
-            c.failed && `${c.failed} failed`, c.skipped && `${c.skipped} already sent`].filter(Boolean).join(' · ') }),
+            c.failed && `${c.failed} failed`, c.skipped && `${c.skipped} already researched`].filter(Boolean).join(' · ') }),
           h('span', { style: 'flex:1' }),
           active ? b(j.paused ? 'Resume' : 'Pause', () => bulk.pause(!j.paused)) : null,
           failed.length && !active ? b(`Try the ${failed.length} failed again`, () => bulk.retryFailed()) : null,
@@ -4749,7 +4817,12 @@
       const rows = stack(all);
       if (stackOn()) registerStacks(rows); else stackSig = '';
       fillShapes(all);
-      if (skin() === 'classic') { S.shown = rows; saveNav(rows); renderClassic(rows); return; }
+      if (skin() === 'classic') {
+        // Grouped: each group's rows together, groups in the order their first row comes
+        let ordered = rows;
+        if (S.cgroup) { const g = new Map(); for (const r of rows) { const k = groupOf(r, S.cgroup); if (!g.has(k)) g.set(k, []); g.get(k).push(r); } ordered = [...g.values()].flat(); }
+        S.shown = ordered; saveNav(ordered); renderClassic(ordered); return;
+      }
       moreObserver.disconnect();
       searchInput.placeholder = 'Search anything: tracking, entry, master bill, customer, item, HS code, note… (paste a list to match many)';
       wrap.className = 'q';
@@ -4836,7 +4909,7 @@
     function renderClassic(rows) {
       const me = S.me?.id;
       const mode = portal.mode();
-      wrap.className = 'q cq';
+      wrap.className = `q cq${S.dense ? ' dense' : ''}${S.sel.size ? ' has-sel' : ''}`;
       searchInput.placeholder = 'Search anything: tracking, entry, customer, item, HS code…';
       const scope = CLASSIC_SCOPES.find(s => s.key === S.cscope) || CLASSIC_SCOPES[0];
       const counts = Object.fromEntries(CLASSIC_SCOPES.map(s => [s.key, stack(S.rows.filter(r => s.test(r, me)), false).length]));
@@ -4859,16 +4932,35 @@
           onclick: () => { S.cscope = s.key; S.sel.clear(); S.focus = -1; S.limit = 300; savePrefs(); render(); } },
           s.label, h('span', { class: 'cq-n', text: String(counts[s.key]) }))));
       const anyFilter = CLASSIC_FILTERS.some(f => S.filters[f.key]?.length) || S.q;
+      // What's in front of you, each due count a one-click filter (they ignore the Due filter, so they don't vanish)
+      const scoped = stack(visible({ ignore: 'due' }), false);
+      const dueOn = k => (S.filters.due || []).includes(DUE[k].label) && !S.excl.due;
+      const pill = (n, label, cls, key) => h('button', { class: `cq-stat${cls && n ? ` ${cls}` : ''}${key && dueOn(key) ? ' on' : ''}`, type: 'button', disabled: !key,
+        title: key ? (dueOn(key) ? 'Show every due date again' : `Show only: ${DUE[key].label}`) : '', onclick: key ? () => toggleFilter('due', DUE[key].label, true) : null },
+        h('b', { text: String(n) }), label);
+      const stats = h('div', { class: 'cq-stats' }, ...[
+        pill(scoped.filter(DUE.overdue.test).length, 'overdue', 'err', 'overdue'),
+        pill(scoped.filter(DUE.today.test).length, 'due today', 'warn', 'today'),
+        pill(scoped.filter(DUE.week.test).length, 'due in 7 days', '', 'week'),
+        pill(scoped.filter(r => r.status === 'WAITING').length, 'waiting', '', ''),
+        pill(scoped.filter(r => r.escalatedTo).length, 'escalated', '', ''),
+        pill(scoped.filter(r => r.createdMs > S.seenAt).length, 'new since your last visit', '', ''),
+        batchUnlocked() && desk.researchOn() ? pill(scoped.filter(r => GM_getValue(`desk:research:${r.sid}`, null)).length, 'sent for research', '', '') : null,
+      ].filter(Boolean));
       const bar = h('div', { class: 'cq-bar' },
         CLASSIC_FILTERS.map(filterButton),
         h('label', { class: 'cq-search' }, h('span', { class: 'muted', text: '⌕' }), searchInput),
+        h('select', { class: 'cq-view', 'aria-label': 'Group by', onchange: e => { S.cgroup = e.target.value; S.limit = 300; savePrefs(); render(); } },
+          Object.entries(GROUPS).map(([k, v]) => h('option', { value: k, text: k ? `Group: ${v}` : 'No grouping', selected: S.cgroup === k }))),
+        h('button', { class: `cq-view${S.dense ? ' on' : ''}`, type: 'button', 'aria-pressed': String(S.dense), text: S.dense ? '☰ Compact' : '☰ Comfortable',
+          title: 'Row height: compact fits about twice as many rows', onclick: () => { S.dense = !S.dense; savePrefs(); render(); } }),
         h('button', { class: 'cq-clear', type: 'button', text: 'Clear all', style: `visibility:${anyFilter ? 'visible' : 'hidden'}`,
           onclick: () => { for (const f of CLASSIC_FILTERS) { delete S.filters[f.key]; delete S.excl[f.key]; } S.filters = { ...S.filters }; S.excl = { ...S.excl }; S.q = ''; searchInput.value = ''; S.limit = 300; savePrefs(); render(); } }));
       const note = h('div', { class: 'cq-note' },
         S.missing?.length ? [h('b', { text: `Not found: ${S.missing.join(', ')}` }), ' · ', h('button', { class: 'linkish', type: 'button', text: 'Copy', onclick: () => copy(S.missing.join('\n'), 'Copied.') })]
           : ['Showing every ', h('b', { text: 'Open' }), ' and ', h('b', { text: 'Waiting' }), ' order in one list. Click a column to sort; Ctrl-click a row for a new tab; Shift-click checkboxes to select a range.']);
       drawRun();
-      wrap.replaceChildren(...[top, tabs, bar, note, runBar, S.sel.size && h('div', { class: 'cq-bulk' }, bulkBar()), classicTable(rows)].filter(Boolean));
+      wrap.replaceChildren(...[top, tabs, stats, bar, note, runBar, S.sel.size && h('div', { class: 'cq-bulk' }, bulkBar()), classicTable(rows)].filter(Boolean));
       moreObserver.disconnect();
       const sentinel = wrap.querySelector('.cq-sentinel');
       if (sentinel) moreObserver.observe(sentinel);
@@ -4891,7 +4983,25 @@
             onclick: e => sortBy(c.key, e.shiftKey) }, c.label, arrow ? h('span', { class: 'arrow', text: ` ${arrow}` }) : null);
         }));
       const body = [];
-      shown.forEach((r, i) => { body.push(classicRow(r, i)); if (S.open.has(r.id)) body.push(classicDetail(r)); });
+      let lastGroup = null;
+      shown.forEach((r, i) => {
+        if (S.cgroup) {
+          const g = groupOf(r, S.cgroup);
+          if (g !== lastGroup) {
+            lastGroup = g;
+            const members = rows.filter(x => groupOf(x, S.cgroup) === g);
+            const all = members.reduce((a, x) => a + 1 + (x._copies?.length || 0), 0);
+            const on = members.every(x => S.sel.has(x.id));
+            body.push(h('tr', { class: 'cq-group' },
+              h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: on, 'aria-label': `Select all in ${g}`,
+                onchange: e => { for (const x of members) for (const id of idsOf(x)) e.target.checked ? S.sel.add(id) : S.sel.delete(id); render(); } })),
+              h('td', { colspan: String(CLASSIC_COLS.length + 1) }, h('b', { text: g }), h('span', { class: 'cq-n', text: String(members.length) }),
+                all > members.length ? h('span', { class: 'muted', style: 'font-size:12px;margin-left:6px', text: `${all} with identical copies` }) : null)));
+          }
+        }
+        body.push(classicRow(r, i));
+        if (S.open.has(r.id)) body.push(classicDetail(r));
+      });
       return h('div', { class: 'cq-table' },
         h('table', { class: 'cq-t' },
           h('colgroup', {}, h('col', { style: 'width:34px' }), h('col', { style: 'width:36px' }), CLASSIC_COLS.map(c => h('col', { style: c.width ? `width:${c.width}px` : '' }))),
@@ -4901,6 +5011,13 @@
           ? h('div', { class: 'cq-more cq-sentinel' }, `${S.limit} of ${rows.length} shown · more load as you scroll `,
             h('button', { class: 'linkish', type: 'button', text: 'Show all', onclick: () => { S.limit = rows.length; render(); } }))
           : rows.length ? h('div', { class: 'cq-more', text: `All ${rows.length} shown` }) : null);
+    }
+    // Sent for research from this computer (Research in Claude Code, Research all, Claim & research): when
+    function researchPill(r) {
+      const rec = GM_getValue(`desk:research:${r.sid}`, null);
+      if (!rec?.at) return null;
+      return h('span', { class: `cq-pill cq-res${rec.session ? '' : ' cq-res-bad'}`, text: '✦',
+        title: rec.session ? `Sent for research ${ageText(rec.at)} ago (Claude Code)` : `Research was asked ${ageText(rec.at)} ago, but its session didn't start${rec.fireError ? `: ${rec.fireError}` : ''}` });
     }
     function classicRow(r, i) {
       const due = dueText(r);
@@ -4925,7 +5042,8 @@
           onclick: () => { open ? S.open.delete(r.id) : S.open.add(r.id); render(); } })),
         h('td', {}, h('span', { class: 'cq-pill cq-class', text: r.label, title: r.label })),
         h('td', { style: 'white-space:nowrap' }, h('span', { class: `cq-pill cq-st-${r.status}`, text: human2(r.status) }),
-          r.escalatedTo ? h('span', { class: 'cq-pill cq-esc', text: '↑', title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null),
+          r.escalatedTo ? h('span', { class: 'cq-pill cq-esc', text: '↑', title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null,
+          researchPill(r)),
         h('td', {},
           h('div', { class: 'cq-line' }, r.createdMs > S.seenAt ? h('span', { class: 'new', title: 'New since your last visit' }) : null, many,
             h('a', { href: r.url, title: r.items.join(' · ') || r.title, onclick: e => openRow(r, e) }, title)),
@@ -5059,6 +5177,8 @@
       return h('div', { class: 'bulk', role: 'toolbar', 'aria-label': 'Bulk actions' },
         h('span', { class: 'sel-n', text: `${sel.length} selected` }),
         batchUnlocked() ? null : h('span', { class: 'muted', style: 'font-size:12px', text: 'Acting on many at once needs the access code (Tools ⚙ Settings).' }),
+        batchUnlocked() && desk.researchOn() ? h('button', { class: 'btn small primary', type: 'button', text: 'Claim & research',
+          title: "Claims the selected orders that nobody has, and starts Claude Code research on each (one per ×N stack; ones already researched are skipped)", onclick: () => claimAndResearch() }) : null,
         !batchUnlocked() ? null : BULK.map(a => {
           const n = sel.filter(r => a.can(r, S.me?.id)).length;
           return h('button', { class: `btn small${a.danger ? ' danger' : ''}`, type: 'button', disabled: !n, title: n < sel.length ? `${n} of ${sel.length} can be ${a.verb.toLowerCase()}` : '', text: n < sel.length && n ? `${a.label} (${n})` : a.label, onclick: () => runBulk(a) });
@@ -5346,8 +5466,11 @@
     const switchBtn = h('button', { id: 'zt-queue-switch', type: 'button',
       style: 'margin-left:8px;padding:4px 10px;border-radius:6px;border:1px solid #f59e0b;background:rgba(245,158,11,.10);color:#f59e0b;font:600 12.5px system-ui,sans-serif;cursor:pointer',
       onclick: () => setQueueView(lastView()) });
+    // No longer put on the portal's own queue: a fresh install leaves that page as it is (the view is picked in Tools >
+    // Settings, or with the picker on Portal+ and the Advanced View)
     function placeSwitch() {
-      if (!onQueuePage() || toolsQueueOn()) { switchBtn.remove(); return; }
+      switchBtn.remove();
+      if (switchBtn) return;
       const label = `⚡ ${QUEUE_VIEWS[lastView()]}`;
       if (switchBtn.textContent !== label) {
         switchBtn.textContent = label;
@@ -6489,12 +6612,19 @@
       for (const x of j?.items || []) c[x.state] = (c[x.state] || 0) + 1;
       return c;
     };
-    // `rows`: queue rows, one per order to research (a stack's first one stands for its copies)
-    function start(rows, { skipDone = true } = {}) {
-      const done = r => !!GM_getValue(`desk:research:${r.sid}`, null);
-      const items = rows.map(r => ({ url: r.url, ref: r.ref, sid: r.sid, label: r.label, copies: r._copies?.length || 0,
-        state: skipDone && done(r) ? 'skipped' : 'waiting' }));
-      save({ id: Date.now().toString(36), at: Date.now(), mode: portal.mode(), items, paused: false, waitUntil: 0, note: '' });
+    // `rows`: queue rows, one per order to research (a stack's first one stands for its copies). `kind`: 'all'
+    // (Research all shown, which needs its switch) or 'selected' (Claim & research, which needs only the code).
+    // While a run is going, more are added to it instead of starting another.
+    const itemOf = (r, skipDone) => ({ url: r.url, ref: r.ref, sid: r.sid, label: r.label, copies: r._copies?.length || 0,
+      state: skipDone && GM_getValue(`desk:research:${r.sid}`, null) ? 'skipped' : 'waiting' });
+    function start(rows, { skipDone = true, kind = 'all' } = {}) {
+      const cur = job();
+      if (cur && (counts(cur).waiting || counts(cur).running)) {
+        const have = new Set(cur.items.map(x => x.sid));
+        cur.items.push(...rows.filter(r => !have.has(r.sid)).map(r => itemOf(r, skipDone)));
+        if (kind === 'selected') cur.kind = 'selected';
+        save(cur);
+      } else save({ id: Date.now().toString(36), at: Date.now(), mode: portal.mode(), kind, items: rows.map(r => itemOf(r, skipDone)), paused: false, waitUntil: 0, note: '' });
       run();
     }
     function run() {
@@ -6513,7 +6643,7 @@
       const j = job();
       if (!j) { stopTimer(); return; }
       if (!tabs.size && !owned()) { emit(); return; }
-      if (!researchAllAllowed() && !j.paused) { j.paused = true; j.note = 'Research all is off (or the access code is locked): paused.'; }
+      if (!j.paused && (!batchUnlocked() || (j.kind !== 'selected' && !researchAllAllowed()))) { j.paused = true; j.note = 'Research all is off (or the access code is locked): paused.'; }
       GM_setValue('zt:bulk:owner', { id: me, at: Date.now() });
       // Results from the tabs
       for (const [i, t] of tabs) {
@@ -6526,7 +6656,8 @@
           it.state = 'waiting';
           j.waitUntil = Date.now() + (r.retryAfter ? r.retryAfter * 1000 : 15 * 60000);
           j.note = `The routine's hourly limit was reached: carrying on at ${new Date(j.waitUntil).toLocaleTimeString()}.`;
-        } else if (r) Object.assign(it, { state: r.session ? 'started' : 'failed', session: r.session || '', why: r.error || '' });
+        } else if (r?.skipped) Object.assign(it, { state: 'skipped', why: r.error || 'already researched' });
+        else if (r) Object.assign(it, { state: r.session ? 'started' : 'failed', session: r.session || '', why: r.error || '' });
         else Object.assign(it, { state: 'failed', why: t.handle.closed ? 'its tab was closed before it finished' : "its page didn't finish in time" });
         GM_deleteValue(resKey(j, i));
         try { t.handle.close(); } catch { /* already closed */ }
@@ -6584,7 +6715,6 @@
     button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .launch { position: fixed; z-index: 2147483000; width: 58px; height: 58px; display: grid; place-items: center; background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 50%; padding: 0; font-weight: 700; font-size: 12px; line-height: 1.1; box-shadow: 0 6px 20px rgba(0,0,0,.4); cursor: grab; touch-action: none; user-select: none; }
     .launch .ico { display: block; font-size: 18px; }
-    .quick { position: fixed; z-index: 2147483000; width: 180px; padding: 7px 10px; border: 0; border-radius: 999px; background: var(--accent); color: var(--accent-fg); font-weight: 600; font-size: 12.5px; box-shadow: 0 4px 14px rgba(0,0,0,.35); }
     .launch.dragging { cursor: grabbing; transform: scale(1.06); }
     .panel { position: fixed; top: 0; right: 0; height: 100vh; width: min(var(--w, 480px), 100vw); z-index: 2147483001; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border-left: 1px solid var(--line); box-shadow: -10px 0 30px rgba(0,0,0,.3); }
     .panel.docked { box-shadow: none; }
@@ -6780,46 +6910,99 @@
     }
     placeBubble();
     window.addEventListener('resize', placeBubble);
-    // The other launcher: an orange Tools button at the bottom of the portal's sidebar, above References.
-    // It lives in the page, so it's put back whenever the portal redraws its sidebar.
-    const LAUNCHER_KEY = 'zt:launcher';   // 'sidebar' (the default) | 'bubble'
-    const launcherMode = () => GM_getValue(LAUNCHER_KEY, 'sidebar');
+    // The launcher: an orange Tools button at the bottom of the portal's sidebar, above References (the bubble
+    // above is no longer offered: it stays hidden). It lives in the page, so it's put back whenever the portal
+    // redraws its sidebar. Without the sidebar (a narrow window),  opens Tools.
+    const launcherMode = () => 'sidebar';
     const sideBtn = h('button', { type: 'button', id: 'zt-side-launch', 'aria-label': 'Open Tools', title: 'Tools (\\ to toggle)',
       class: 'flex w-full items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors',
       style: 'border-color:#f59e0b;color:#f59e0b;background:rgba(245,158,11,.10);font-weight:600;cursor:pointer',
       onclick: () => { if (panel.hidden) open(); else close(); } },
       h('span', { 'aria-hidden': 'true', text: '⚒' }), h('span', { text: 'Tools' }));
-    // Above it, on dispute and order pages: start research in one click, in Claude Code when it's set up for you,
-    // else in claude.ai (both read the page the way the Research tab does first)
+    // Above it, on dispute and order pages, when turned on under Settings > Panel and pages (off at first): claim
+    // the order and start research in one click, in Claude Code when it's set up for you, else in claude.ai. Tools
+    // stays closed while it works (what it's doing shows right above the button), and opens once it's started.
+    const QUICK_KEY = 'zt:quickResearch';
+    const RESEARCH_LOG_KEY = 'zt:researchLog';   // Claude Code also writes its full research log for the case doc
+    const AUTO_SAVE_KEY = 'zt:autoSaveChat';     // claude.ai answers are saved without pressing Save
     const quickText = () => (desk.researchOn() ? 'Research in Claude Code' : 'Open in claude.ai');
     const sideQuick = h('button', { type: 'button', id: 'zt-side-research', hidden: true,
       class: 'flex w-full items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors',
       style: 'border-color:#f59e0b;color:#ffffff;background:#d97706;font-weight:600;cursor:pointer;margin-bottom:6px',
       onclick: () => quickResearch() }, h('span', { 'aria-hidden': 'true', text: '✦' }), h('span', { text: quickText() }));
-    const bubbleQuick = h('button', { class: 'quick', type: 'button', hidden: true, onclick: () => quickResearch() }, quickText());
+    const sideStatus = h('div', { id: 'zt-side-status', role: 'status', hidden: true, style: 'font-size:12px;line-height:1.35;margin:0 2px 6px;color:#b45309' });
+    let quickBusy = false;
+    let quietOpen = false;   // open() reads the page without showing the panel
+    const quickSay = (text, err = false) => { sideStatus.textContent = text; sideStatus.style.color = err ? '#dc2626' : '#b45309'; sideStatus.hidden = !text; };
+    // This page's work order, from the queue as you last left it, else the portal's search; claimed if nobody has it
+    async function claimHere() {
+      const ent = entityFromPathHere();
+      if (!ent) return '';
+      const nav = navPosition();
+      let wo = nav.i >= 0 ? { id: nav.items[nav.i].id } : null;
+      const tracking = (clean(document.querySelector('main')?.innerText || '').match(/\b[A-Z]{2}\d{9}[A-Z]{2}\b/) || [])[0] || '';
+      for (const q of [tracking, ent.id].filter(Boolean)) {
+        const found = (await portal.search(q, 25).catch(() => [])).find(n => (wo ? n.id === wo.id : (n.subject?.id || n.subjectKey) === ent.id));
+        if (found) { wo = found; break; }
+      }
+      if (!wo?.type) return wo ? '' : "Couldn't find its work order to claim";
+      const me = await portal.me();
+      if (wo.assigneeId === me.id) return 'Already yours';
+      if (wo.assigneeId) {
+        if (!confirm(`This order is claimed by ${wo.assigneeName || 'someone else'}. Research it anyway (without claiming it)?`)) throw new Error(`Not started: it's claimed by ${wo.assigneeName || 'someone else'}.`);
+        return `Claimed by ${wo.assigneeName || 'someone else'}`;
+      }
+      if (wo.status !== 'OPEN') return '';
+      const res = await portal.act('BrokerageWorkOrderClaim', [wo.id]);
+      if (res.failed.length) throw new Error(`Couldn't claim it: ${res.failed[0].error}`);
+      return 'Claimed';
+    }
+    const entityFromPathHere = () => {
+      let m = location.pathname.match(/^\/duty-disputes\/(duty_dispute_(?!item_)[A-Za-z0-9]+)/);
+      if (m) return { id: m[1] };
+      m = location.pathname.match(/^\/entry-writer-queue\/[A-Z][A-Z_]+\/([^/?#]+)/);
+      return m ? { id: decodeURIComponent(m[1]) } : null;
+    };
     async function quickResearch() {
-      openTool('dispute');
+      if (quickBusy) return;
+      quickBusy = true;
+      sideQuick.disabled = true;
       const path = location.pathname;
-      setStatus('Reading this page…');
-      if (!await waitFor(() => state && state.path === path && state.data, { timeout: 45000 })) { setStatus("Couldn't read this page yet. Try again once it has loaded.", 'err'); return; }
-      if (state.data.kind !== 'workOrder' && !state.selected?.size) state.selected = new Set(state.data.items.filter(i => i.inDispute).map(i => i.line));
-      render();
-      run(desk.researchOn() ? sendToClaudeCode : handoff);
+      try {
+        quickSay('Reading this page…');
+        if (!(state && state.path === path)) { quietOpen = true; try { await open(); } finally { quietOpen = false; } }
+        if (!await waitFor(() => state && state.path === path && state.data, { timeout: 45000 })) throw new Error("Couldn't read this page yet. Try again once it has loaded.");
+        if (state.data.kind !== 'workOrder' && !state.selected?.size) state.selected = new Set(state.data.items.filter(i => i.inDispute).map(i => i.line));
+        quickSay('Claiming it…');
+        const claimed = await claimHere();
+        if (desk.researchOn()) {
+          quickSay(`${claimed ? `${claimed} · ` : ''}saving to the Google Sheet and starting Claude Code…`);
+          const r = await sendToClaudeCode({ openTab: false });
+          if (r?.skipped) { quickSay(`${claimed ? `${claimed} · ` : ''}not sent again: ${r.why}`); return; }
+          if (!r?.session && !r?.dry) throw new Error(`${claimed ? `${claimed}, but ` : ''}the cloud session didn't start${r?.fireError ? ` (${r.fireError})` : ''}.`);
+          quickSay(`${claimed ? `${claimed} · ` : ''}${r.dry ? 'test mode: nothing sent' : 'research started in Claude Code'} ✓`);
+        } else {
+          quickSay(`${claimed ? `${claimed} · ` : ''}opening claude.ai…`);
+          await handoff();
+          quickSay(`${claimed ? `${claimed} · ` : ''}opened in claude.ai ✓`);
+        }
+        if (location.pathname === path) { await open(); setView('dispute'); }
+        setTimeout(() => { if (!quickBusy) quickSay(''); }, 10000);
+      } catch (e) {
+        quickSay(e.message, true);
+      } finally {
+        quickBusy = false;
+        sideQuick.disabled = false;
+      }
     }
     function placeQuick() {
-      const show = isCasePage();
+      const show = isCasePage() && GM_getValue(QUICK_KEY, false) === true;
+      if (!show && !quickBusy) quickSay('');
       const text = quickText();
       sideQuick.hidden = !show;
       if (sideQuick.lastChild.textContent !== text) sideQuick.lastChild.textContent = text;
-      bubbleQuick.hidden = !show || launch.style.display === 'none' || launch.hidden;
-      if (!bubbleQuick.hidden) {
-        if (bubbleQuick.textContent !== text) bubbleQuick.textContent = text;
-        const r = launch.getBoundingClientRect();
-        bubbleQuick.style.left = `${Math.max(8, Math.min(innerWidth - 200, r.left + r.width / 2 - 90))}px`;
-        bubbleQuick.style.top = `${Math.max(8, r.top - 44)}px`;
-      }
     }
-    const sideWrap = h('div', { class: 'px-2 pb-2', id: 'zt-side-wrap' }, sideQuick, sideBtn);
+    const sideWrap = h('div', { class: 'px-2 pb-2', id: 'zt-side-wrap' }, sideStatus, sideQuick, sideBtn);
     // (runs every second: when the button is already in place by References, nothing is looked for)
     let refHolder = null;
     function placeLauncher() {
@@ -6829,10 +7012,8 @@
       const ref = side && [...document.querySelectorAll('aside button, aside a')].find(e => /References/.test(e.textContent));
       const holder = ref?.parentElement;
       refHolder = holder || null;
-      // Back to the bubble if the sidebar isn't there (a narrow window hides it)
-      const useSide = !!(holder && holder.offsetParent);
-      launch.style.display = useSide ? 'none' : '';
-      if (!useSide) { sideWrap.remove(); return; }
+      launch.style.display = 'none';
+      if (!(holder && holder.offsetParent)) { sideWrap.remove(); return; }   // no sidebar (a narrow window):  opens Tools
       if (sideWrap.nextElementSibling !== holder) holder.before(sideWrap);
     }
     launch.addEventListener('pointerdown', e => {
@@ -7082,7 +7263,7 @@
     } });
     const stackRow = h('label', { class: 'row', style: 'align-items:flex-start;gap:8px;cursor:pointer', hidden: true }, stackBox,
       h('span', {}, h('b', { text: 'Stack identical disputes in the queue' }), h('span', { class: 'hint', style: 'display:block;margin:0',
-        text: 'Portal+ and the Tools queue show exact duplicates (same company, assignee and status; the same lines, claims and questionnaire answers) as one row with ×N. Whatever you do on that one (claim, waiting, notes, decisions, Submit) is done to all of them.' })));
+        text: 'Portal+ and the Advanced View show exact duplicates (same company, assignee and status; the same lines, claims and questionnaire answers) as one row with ×N. Whatever you do on that one (claim, waiting, notes, decisions, Submit) is done to all of them.' })));
     const researchAllBox = h('input', { type: 'checkbox', checked: GM_getValue(RESEARCH_ALL_KEY, false) === true, onchange: e => {
       GM_setValue(RESEARCH_ALL_KEY, e.target.checked);
       if (!e.target.checked && bulk.job()) bulk.pause(true);
@@ -7090,7 +7271,7 @@
     } });
     const researchAllRow = h('label', { class: 'row', style: 'align-items:flex-start;gap:8px;cursor:pointer', hidden: true }, researchAllBox,
       h('span', {}, h('b', { text: 'Research all shown, in the queue' }), h('span', { class: 'hint', style: 'display:block;margin:0',
-        text: 'A button in Portal+ and the Tools queue that starts Claude Code research on every order the list shows (one per ×N stack), at most 28 an hour. Each one is a cloud session on your usage credits.' })));
+        text: 'A button in Portal+ and the Advanced View that starts Claude Code research on every order the list shows (one per ×N stack), at most 28 an hour. Each one is a cloud session on your usage credits.' })));
     const accessGroup = group('Access code', 'Some features are only for the people given a code. Type it here to turn them on for this computer. Bulk actions in the queue (selecting many orders and acting on them) also need it.',
       h('div', { class: 'row' }, codeInput, btn('Unlock', () => unlock()), btn('Lock', () => lock())),
       codeNote, stackRow, researchAllRow);
@@ -7157,7 +7338,12 @@
         : 'Adds "Research in Claude Code" beside Open in claude.ai on the Research tab: the request goes to your Notion Tasks and starts your cloud routine, and the answer comes back to the panel by itself.',
         h('div', { class: 'row' }, routineIdInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, routineTokenInput, btn('Save', saveRoutine)),
-        routineNote),
+        routineNote,
+        h('label', { class: 'doc', style: 'margin-top:8px' }, h('input', { type: 'checkbox', checked: GM_getValue(RESEARCH_LOG_KEY, false) === true, onchange: e => GM_setValue(RESEARCH_LOG_KEY, e.target.checked) }),
+          h('span', { text: "Add Claude Code's full research log to the case doc (every search, page and source it checked, and how it reasoned), under its answer" }))),
+      EDITION === 'sheets' && group('claude.ai answers', "When you research in claude.ai (Open in claude.ai), Claude's finished answer comes back to the Research tab to save.",
+        h('label', { class: 'doc' }, h('input', { type: 'checkbox', checked: GM_getValue(AUTO_SAVE_KEY, false) === true, onchange: e => GM_setValue(AUTO_SAVE_KEY, e.target.checked) }),
+          h('span', { text: "Save it to the case doc by itself as soon as it's back (no Save button): next time the case's page is open" }))),
       group('Shared answers', 'Shares saved answers with your team through a notes server. Leave the address empty to keep answers on this computer only.',
         h('div', { class: 'row' }, notesUrlInput, btn('Save', saveNotesUrl)),
         h('div', { class: 'row', style: 'margin-top:6px' }, notesKeyInput, btn('Save key', () => saveNotesKey()), btn('Test', () => testNotesKey())),
@@ -7419,15 +7605,12 @@
     // ---- the panel's own options, at the top of Settings (the cog), out of the way of the tabs
     const check =(label, on, change) => h('label', { class: 'doc' }, h('input', { type: 'checkbox', checked: on, onchange: e => change(e.target.checked) }), h('span', { text: label }));
     const prefsGroup = group('Panel and pages', "Changes to the portal's own pages are off until you turn them on here.",
-      h('label', { class: 'frow', style: 'margin-bottom:6px' }, h('span', { class: 'flabel', text: 'Tools button' }),
-        h('select', { class: 'field', 'aria-label': 'Tools button', onchange: e => { GM_setValue(LAUNCHER_KEY, e.target.value); placeLauncher(); dock(); } },
-          h('option', { value: 'bubble', text: 'Floating bubble (drag it anywhere)', selected: launcherMode() === 'bubble' }),
-          h('option', { value: 'sidebar', text: 'Button in the sidebar, above References', selected: launcherMode() === 'sidebar' }))),
+      check('A "Research in Claude Code" button above Tools on dispute and order pages: claims the order and starts research in one click', GM_getValue(QUICK_KEY, false) === true, on => { GM_setValue(QUICK_KEY, on); placeLauncher(); }),
       h('label', { class: 'frow', style: 'margin-bottom:6px' }, h('span', { class: 'flabel', text: 'Entry Writer Queue page' }),
         h('select', { class: 'field', 'aria-label': 'Entry Writer Queue page', onchange: e => setQueueView(e.target.value) },
-          h('option', { value: 'portal', text: "The portal's own queue", selected: queueView() === 'portal' }),
+          h('option', { value: 'portal', text: "Default Portal: the portal's own queue", selected: queueView() === 'portal' }),
           h('option', { value: 'classic', text: 'Portal+: the portal\'s queue in one sortable list, with search, one-click claim and bulk actions', selected: queueView() === 'classic' }),
-          h('option', { value: 'tools', text: 'Tools queue: dense, with summaries, grouping and saved views', selected: queueView() === 'tools' }))),
+          h('option', { value: 'tools', text: 'Advanced View: dense, with summaries, grouping and saved views', selected: queueView() === 'tools' }))),
       check('Easier-to-read order pages (labeled details, CBP messages in plain English)', GM_getValue(READABLE_KEY, false), on => { GM_setValue(READABLE_KEY, on); if (on) makeReadable(); else undoReadable(); }),
       check("Hide the portal's own Classify / Quote rail", GM_getValue(HIDE_RAIL_KEY, false), on => { GM_setValue(HIDE_RAIL_KEY, on); refreshTools(); }),
       check('Denied-party reviews: "Listed on" opens the official list (and copies the name) instead of a Google search', GM_getValue(LIST_LINKS_KEY, false), on => { GM_setValue(LIST_LINKS_KEY, on); fixListLinks(); }),
@@ -7439,8 +7622,8 @@
           h('kbd', { text: 'Shift+C' }), h('span', { text: 'Classify' }),
           h('kbd', { text: 'Shift+Q' }), h('span', { text: 'Quote' }),
           h('kbd', { text: '[  ]' }), h('span', { text: 'Previous / next order' }),
-          h('kbd', { text: '/' }), h('span', { text: 'Search the queue (Tools queue)' }),
-          h('kbd', { text: 'j k x Enter o' }), h('span', { text: 'Move, select, open, new tab (Tools queue)' }))));
+          h('kbd', { text: '/' }), h('span', { text: 'Search the queue (Advanced View)' }),
+          h('kbd', { text: 'j k x Enter o' }), h('span', { text: 'Move, select, open, new tab (Advanced View)' }))));
     settingsBody.insertBefore(prefsGroup, settingsBody.children[1]);
     showLocked();
 
@@ -7522,7 +7705,7 @@
           h('button', { class: 'icon', type: 'button', 'aria-label': 'Close panel', title: 'Close', text: '×', onclick: () => close() }))),
       toolstrip,
       views.dispute, views.doc, views.classify, views.quote, views.analytics, views.entry, views.settings);
-    root.append(h('style', { text: PANEL_CSS }), h('div', { class: 'wrap' }, bubbleQuick, launch, panel));
+    root.append(h('style', { text: PANEL_CSS }), h('div', { class: 'wrap' }, launch, panel));
 
     let view = 'dispute';
     let drawQueued = 0;          // a Research redraw waiting for the next frame (see render)
@@ -7871,9 +8054,11 @@
 
     async function open() {
       attach();
-      launch.hidden = true;
-      panel.hidden = false;
-      dock();
+      if (!quietOpen) {
+        launch.hidden = true;
+        panel.hidden = false;
+        dock();
+      }
       refreshTools();
       // Off an order page there's nothing to research, so the Research tab gives way to Tools
       if (!isCasePage()) {
@@ -8115,6 +8300,18 @@
       let reply = GM_getValue(replyKey, null);
       if (reply && answers.some(a => a.text === reply.text.trim().slice(0, 30000))) {
         GM_deleteValue(replyKey);
+        reply = null;
+      }
+      // Saved by itself when that's turned on (after this draw: saving draws the panel again)
+      if (reply && GM_getValue(AUTO_SAVE_KEY, false) === true && !s.autoSaving) {
+        s.autoSaving = true;
+        const { text } = reply;
+        const lines = isOrder ? [] : reply.lines.length ? reply.lines : inDispute.map(i => i.line);
+        GM_deleteValue(replyKey);
+        setTimeout(() => {
+          try { storeAnswer(text, lines); setStatus("Claude's answer from claude.ai was saved to the case doc by itself.", 'ok'); }
+          finally { s.autoSaving = false; }
+        }, 0);
         reply = null;
       }
       s.replyShown = reply?.at || 0;
@@ -8367,13 +8564,15 @@
     // documents as links. Claude Code researches it (web search, Entry Assistant) and writes its answer onto
     // the case page, which this panel picks up and saves with the shared answers.
     // Sent right away: the cloud session runs its own Entry Assistant lookups, so the panel's aren't waited for
-    async function sendToClaudeCode({ openTab = true } = {}) {
+    async function sendToClaudeCode({ openTab = true, ifDone = 'ask' } = {}) {
       const d = await freshData();
       const docs = selectedDocs(d);
       const prompt = promptFor(d, docs.map(x => x.name));
       const lines = d.kind === 'workOrder' ? [] : d.items.map(i => i.line);
       setStatus('Sending to Claude Code…');
-      const r = await desk.queueResearch({ prompt, docs, lines, label: d.kind === 'workOrder' ? d.label : 'Duty dispute', openTab });
+      const withLog = GM_getValue(RESEARCH_LOG_KEY, false) === true ? `${prompt}\n\n## Research log\nAlso write your full research log to \`log.md\` in the request's folder: every search you ran, every page, document and source you opened (with its link) and what it showed, in order, and how you reasoned from them to the decision. The worker adds it to the case doc under your answer.` : prompt;
+      const r = await desk.queueResearch({ prompt: withLog, docs, lines, label: d.kind === 'workOrder' ? d.label : 'Duty dispute', openTab, ifDone });
+      if (r?.skipped) { setStatus(`Not sent again. ${r.why}`, 'warn'); return r; }
       markSent(d.disputeId, d.items);
       render();
       setStatus(r.dry ? 'Test mode: the research request was not written (see the case card). Tick "Write to Notion in test mode" under Settings (the cog in Tools) to try it for real.'
@@ -8392,7 +8591,7 @@
       if (!ok) throw new Error("Couldn't read this page (it didn't finish loading).");
       if (state.data.kind !== 'workOrder') state.selected = new Set(state.data.items.filter(i => i.inDispute).map(i => i.line));
       await sleep(1500);   // let the portal's own data arrive, so the snapshot and the prompt carry it
-      return sendToClaudeCode({ openTab: false });
+      return sendToClaudeCode({ openTab: false, ifDone: 'skip' });   // already researched (by anyone): not again
     }
 
     // The prompt treats the ticked files as attached, since you'll attach them by hand
@@ -8565,7 +8764,8 @@
           if (!await waitFor(() => isCasePage() && document.querySelector('main'), { timeout: 30000 })) throw new Error("the page didn't open");
           ui = ui || createPanel();
           const r = await ui.autoResearch();
-          res = { session: r?.session || '', error: r?.session ? '' : r?.fireError || 'the cloud session did not start', limited: !!r?.limited, retryAfter: r?.retryAfter || 0 };
+          res = r?.skipped ? { skipped: true, session: '', error: r.why }
+            : { session: r?.session || '', error: r?.session ? '' : r?.fireError || 'the cloud session did not start', limited: !!r?.limited, retryAfter: r?.retryAfter || 0 };
         } catch (e) { res = { session: '', error: e.message }; }
         GM_setValue(key, { ...res, at: Date.now() });
       })();
