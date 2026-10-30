@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.51.0
+// @version      7.52.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3685,12 +3685,14 @@
       escalatedTo: n.escalatedTo || '', escalationNote: n.escalationNote || '', resolution: n.resolution || '', detail: n.detail || '', problem: clean(problem).slice(0, 160),
       title: clean(title).slice(0, 120), items, tracking, entryNo, mbol, ref: tracking || entryNo || mbol || sid, sid, url, orgId, customer: '', consignee,
       codes, groupKey: n.groupKey || '', claims,
+      // A duty dispute's own status: Resolution failed means it was submitted but the portal couldn't finish resolving it
+      resFailed: n.subject?.status === 'RESOLUTION_FAILED',
       // Resolved, auto-resolved or cancelled (the Advanced View's All work orders tab)
       closed: n.status !== 'OPEN' && n.status !== 'WAITING', resolutionNote: n.resolutionNote || '', resolvedMs: Date.parse(n.resolvedAt) || 0, resolvedBy: n.resolvedBy || '', resolverName: '',
     };
   }
   // The text a search looks through, built once per row (and again when its customer name arrives)
-  const hay = r => r._hay || (r._hay = [r.label, r.status, human2(r.status), r.escalatedTo ? 'escalated' : '', r.title, r.problem, r.detail, r.tracking, r.entryNo, r.mbol, r.sid, r.id, r.customer, r.consignee,
+  const hay = r => r._hay || (r._hay = [r.label, r.status, human2(r.status), r.escalatedTo ? 'escalated' : '', r.resFailed ? 'resolution failed' : '', r.title, r.problem, r.detail, r.tracking, r.entryNo, r.mbol, r.sid, r.id, r.customer, r.consignee,
     r.assigneeName, r.stream, r.escalatedTo, r.escalationNote, r.claims, RESOLUTIONS[r.resolution] || r.resolution, r.resolutionNote, r.resolverName, ...r.items, ...r.codes].join(' \u0001 ').toLowerCase());
 
   // One date formatter for every row (making one per call was the queue's slowest step), and today's start and
@@ -3869,7 +3871,7 @@
     { key: 'type', label: 'Class', val: r => r.label },
     { key: 'customer', label: 'Customer', val: r => r.customer || r.consignee || '(unknown)', searchable: true },
     { key: 'assignee', label: 'Assignee', val: r => r.assigneeName || 'Unclaimed', searchable: true },
-    { key: 'status', label: 'Status', val: r => [r.status === 'WAITING' ? 'Waiting' : r.status === 'OPEN' ? 'Open' : human2(r.status), ...(r.escalatedTo ? ['Escalated'] : [])] },
+    { key: 'status', label: 'Status', val: r => [r.status === 'WAITING' ? 'Waiting' : r.status === 'OPEN' ? 'Open' : human2(r.status), ...(r.escalatedTo ? ['Escalated'] : []), ...(r.resFailed ? ['Resolution failed'] : [])] },
     { key: 'due', label: 'Due', val: r => Object.entries(DUE).filter(([, d]) => d.test(r)).map(([, d]) => d.label) },
   ];
   function human2(s) { const t = String(s || '').toLowerCase().replace(/_/g, ' '); return t.charAt(0).toUpperCase() + t.slice(1); }
@@ -4417,6 +4419,8 @@
       const stat = (n, label, cls, key) => h('button', { class: `stat ${cls}${key && dueOn(key) ? ' on' : ''}`, type: 'button', title: key ? `Show only: ${DUE[key].label}` : '', onclick: key ? () => toggleFilter('due', DUE[key].label, true) : null },
         h('b', { text: String(n) }), h('span', { text: label }));
       const byType = tally(rows, r => r.label);
+      // Disputes whose resolution failed, counted as clicking the count shows them (escalated ones too)
+      const resFailedAll = stack(visible({ ignore: 'status' }), false).filter(r => r.resFailed);
       const summary = h('div', {},
         h('div', { class: 'summary' },
           everythingShown() ? stat(rows.length, `shown of ${baseRows({ every: true }).length} work orders`, '') : stat(rows.length, `shown of ${S.rows.length} open`, ''),
@@ -4425,6 +4429,8 @@
           stat(nToday, 'due today', nToday ? 'warn' : '', 'today'),
           stat(nWeek, 'due in 7 days', '', 'week'),
           stat(rows.filter(r => r.status === 'WAITING').length, 'waiting', ''),
+          resFailedAll.length ? h('button', { class: `stat err${(S.filters.status || []).includes('Resolution failed') && !S.excl.status ? ' on' : ''}`, type: 'button', title: 'Show only the disputes whose resolution failed (escalated ones too)',
+            onclick: () => showResFailed() }, h('b', { text: String(resFailedAll.length) }), h('span', { text: 'resolution failed' })) : null,
           stat(rows.filter(r => r.escalatedTo).length, 'escalated', ''),
           stat(rows.filter(r => r.createdMs > S.seenAt).length, 'new since last visit', '')),
         searching() ? h('p', { class: 'muted', style: 'font-size:12px;margin:8px 0 0', text: `Searching every work order, open, waiting and closed, whatever tab is open${S.closedLoading ? ' (loading the closed ones…)' : ''}. Filters you set still apply.` }) : null,
@@ -4491,6 +4497,14 @@
         pill(scoped.filter(DUE.today.test).length, 'due today', 'warn', 'today'),
         pill(scoped.filter(DUE.week.test).length, 'due in 7 days', '', 'week'),
         pill(scoped.filter(r => r.status === 'WAITING').length, 'waiting', '', ''),
+        (() => {
+          // Counted as clicking it shows them: escalated ones included, whatever the Status filter
+          const n = stack(visible({ ignore: 'status' }), false).filter(r => r.resFailed).length;
+          if (!n) return null;
+          const on = (S.filters.status || []).includes('Resolution failed') && !S.excl.status;
+          return h('button', { class: `cq-stat err${on ? ' on' : ''}`, type: 'button', title: on ? 'Show every status again' : 'Show only the disputes whose resolution failed',
+            onclick: () => showResFailed() }, h('b', { text: String(n) }), 'resolution failed');
+        })(),
         (() => {
           const hiding = !!S.excl.status && (S.filters.status || []).includes('Escalated');
           const n = stack(visible({ ignore: 'status' }), false).filter(r => r.escalatedTo).length;
@@ -4610,6 +4624,7 @@
           onclick: () => { open ? S.open.delete(r.id) : S.open.add(r.id); render(); } })),
         h('td', {}, h('span', { class: 'cq-pill cq-class', text: r.label, title: r.label })),
         h('td', {}, h('div', { class: 'cq-status' }, h('span', { class: `cq-pill cq-st-${r.status}`, text: human2(r.status) }),
+          r.resFailed ? h('span', { class: 'cq-pill cq-esc', text: '✕ Res. failed', title: "Resolution failed: the dispute was submitted, but the portal couldn't finish resolving it. Open it to see why." }) : null,
           r.escalatedTo ? h('span', { class: 'cq-pill cq-esc', text: '↑', title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null,
           researchPill(r))),
         h('td', {},
@@ -4678,6 +4693,16 @@
       const cur = S.filters[key] || [];
       if (only && S.excl[key]) S.excl = { ...S.excl, [key]: false };
       S.filters = { ...S.filters, [key]: cur.includes(val) ? cur.filter(v => v !== val) : only ? [val] : [...cur, val] };
+      S.limit = 300;
+      savePrefs();
+      render();
+    }
+    // The resolution-failed count: shows only those disputes (escalated ones too), and clicked again, puts back the
+    // default of hiding escalated orders
+    function showResFailed() {
+      const on = (S.filters.status || []).includes('Resolution failed') && !S.excl.status;
+      S.filters = { ...S.filters, status: on ? ['Escalated'] : ['Resolution failed'] };
+      S.excl = { ...S.excl, status: on };
       S.limit = 300;
       savePrefs();
       render();
@@ -4841,7 +4866,7 @@
         h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: S.sel.has(r.id), 'aria-label': `Select ${r.label} ${r.ref}`, onclick: e => selectClick(r, i, e) })),
         h('td', {}, h('span', { class: 'badge', text: r.label, title: r.label })),
         h('td', {}, h('div', { class: 'badges' }, h('span', { class: `badge st-${r.status}`, text: human2(r.status),
-          title: r.closed ? [RESOLUTIONS[r.resolution] || (r.resolution && human2(r.resolution)), r.resolutionNote].filter(Boolean).join(': ') : '' }), researchPill(r, 'badge'), r.escalatedTo ? h('span', { class: 'badge esc', text: `↑ ${r.escalatedTo === 'ENGINEERING' ? 'Eng' : human2(r.escalatedTo)}`, title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null)),
+          title: r.closed ? [RESOLUTIONS[r.resolution] || (r.resolution && human2(r.resolution)), r.resolutionNote].filter(Boolean).join(': ') : '' }), researchPill(r, 'badge'), r.resFailed ? h('span', { class: 'badge esc', text: '✕ Res. failed', title: "Resolution failed: the dispute was submitted, but the portal couldn't finish resolving it. Open it to see why." }) : null, r.escalatedTo ? h('span', { class: 'badge esc', text: `↑ ${r.escalatedTo === 'ENGINEERING' ? 'Eng' : human2(r.escalatedTo)}`, title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null)),
         h('td', {}, h('div', { class: 'title', title: r.items.join(' · ') || r.title }, isNew ? h('span', { class: 'new', title: 'New since your last visit' }) : null,
           r._copies?.length ? h('span', { class: 'badge many', text: `×${r._copies.length + 1}`, title: `${r._copies.length + 1} identical disputes: claim, select or open this one, and what you do is done to all of them` }) : null, r.title),
           r.problem ? h('div', { class: 'sub', title: r.detail, text: r.problem }) : null),
