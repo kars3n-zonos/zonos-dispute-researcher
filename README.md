@@ -46,7 +46,7 @@ For the maintainer:
 - **Classify / Quote:** the same requests as the portal's own Classify and Quote boxes, usable on every page:
   - **Classify** gives the code, its description, confidence, a check of a code you enter, and alternates.
   - **Quote** gives the additional Chapter 99 codes that apply.
-- **Analytics:** every order the portal has for a period, closed ones included, broken down by company, class, status / resolution, item / problem and assignee. **Export CSV** gives a file for bookkeeping.
+- **Analytics:** from every work order's own history in the portal: who resolved (and submitted) the most, who claimed, released, marked waiting, escalated and added notes, and the typical time from claim to resolve, for today, 7, 30 or 90 days or 12 months, by class. Also who holds how many right now (overdue and waiting), unclaimed orders, how orders were resolved, and new orders by company. **Export** gives every event as a CSV.
 - **Entry Assistant:** the Entry Assistant site, for looking up and comparing codes, notes and rulings.
 - **Advanced View** (optional; there's an orange **⚡ Advanced View** switch at the top right of the portal's queue):
   - Search across everything, including a pasted list of tracking numbers.
