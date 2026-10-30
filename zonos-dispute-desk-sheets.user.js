@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.34.0
+// @version      7.35.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3321,8 +3321,16 @@
     /* ---- research for Claude Code: a Notion task with the prompt; the answer comes back on the case page */
     // The case's research so far, anyone's, from the sheet's Research tab (failed ones don't count): in words, or ''
     async function priorResearch(ctx) {
-      // A request still "Waiting" with no session never started (its call timed out, say): it doesn't count
-      const requests = ((await sheetsCall('researchStatus', ctx).catch(() => null))?.requests || []).filter(q => q.status !== 'Failed' && !(q.status === 'Waiting' && !q.session));
+      // A request still "Waiting" never started: with no session (its call timed out, say), or 20 minutes on with one
+      // that never picked it up (a routine without the worker repo, say). It doesn't count, and is marked failed.
+      const all = (await sheetsCall('researchStatus', ctx).catch(() => null))?.requests || [];
+      const stale = q => q.status === 'Waiting' && (!q.session || Date.now() - (Date.parse(String(q.asked).replace(' ', 'T')) || Date.now()) > 20 * 60000);
+      for (const q of all.filter(x => stale(x) && x.session)) {
+        sheetsCall('fail', null, { requestId: q.id, reason: "Its cloud session never picked it up (the routine may be missing the dispute-desk-cloud repo). Asked again." }).catch(e => console.warn('[Dispute Desk] sheet', e));
+      }
+      // One still "Researching" after 3 hours stopped partway (no session takes that long): it doesn't count either
+      const dead = q => q.status === 'Researching' && Date.now() - (Date.parse(String(q.asked).replace(' ', 'T')) || Date.now()) > 3 * 3600000;
+      const requests = all.filter(q => q.status !== 'Failed' && !stale(q) && !dead(q));
       if (!requests.length) return '';
       const running = requests.filter(q => q.status === 'Waiting' || q.status === 'Researching');
       const last = requests[requests.length - 1];
