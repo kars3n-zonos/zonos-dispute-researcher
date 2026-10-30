@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.27.0
+// @version      7.28.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -6615,6 +6615,8 @@
     .entry-blocked { padding: 16px; }
     .entry-blocked p { margin: 0 0 12px; }
     a.primary, a.secondary { display: inline-block; text-decoration: none; }
+    a.update-btn { display: block; text-align: center; font-size: 17px; padding: 12px 14px; margin: 0 0 16px; border-radius: 8px; }
+    a.update-btn .update-sub { display: block; font-size: 12px; font-weight: 400; opacity: .9; margin-top: 2px; }
     .group { margin-bottom: 16px; }
     .group .row { margin-top: 6px; }
     .section { margin-bottom: 18px; }
@@ -7116,7 +7118,15 @@
       say(codeNote, 'Locked. Bulk actions, stacking, Research all and Batch work are off again (a research run going is paused).');
     }
 
+    // Update: opens this script's own install link (the main one or the Sheets copy, whichever is installed), where
+    // Tampermonkey offers the newest version
+    const updateUrl = (typeof GM_info !== 'undefined' && (GM_info.script?.downloadURL || GM_info.script?.updateURL))
+      || 'https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js';
     const settingsBody = h('div', { class: 'body' },
+      h('a', { class: 'primary update-btn', href: updateUrl, target: '_blank', rel: 'noopener',
+        title: "Opens the newest version on GitHub; press Tampermonkey's Update (or Reinstall) there, then reload this page" },
+        h('span', { text: '⟳ Update' }),
+        h('span', { class: 'update-sub', text: `You have ${typeof GM_info !== 'undefined' ? GM_info.script?.version || '?' : '?'}. Press Update on the page that opens, then reload the portal.` })),
       h('p', { class: 'hint', style: 'margin:0 0 14px', text: "Tools works without any of this: the queue, Classify, Quote and research prompts need nothing. Each part below adds something, and what you save stays on this computer." }),
       group('Your name', '', h('div', { class: 'row' }, authorInput)),
       group('Entry Assistant', 'HTS facts for each line in the research prompt, and the lookup box. Uses your own token.',
