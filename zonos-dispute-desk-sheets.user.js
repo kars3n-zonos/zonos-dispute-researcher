@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.30.0
+// @version      7.31.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -27,6 +27,7 @@
 // @connect      api.anthropic.com
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
+// @connect      raw.githubusercontent.com
 // @connect      *
 // ==/UserScript==
 
@@ -6818,8 +6819,10 @@
     .entry-blocked { padding: 16px; }
     .entry-blocked p { margin: 0 0 12px; }
     a.primary, a.secondary { display: inline-block; text-decoration: none; }
-    a.update-btn { display: block; text-align: center; font-size: 17px; padding: 12px 14px; margin: 0 0 16px; border-radius: 8px; }
-    a.update-btn .update-sub { display: block; font-size: 12px; font-weight: 400; opacity: .9; margin-top: 2px; }
+    a.update-btn { display: block; text-align: center; font-size: 14px; font-weight: 600; padding: 7px 12px; margin: 0 0 14px; border-radius: 8px; text-decoration: none; color: #ffffff; border: 0; }
+    a.update-btn .update-sub { display: block; font-size: 11.5px; font-weight: 400; opacity: .92; margin-top: 1px; }
+    a.update-btn.ok { background: #15803d; } a.update-btn.new { background: #d97706; } a.update-btn.checking { background: #71717a; }
+    a.update-btn:hover { filter: brightness(1.08); }
     .group { margin-bottom: 16px; }
     .group .row { margin-top: 6px; }
     .section { margin-bottom: 18px; }
@@ -7397,11 +7400,35 @@
     // Tampermonkey offers the newest version
     const updateUrl = (typeof GM_info !== 'undefined' && (GM_info.script?.downloadURL || GM_info.script?.updateURL))
       || 'https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js';
+    // It checks GitHub when Settings opens (at most every 15 minutes): green when this is the newest version, orange
+    // when there's a newer one. Clicking always opens the install page, which checks for itself.
+    const myVersion = (typeof GM_info !== 'undefined' && GM_info.script?.version) || '';
+    const UPDATE_CHECK_KEY = 'zt:updateCheck';
+    const newer = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); } return false; };
+    const updateLabel = h('span', { text: '⟳ Update' });
+    const updateSub = h('span', { class: 'update-sub' });
+    const updateBtn = h('a', { class: 'update-btn checking', href: updateUrl, target: '_blank', rel: 'noopener',
+      title: "Opens the newest version on GitHub; press Tampermonkey's Update (or Reinstall) there, then reload this page" }, updateLabel, updateSub);
+    function showUpdate(latest) {
+      const behind = latest && newer(latest, myVersion);
+      updateBtn.className = `update-btn ${!latest ? 'checking' : behind ? 'new' : 'ok'}`;
+      updateLabel.textContent = !latest ? '⟳ Update' : behind ? `⟳ Update to ${latest}` : '✓ Up to date';
+      updateSub.textContent = !latest ? `You have ${myVersion || '?'}. Click to check on GitHub.`
+        : behind ? `You have ${myVersion}. Click, press Update on the page that opens, then reload the portal.`
+          : `You have ${myVersion}, the newest. Click to check again on GitHub.`;
+    }
+    async function checkUpdate(force = false) {
+      const last = GM_getValue(UPDATE_CHECK_KEY, null);
+      if (!force && last?.latest && Date.now() - last.at < 15 * 60000) { showUpdate(last.latest); return; }
+      showUpdate(last?.latest || '');
+      try {
+        const r = await gmRequest({ url: `${updateUrl}?t=${Date.now()}`, timeout: 15000 });
+        const latest = (String(r.responseText || '').match(/@version\s+([\d.]+)/) || [])[1] || '';
+        if (r.status === 200 && latest) { GM_setValue(UPDATE_CHECK_KEY, { at: Date.now(), latest }); showUpdate(latest); }
+      } catch { /* offline: it stays as it was, and a click still checks */ }
+    }
     const settingsBody = h('div', { class: 'body' },
-      h('a', { class: 'primary update-btn', href: updateUrl, target: '_blank', rel: 'noopener',
-        title: "Opens the newest version on GitHub; press Tampermonkey's Update (or Reinstall) there, then reload this page" },
-        h('span', { text: '⟳ Update' }),
-        h('span', { class: 'update-sub', text: `You have ${typeof GM_info !== 'undefined' ? GM_info.script?.version || '?' : '?'}. Press Update on the page that opens, then reload the portal.` })),
+      updateBtn,
       h('p', { class: 'hint', style: 'margin:0 0 14px', text: "Tools works without any of this: the queue, Classify, Quote and research prompts need nothing. Each part below adds something, and what you save stays on this computer." }),
       group('Your name', '', h('div', { class: 'row' }, authorInput)),
       group('Entry Assistant', 'HTS facts for each line in the research prompt, and the lookup box. Uses your own token.',
@@ -7819,6 +7846,7 @@
       if (name === 'classify') renderClassify();
       if (name === 'quote') renderQuote();
       if (name === 'analytics') renderAnalytics();
+      if (name === 'settings') checkUpdate();
       if (name === 'dispute') { showResearchIdle(); if (researchStale && state) render(); }
       refreshTools();
       if (name === 'entry') showEntryPage();
