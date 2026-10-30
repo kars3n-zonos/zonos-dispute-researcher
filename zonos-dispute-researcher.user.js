@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.35.0
+// @version      7.36.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -4405,12 +4405,12 @@
   const BULK = [
     { key: 'claim', label: 'Claim', op: 'BrokerageWorkOrderClaim', verb: 'Claimed', can: (r, me) => r.status === 'OPEN' && !r.assigneeId },
     { key: 'release', label: 'Release', op: 'BrokerageWorkOrderRelease', verb: 'Released', can: r => !!r.assigneeId },
-    { key: 'wait', label: 'Wait…', op: 'BrokerageWorkOrderWait', verb: 'Marked waiting', can: r => r.status === 'OPEN', note: 'optional' },
-    { key: 'resume', label: 'Resume…', op: 'BrokerageWorkOrderResume', verb: 'Resumed', can: r => r.status === 'WAITING', note: 'optional' },
-    { key: 'escalate', label: 'Escalate…', op: 'BrokerageWorkOrderEscalate', verb: 'Escalated', can: r => !r.escalatedTo, note: 'required', target: true },
-    { key: 'note', label: 'Note…', op: 'BrokerageWorkOrderNote', verb: 'Added a note to', can: () => true, note: 'required' },
-    { key: 'assign', label: 'Assign…', op: 'BrokerageWorkOrderAssign', verb: 'Assigned', can: () => true, assignee: true },
-    { key: 'resolve', label: 'Resolve…', op: 'BrokerageWorkOrderResolve', verb: 'Resolved', can: r => r.status === 'OPEN' || r.status === 'WAITING', note: 'optional', resolution: true, danger: true },
+    { key: 'wait', label: 'Wait', op: 'BrokerageWorkOrderWait', verb: 'Marked waiting', can: r => r.status === 'OPEN', note: 'optional' },
+    { key: 'resume', label: 'Resume', op: 'BrokerageWorkOrderResume', verb: 'Resumed', can: r => r.status === 'WAITING', note: 'optional' },
+    { key: 'escalate', label: 'Escalate', op: 'BrokerageWorkOrderEscalate', verb: 'Escalated', can: r => !r.escalatedTo, note: 'required', target: true },
+    { key: 'note', label: 'Note', op: 'BrokerageWorkOrderNote', verb: 'Added a note to', can: () => true, note: 'required' },
+    { key: 'assign', label: 'Assign', op: 'BrokerageWorkOrderAssign', verb: 'Assigned', can: () => true, assignee: true },
+    { key: 'resolve', label: 'Resolve', op: 'BrokerageWorkOrderResolve', verb: 'Resolved', can: r => r.status === 'OPEN' || r.status === 'WAITING', note: 'optional', resolution: true, danger: true },
   ];
 
   const SCOPES = [
@@ -4430,7 +4430,7 @@
     { key: 'type', label: 'Class', val: r => r.label },
     { key: 'customer', label: 'Customer', val: r => r.customer || r.consignee || '(unknown)', searchable: true },
     { key: 'assignee', label: 'Assignee', val: r => r.assigneeName || 'Unclaimed', searchable: true },
-    { key: 'status', label: 'Status', val: r => r.status === 'WAITING' ? 'Waiting' : r.escalatedTo ? 'Escalated' : 'Open' },
+    { key: 'status', label: 'Status', val: r => [r.status === 'WAITING' ? 'Waiting' : 'Open', ...(r.escalatedTo ? ['Escalated'] : [])] },
     { key: 'stream', label: 'Stream', val: r => r.stream ? human2(r.stream) : 'None' },
     { key: 'due', label: 'Due', val: r => Object.entries(DUE).filter(([, d]) => d.test(r)).map(([, d]) => d.label) },
   ];
@@ -4596,7 +4596,14 @@
     const skin = () => (queueView() === 'classic' ? 'classic' : 'tools');
     const defaults = { scope: 'mine', cscope: 'mine', filters: {}, sort: [{ key: 'due', dir: 1 }], group: '', views: [], auto: true, stack: true };
     const prefs = { ...defaults, ...GM_getValue(PREFS_KEY, {}) };
-    const savePrefs = () => GM_setValue(PREFS_KEY, { scope: S.scope, cscope: S.cscope, filters: S.filters, sort: S.sort, group: S.group, views: prefs.views, auto: S.auto, stack: S.stack, excl: S.excl, cgroup: S.cgroup, dense: S.dense });
+    // Escalated orders start hidden (Status: Hide Escalated), for everyone once, unless they'd set a Status filter
+    if (!prefs.escHidden) {
+      prefs.filters = { ...(prefs.filters || {}) };
+      prefs.excl = { ...(prefs.excl || {}) };
+      if (!prefs.filters.status?.length) { prefs.filters.status = ['Escalated']; prefs.excl.status = true; }
+      prefs.escHidden = true;
+    }
+    const savePrefs = () => GM_setValue(PREFS_KEY, { scope: S.scope, cscope: S.cscope, filters: S.filters, sort: S.sort, group: S.group, views: prefs.views, auto: S.auto, stack: S.stack, excl: S.excl, cgroup: S.cgroup, dense: S.dense, escHidden: true });
     const S = {
       rows: [], me: null, loadedAt: 0, loading: false, error: '', q: '', scope: prefs.scope, cscope: prefs.cscope, filters: prefs.filters || {}, sort: prefs.sort, group: prefs.group,
       auto: prefs.auto, sel: new Set(), anchor: -1, focus: -1, pop: '', popSearch: '', extra: null, extraFor: '', seenAt: GM_getValue(SEEN_KEY, 0), shown: [], limit: 300,
@@ -4688,6 +4695,7 @@
       for (const f of filterList()) {
         const want = S.filters[f.key];
         if (f.key === ignore || !want?.length) continue;
+        if (f.key === 'status' && scope.key === 'escalated' && S.excl.status) continue;   // the Escalated tab shows them, hidden or not
         rows = rows.filter(r => filterVals(f, r).some(v => want.includes(v)) !== !!S.excl[f.key]);
       }
       if (pq.list) {
@@ -5004,7 +5012,17 @@
         pill(scoped.filter(DUE.today.test).length, 'due today', 'warn', 'today'),
         pill(scoped.filter(DUE.week.test).length, 'due in 7 days', '', 'week'),
         pill(scoped.filter(r => r.status === 'WAITING').length, 'waiting', '', ''),
-        pill(scoped.filter(r => r.escalatedTo).length, 'escalated', '', ''),
+        (() => {
+          const hiding = !!S.excl.status && (S.filters.status || []).includes('Escalated');
+          const n = stack(visible({ ignore: 'status' }), false).filter(r => r.escalatedTo).length;
+          return h('button', { class: `cq-stat${hiding ? '' : ' on'}`, type: 'button', title: hiding ? 'Escalated orders are hidden: click to show them' : 'Click to hide escalated orders again',
+            onclick: () => {
+              const cur = S.filters.status || [];
+              if (hiding) S.filters = { ...S.filters, status: cur.filter(v => v !== 'Escalated') };
+              else { S.filters = { ...S.filters, status: [...new Set([...(S.excl.status ? cur : []), 'Escalated'])] }; S.excl = { ...S.excl, status: true }; }
+              S.limit = 300; savePrefs(); render();
+            } }, h('b', { text: String(n) }), hiding ? 'escalated (hidden)' : 'escalated');
+        })(),
         pill(scoped.filter(r => r.createdMs > S.seenAt).length, 'new since your last visit', '', ''),
         pill(scoped.filter(r => S.researched?.[r.sid] || GM_getValue(`desk:research:${r.sid}`, null)).length, 'researched by you', '', ''),
       ].filter(Boolean));
