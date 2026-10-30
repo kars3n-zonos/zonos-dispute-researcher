@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.52.0
+// @version      7.54.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1952,6 +1952,20 @@
   // codes on it, and the buttons it offers) and the research brief comes from the class's guide below.
   const WORK_ORDER_PATH = /^\/entry-writer-queue\/([A-Z][A-Z_]+)\/([^/]+)\/?$/;
   const isCasePage = () => DISPUTE_PATH.test(location.pathname) || WORK_ORDER_PATH.test(location.pathname);
+  // Work orders whose page is named by the work order's own id but whose case is its subject (an AD/CVD review's
+  // manifest line, as the queue names it): { workOrderId: subject }, learned from the queue and the portal's replies
+  const WO_SUBJECT_KEY = 'zt:woSubjects';
+  const caseIdOf = pathId => GM_getValue(WO_SUBJECT_KEY, {})[pathId] || pathId;
+  function rememberSubject(woId, sid) {
+    if (!woId || !sid || String(woId) === sid) return false;
+    const m = GM_getValue(WO_SUBJECT_KEY, {});
+    if (m[woId] === sid) return false;
+    m[woId] = sid;
+    const keys = Object.keys(m);
+    for (const k of keys.slice(0, Math.max(0, keys.length - 3000))) delete m[k];
+    GM_setValue(WO_SUBJECT_KEY, m);
+    return true;
+  }
 
   // Safe-side rules shared by every class
   const ORDER_RULES = [
@@ -2346,7 +2360,8 @@
     const m = WORK_ORDER_PATH.exec(location.pathname);
     const main = document.querySelector('main');
     if (!m || !main) return null;
-    const [, type, id] = m;
+    const type = m[1];
+    const id = caseIdOf(decodeURIComponent(m[2]));
     const guide = guideFor(type);
     const activityToggle = [...main.querySelectorAll('button[aria-expanded]')].find(b => /^activity$/i.test(clean(b.textContent)));
     const activity = activityToggle?.parentElement;
@@ -2721,6 +2736,9 @@
     function onData(op, status, json) {
       captured.push({ op, at: Date.now(), json });
       captureSeq++;
+      let learned = false;
+      for (const o of walk(json)) if (isWorkOrder(o) && !o.subject?.id && o.subjectKey && /^\d+$/.test(String(o.id))) learned = rememberSubject(String(o.id), o.subjectKey) || learned;
+      if (learned) changed();
       if (captured.length > 60) captured.shift();
       const sent = varsByOp[op] && Date.now() - varsByOp[op].at < 15000 ? varsByOp[op].vars : null;
       for (const fn of replyWatchers) { try { fn(op, status, json, sent); } catch (e) { console.warn('[Tools]', e); } }
@@ -2782,7 +2800,7 @@
       let m = path.match(/^\/duty-disputes\/(duty_dispute_(?!item_)[A-Za-z0-9]+)/);
       if (m) return { type: 'DUTY_DISPUTE', id: m[1], url: `${location.origin}/duty-disputes/${m[1]}` };
       m = path.match(/^\/entry-writer-queue\/([A-Z][A-Z_]+)\/([^/?#]+)/);
-      if (m) return { type: m[1], id: decodeURIComponent(m[2]), url: location.origin + path + search };
+      if (m) return { type: m[1], id: caseIdOf(decodeURIComponent(m[2])), url: location.origin + path + search };
       return null;
     }
     const currentEntity = () => entityFromPath(location.pathname, location.search);
@@ -2796,7 +2814,9 @@
       // A duty dispute review opens on the dispute's own page, as in the queue (queueRow)
       if (wo.type === 'DUTY_DISPUTE_REVIEW' && /^duty_dispute_/.test(sid)) return { type: wo.type, id: sid, url: `${location.origin}/duty-disputes/${sid}`, wo };
       const q = wo.consignment?.id ? `?consignment=${wo.consignment.id}` : '';
-      return { type: wo.type, id: sid, url: `${location.origin}/entry-writer-queue/${wo.type}/${sid}${q}`, wo };
+      // An AD/CVD review's subject is a manifest line, which the portal no longer opens by: its page is the work order's
+      const at = !wo.subject?.id && /^\d+$/.test(String(wo.id)) ? wo.id : sid;
+      return { type: wo.type, id: sid, url: `${location.origin}/entry-writer-queue/${wo.type}/${at}${q}`, wo };
     }
     function* walk(node, depth = 0) {
       if (!node || typeof node !== 'object' || depth > 14) return;
@@ -2808,8 +2828,10 @@
       return null;
     }
     function dataFor(ent) {
-      const open = o => isWorkOrder(o) && subjectId(o) === ent.id && (o.status === 'OPEN' || o.status === 'WAITING');
-      const wo = ent.wo || latest(open) || latest(o => isWorkOrder(o) && subjectId(o) === ent.id);
+      // The page's address names the work order's subject, or (after the portal moves to it) the work order itself
+      const mine = o => isWorkOrder(o) && (subjectId(o) === ent.id || o.id === ent.id);
+      const open = o => mine(o) && (o.status === 'OPEN' || o.status === 'WAITING');
+      const wo = ent.wo || latest(open) || latest(mine);
       const cid = wo?.consignment?.id || new URLSearchParams(location.search).get('consignment') || wo?.entry?.consignments?.[0]?.id;
       const cm = cid ? latest(o => o.id === cid && Array.isArray(o.consignmentItems)) : null;
       const eid = wo?.entry?.id || cm?.entry?.id;
@@ -3327,7 +3349,7 @@
               h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'secondary', type: 'button', text: o.busy ? 'Adding…' : 'Add to the Google Sheet', disabled: o.busy,
                 title: "Adds the case's row back, and puts Claude Code's answers in a new case doc", onclick: () => addToSheet() }))];
           })(),
-          (sc || chats.length) && h('div', { class: 'row', style: 'gap:12px;margin-top:6px;flex-wrap:wrap' }, sc?.sheet && a(sc.sheet, 'Sheet'), sc?.doc && a(sc.doc, 'Case doc'), chats),
+          (sc || chats.length > 0) && h('div', { class: 'row', style: 'gap:12px;margin-top:6px;flex-wrap:wrap' }, sc?.sheet && a(sc.sheet, 'Sheet'), sc?.doc && a(sc.doc, 'Case doc'), chats),
           // Research out with Claude Code: when, its session, and whether the session started
           (() => {
             const r = D.research || GM_getValue(`desk:research:${ent.id}`, null);
@@ -3474,6 +3496,29 @@
           const charged = o?.amountSubtotals?.duties != null ? { what: 'duties', amount: String(o.amountSubtotals.duties), inUsd: (o.currencyCode || 'USD') === 'USD' } : null;
           return { lines, mode, charged, entryDate: d10(cm?.consolidation?.arrivalDate), currency: lines[0]?.currency || o?.currencyCode || '' };
         } catch { return {}; }
+      },
+      // An Entry Writer Queue order at a glance, from the portal's own data: who holds it, the shipment, the parties and
+      // the items. null when it isn't an order page or the portal hasn't sent its data yet.
+      glance: () => {
+        try {
+          const ent = currentEntity();
+          if (!ent || ent.type === 'DUTY_DISPUTE') return null;
+          const { wo, cm, en } = dataFor(ent);
+          if (!wo && !cm) return null;
+          const c = cm?.consolidation || {};
+          const party = re => (cm?.consignmentParties || []).find(p => re.test(p.partyType || ''));
+          const who = p => p && { name: [p.companyName, [p.firstName, p.lastName].filter(Boolean).join(' ')].filter(x => clean(x || '').replace(/^[.\-\s]+$/, '')).join(' · '),
+            place: [p.locality || p.city, p.administrativeAreaCode || p.state, p.countryCode].filter(Boolean).join(', ') };
+          return {
+            kind: kindOf(ent.type), status: wo?.status || '', due: wo?.dueDate || '', holder: wo?.assigneeName || '', escalatedTo: wo?.escalatedTo || '',
+            tracking: wo?.consignment?.trackingNumber || cm?.trackingNumber || '', entryNo: wo?.entry?.entryNumber || en?.entryNumber || cm?.entry?.entryNumber || '',
+            port: c.portOfEntryCode || '', carrier: c.carrierCode || '', mode: human(c.transportationMode || ''), arrival: d10(c.arrivalDate), mbol: c.masterBillNumber || '',
+            shipFrom: cm?.shipFromCountry || '', declared: cm ? money(cm.declaredValue, cm.currencyCode) : '',
+            consignee: who(party(/CONSIGNEE/i)), shipper: who(party(/SHIPPER|EXPORTER|SELLER/i)),
+            items: (cm?.consignmentItems || []).slice(0, 12).map(it => ({ d: clean(it.description || it.name || ''), hs: it.hsCode || '', coo: it.countryOfOrigin || '', q: it.quantity, v: money(it.amount, it.currencyCode) })),
+            moreItems: Math.max(0, (cm?.consignmentItems || []).length - 12),
+          };
+        } catch { return null; }
       },
       portalItems: () => { try { const e = D.ent || currentEntity(); return e ? caseContext(e).facts.filter(f => /^Item \d+:/.test(f)) : []; } catch { return []; } },
       debug: () => ({ caseContext, currentEntity, captured, describe, entityFromWorkOrder, screenings, D }),
@@ -3640,6 +3685,9 @@
   const NAV_KEY = 'zt:queue:nav';        // the queue as last shown: the order of Prev / Next and each order's summary
   const NAV_AT_KEY = 'zt:queue:navAt';   // when NAV_KEY was last written (cheap to read, to know when to re-read it)
   const PREFS_KEY = 'zt:queue:prefs';
+  // Escalated orders are left out of the queue's tabs (not the Escalated and All work orders tabs, or a search)
+  const HIDE_ESC_KEY = 'zt:queue:hideEscalated';
+  const hideEscalated = () => GM_getValue(HIDE_ESC_KEY, true);
   const SEEN_KEY = 'zt:queue:seenAt';
   const DAY = 86400000;
   const CLASS_LABELS = {
@@ -3659,8 +3707,11 @@
   function queueRow(n) {
     const sid = n.subject?.id || n.subjectKey || '';
     const dd = n.type === 'DUTY_DISPUTE_REVIEW' && /^duty_dispute_/.test(sid);
+    // An AD/CVD review's subject is a manifest line, which the portal no longer opens by: its page is the work order's
+    const at = !n.subject?.id && /^\d+$/.test(String(n.id)) ? n.id : sid;
+    if (at !== sid) rememberSubject(String(n.id), sid);
     const url = dd ? `/duty-disputes/${sid}`
-      : `${QUEUE_PATH}/${n.type}/${encodeURIComponent(sid)}${n.consignment?.id ? `?consignment=${n.consignment.id}` : ''}`;
+      : `${QUEUE_PATH}/${n.type}/${encodeURIComponent(at)}${n.consignment?.id ? `?consignment=${n.consignment.id}` : ''}`;
     const lines = (n.detail || '').split('\n').map(clean).filter(Boolean);
     const bullet = lines.find(l => /^- /.test(l));
     const fromError = ((n.detail || '').match(/origin [A-Z]{2}: (.+?)(?:;|, path=|\)\]|$)/) || [])[1];
@@ -3911,7 +3962,7 @@
     filterOf('due'), filterOf('assignee'),
   ];
   const CLASSIC_COLS = [
-    { key: 'type', label: 'Class', width: 168 }, { key: 'status', label: 'Status', width: 132 }, { key: 'title', label: 'Problem' },
+    { key: 'type', label: 'Class', width: 168 }, { key: 'status', label: 'Status', width: 140 }, { key: 'title', label: 'Problem' },
     { key: 'ref', label: 'Subject', width: 164 }, { key: 'customer', label: 'Customer', width: 166 }, { key: 'due', label: 'Due', width: 128 },
     { key: 'age', label: 'Age', width: 56 }, { key: 'assignee', label: 'Assignee', width: 180 },
   ].map(c => ({ ...COLS.find(x => x.key === c.key), ...c }));
@@ -3999,6 +4050,14 @@
     .cq-stat:disabled { cursor: default; opacity: 1; }
     .cq-stat.err b { color: var(--err); } .cq-stat.warn b { color: var(--warn); }
     .cq-stat.on { border-color: var(--fg); background: var(--soft); }
+    .cq-toggle { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border: 1px dashed var(--line); border-radius: 999px; background: var(--bg); color: var(--fg); font-size: 12.5px; cursor: pointer; user-select: none; }
+    .cq-toggle input { margin: 0; accent-color: var(--fg); cursor: pointer; }
+    .cq-toggle .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .cq-toggle.on { border-style: solid; border-color: var(--fg); background: var(--soft); font-weight: 600; }
+    .cq-toggle.bad .n { color: var(--err); font-weight: 600; }
+    .cq-toggle.bad.on { border-color: var(--err); }
+    .cq-eschid { display: inline-flex; align-items: center; height: 28px; font-size: 12.5px; color: var(--muted); cursor: help; }
+    .q .cq-stats { margin-top: 8px; }
     .cq-view.on { border-color: var(--fg); }
     .cq .cq-table { overflow: visible; }
     .cq-t thead th { position: sticky; top: 0; z-index: 3; }
@@ -4010,8 +4069,17 @@
     .cq.dense .cq-t tr.row td { height: 40px; padding-top: 4px; padding-bottom: 4px; font-size: 13px; }
     .cq.dense .cq-t .cq-small { display: none; }
     .cq.dense .cq-t tr.row td .cq-who .muted { display: none; }
-    .cq-status { display: flex; align-items: center; gap: 4px; flex-wrap: nowrap; min-width: 0; }
-    .cq-status .cq-pill { flex: 0 1 auto; min-width: 0; }
+    .cq-status, .q .badges { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; white-space: nowrap; }
+    .cq-status > .cq-pill, .q .badges > .badge { flex: none; max-width: none; overflow: visible; }
+    .sf-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 11px; font-weight: 600; line-height: 1.3; }
+    .sf { white-space: nowrap; cursor: default; }
+    .sf-bad { color: var(--err); }
+    .sf-esc { color: #c2410c; }
+    :host([data-theme="dark"]) .sf-esc { color: #fb923c; }
+    .sf-row .cq-res { width: 16px; height: 16px; font-size: 9px; }
+    .cq.dense .cq-status { flex-direction: row; align-items: center; gap: 6px; }
+    .cq.dense .sf-word { display: none; }
+    .cq.dense .sf-row { flex-wrap: nowrap; gap: 6px; font-size: 13px; }
     .cq-status .cq-esc { margin-left: 0; }
     .cq-res { flex: none; display: inline-grid; place-items: center; width: 20px; height: 20px; padding: 0; margin: 0; border-radius: 50%; font-size: 11px; line-height: 1;
       color: #7c3aed; background: rgba(124,58,237,.08); border: 1px solid rgba(124,58,237,.45); overflow: visible; }
@@ -4036,14 +4104,21 @@
     const skin = () => (queueView() === 'classic' ? 'classic' : 'tools');
     const defaults = { scope: 'mine', cscope: 'mine', filters: {}, sort: [{ key: 'due', dir: 1 }], group: '', views: [], auto: true, stack: true };
     const prefs = { ...defaults, ...GM_getValue(PREFS_KEY, {}) };
-    // Escalated orders start hidden (Status: Hide Escalated), for everyone once, unless they'd set a Status filter
-    if (!prefs.escHidden) {
+    // Hiding escalated orders was the Status filter set to Hide Escalated; it's its own switch in Settings now. Once,
+    // whatever each person had carries over, and Escalated comes out of the filter.
+    if (!prefs.escSetting) {
       prefs.filters = { ...(prefs.filters || {}) };
       prefs.excl = { ...(prefs.excl || {}) };
-      if (!prefs.filters.status?.length) { prefs.filters.status = ['Escalated']; prefs.excl.status = true; }
-      prefs.escHidden = true;
+      const st = prefs.filters.status || [];
+      if (prefs.escHidden) GM_setValue(HIDE_ESC_KEY, !!prefs.excl.status && st.includes('Escalated'));
+      if (prefs.excl.status && st.includes('Escalated')) {
+        prefs.filters.status = st.filter(v => v !== 'Escalated');
+        if (!prefs.filters.status.length) { delete prefs.filters.status; delete prefs.excl.status; }
+      }
+      prefs.escSetting = true;
+      GM_setValue(PREFS_KEY, prefs);
     }
-    const savePrefs = () => GM_setValue(PREFS_KEY, { scope: S.scope, cscope: S.cscope, filters: S.filters, sort: S.sort, group: S.group, views: prefs.views, auto: S.auto, stack: S.stack, excl: S.excl, cgroup: S.cgroup, dense: S.dense, escHidden: true });
+    const savePrefs = () => GM_setValue(PREFS_KEY, { scope: S.scope, cscope: S.cscope, filters: S.filters, sort: S.sort, group: S.group, views: prefs.views, auto: S.auto, stack: S.stack, excl: S.excl, cgroup: S.cgroup, dense: S.dense, resOnly: S.resOnly, escSetting: true });
     const S = {
       rows: [], me: null, loadedAt: 0, loading: false, error: '', q: '', scope: prefs.scope, cscope: prefs.cscope, filters: prefs.filters || {}, sort: prefs.sort, group: prefs.group,
       auto: prefs.auto, sel: new Set(), anchor: -1, focus: -1, pop: '', popSearch: '', extra: null, extraFor: '', seenAt: GM_getValue(SEEN_KEY, 0), shown: [], limit: 300,
@@ -4051,6 +4126,7 @@
       closed: [], closedAt: 0, closedLoading: false, closedError: '',   // resolved, auto-resolved and cancelled orders (All work orders)
       stack: prefs.stack !== false, stackMsg: '',
       excl: prefs.excl || {},
+      resOnly: !!prefs.resOnly,   // "Only resolution failed": its own switch
       cgroup: prefs.cgroup || '', dense: !!prefs.dense,   // Portal+: its grouping, and compact rows   // filters set to Hide: the values picked are left out instead of the only ones shown   // identical disputes shown as one row (with the access code)
     };
     let autoTimer = null;
@@ -4161,6 +4237,7 @@
     }
     function filterVals(f, r) { const v = f.val(r); return Array.isArray(v) ? v : [v]; }
     function visible({ ignore = '' } = {}) {
+      const ign = [].concat(ignore);
       const scope = scopeList().find(s => s.key === S[scopeKey()]) || scopeList()[0];
       const me = S.me?.id;
       const pq = parseQuery(S.q);
@@ -4171,9 +4248,11 @@
         let want = S.filters[f.key];
         // The Escalated and All work orders tabs, and a search, show escalated orders, hidden or not
         if (f.key === 'status' && S.excl.status && (all || scope.key === 'escalated' || scope.every)) want = want?.filter(v => v !== 'Escalated');
-        if (f.key === ignore || !want?.length) continue;
+        if (ign.includes(f.key) || !want?.length) continue;
         rows = rows.filter(r => filterVals(f, r).some(v => want.includes(v)) !== !!S.excl[f.key]);
       }
+      if (!ign.includes('esc') && hideEscalated() && !all && scope.key !== 'escalated' && !scope.every) rows = rows.filter(r => !r.escalatedTo);
+      if (S.resOnly && !ign.includes('resOnly')) rows = rows.filter(r => r.resFailed);
       if (pq.list) {
         const found = new Set();
         rows = rows.filter(r => {
@@ -4419,8 +4498,6 @@
       const stat = (n, label, cls, key) => h('button', { class: `stat ${cls}${key && dueOn(key) ? ' on' : ''}`, type: 'button', title: key ? `Show only: ${DUE[key].label}` : '', onclick: key ? () => toggleFilter('due', DUE[key].label, true) : null },
         h('b', { text: String(n) }), h('span', { text: label }));
       const byType = tally(rows, r => r.label);
-      // Disputes whose resolution failed, counted as clicking the count shows them (escalated ones too)
-      const resFailedAll = stack(visible({ ignore: 'status' }), false).filter(r => r.resFailed);
       const summary = h('div', {},
         h('div', { class: 'summary' },
           everythingShown() ? stat(rows.length, `shown of ${baseRows({ every: true }).length} work orders`, '') : stat(rows.length, `shown of ${S.rows.length} open`, ''),
@@ -4429,11 +4506,10 @@
           stat(nToday, 'due today', nToday ? 'warn' : '', 'today'),
           stat(nWeek, 'due in 7 days', '', 'week'),
           stat(rows.filter(r => r.status === 'WAITING').length, 'waiting', ''),
-          resFailedAll.length ? h('button', { class: `stat err${(S.filters.status || []).includes('Resolution failed') && !S.excl.status ? ' on' : ''}`, type: 'button', title: 'Show only the disputes whose resolution failed (escalated ones too)',
-            onclick: () => showResFailed() }, h('b', { text: String(resFailedAll.length) }), h('span', { text: 'resolution failed' })) : null,
           stat(rows.filter(r => r.escalatedTo).length, 'escalated', ''),
           stat(rows.filter(r => r.createdMs > S.seenAt).length, 'new since last visit', '')),
         searching() ? h('p', { class: 'muted', style: 'font-size:12px;margin:8px 0 0', text: `Searching every work order, open, waiting and closed, whatever tab is open${S.closedLoading ? ' (loading the closed ones…)' : ''}. Filters you set still apply.` }) : null,
+        h('div', { class: 'cq-stats' }, viewToggles()),
         h('div', { class: 'chips' }, h('span', { class: 'muted', style: 'font-size:12px', text: 'Classes:' }), byType.length ? byType.slice(0, 10).map(([k, n]) => chip('type', k, n)) : h('span', { class: 'muted', style: 'font-size:12px', text: 'none' })),
         viewsBar());
 
@@ -4491,31 +4567,13 @@
       const dueOn = k => (S.filters.due || []).includes(DUE[k].label) && !S.excl.due;
       const pill = (n, label, cls, key) => h('button', { class: `cq-stat${cls && n ? ` ${cls}` : ''}${key && dueOn(key) ? ' on' : ''}`, type: 'button', disabled: !key,
         title: key ? (dueOn(key) ? 'Show every due date again' : `Show only: ${DUE[key].label}`) : '', onclick: key ? () => toggleFilter('due', DUE[key].label, true) : null },
-        h('b', { text: String(n) }), label);
+        h('b', { text: `${key && dueOn(key) ? '✓ ' : ''}${n}` }), label);
       const stats = h('div', { class: 'cq-stats' }, ...[
         pill(scoped.filter(DUE.overdue.test).length, 'overdue', 'err', 'overdue'),
         pill(scoped.filter(DUE.today.test).length, 'due today', 'warn', 'today'),
         pill(scoped.filter(DUE.week.test).length, 'due in 7 days', '', 'week'),
         pill(scoped.filter(r => r.status === 'WAITING').length, 'waiting', '', ''),
-        (() => {
-          // Counted as clicking it shows them: escalated ones included, whatever the Status filter
-          const n = stack(visible({ ignore: 'status' }), false).filter(r => r.resFailed).length;
-          if (!n) return null;
-          const on = (S.filters.status || []).includes('Resolution failed') && !S.excl.status;
-          return h('button', { class: `cq-stat err${on ? ' on' : ''}`, type: 'button', title: on ? 'Show every status again' : 'Show only the disputes whose resolution failed',
-            onclick: () => showResFailed() }, h('b', { text: String(n) }), 'resolution failed');
-        })(),
-        (() => {
-          const hiding = !!S.excl.status && (S.filters.status || []).includes('Escalated');
-          const n = stack(visible({ ignore: 'status' }), false).filter(r => r.escalatedTo).length;
-          return h('button', { class: `cq-stat${hiding ? '' : ' on'}`, type: 'button', title: hiding ? 'Escalated orders are hidden: click to show them' : 'Click to hide escalated orders again',
-            onclick: () => {
-              const cur = S.filters.status || [];
-              if (hiding) S.filters = { ...S.filters, status: cur.filter(v => v !== 'Escalated') };
-              else { S.filters = { ...S.filters, status: [...new Set([...(S.excl.status ? cur : []), 'Escalated'])] }; S.excl = { ...S.excl, status: true }; }
-              S.limit = 300; savePrefs(); render();
-            } }, h('b', { text: String(n) }), hiding ? 'escalated (hidden)' : 'escalated');
-        })(),
+        ...viewToggles(),
         pill(scoped.filter(r => r.createdMs > S.seenAt).length, 'new since your last visit', '', ''),
         pill(scoped.filter(r => S.researched?.[r.sid] || GM_getValue(`desk:research:${r.sid}`, null)).length, 'researched by you', '', ''),
       ].filter(Boolean));
@@ -4586,6 +4644,17 @@
           : rows.length ? h('div', { class: 'cq-more', text: `All ${rows.length} shown` }) : null);
     }
     // Sent for research from this computer (Research in Claude Code, Research all, Claim & research): when
+    // The flags under a row's status: resolution failed, escalated (and to whom), and researched (✦), as short colored
+    // words with their full meaning on hover
+    function statusFlags(r) {
+      const flags = [];
+      if (r.resFailed) flags.push(h('span', { class: 'sf sf-bad', title: "Resolution failed: the dispute was submitted, but the portal couldn't finish resolving it. Open it to see why." }, '✕', h('span', { class: 'sf-word', text: ' Res. failed' })));
+      if (r.escalatedTo) flags.push(h('span', { class: 'sf sf-esc',
+        title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }, '↑', h('span', { class: 'sf-word', text: ` ${r.escalatedTo === 'ENGINEERING' ? 'Eng' : human2(r.escalatedTo)}` })));
+      const res = researchPill(r, 'sf-res');
+      if (res) flags.push(res);
+      return flags.length ? h('div', { class: 'sf-row' }, flags) : null;
+    }
     // ✦ beside the status: research started on it from this computer (lasting), filled while it's still running
     function researchPill(r, cls = 'cq-pill') {
       const done = S.researched?.[r.sid];
@@ -4623,10 +4692,7 @@
         h('td', {}, h('button', { class: 'cq-chev', type: 'button', text: '›', 'aria-expanded': String(open), 'aria-label': open ? 'Hide details' : 'Show details',
           onclick: () => { open ? S.open.delete(r.id) : S.open.add(r.id); render(); } })),
         h('td', {}, h('span', { class: 'cq-pill cq-class', text: r.label, title: r.label })),
-        h('td', {}, h('div', { class: 'cq-status' }, h('span', { class: `cq-pill cq-st-${r.status}`, text: human2(r.status) }),
-          r.resFailed ? h('span', { class: 'cq-pill cq-esc', text: '✕ Res. failed', title: "Resolution failed: the dispute was submitted, but the portal couldn't finish resolving it. Open it to see why." }) : null,
-          r.escalatedTo ? h('span', { class: 'cq-pill cq-esc', text: '↑', title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null,
-          researchPill(r))),
+        h('td', {}, h('div', { class: 'cq-status' }, h('span', { class: `cq-pill cq-st-${r.status}`, text: human2(r.status) }), statusFlags(r))),
         h('td', {},
           h('div', { class: 'cq-line' }, r.createdMs > S.seenAt ? h('span', { class: 'new', title: 'New since your last visit' }) : null, many,
             h('a', { href: r.url, title: r.items.join(' · ') || r.title, onclick: e => openRow(r, e) }, title)),
@@ -4697,15 +4763,21 @@
       savePrefs();
       render();
     }
-    // The resolution-failed count: shows only those disputes (escalated ones too), and clicked again, puts back the
-    // default of hiding escalated orders
-    function showResFailed() {
-      const on = (S.filters.status || []).includes('Resolution failed') && !S.excl.status;
-      S.filters = { ...S.filters, status: on ? ['Escalated'] : ['Resolution failed'] };
-      S.excl = { ...S.excl, status: on };
-      S.limit = 300;
-      savePrefs();
-      render();
+    // "Only resolution failed", as a checkbox that says what it does and whether it's on, and a note when escalated
+    // orders are hidden (Settings > Panel and pages)
+    function viewToggles() {
+      const nEsc = stack(visible({ ignore: ['esc', 'resOnly'] }), false).filter(r => r.escalatedTo).length - stack(visible({ ignore: 'resOnly' }), false).filter(r => r.escalatedTo).length;
+      const resAll = stack(visible({ ignore: ['esc', 'resOnly'] }), false).filter(r => r.resFailed);
+      const resShown = stack(visible({ ignore: 'resOnly' }), false).filter(r => r.resFailed);
+      const box = (on, text, n, title, onchange, extra = '') => h('label', { class: `cq-toggle${on ? ' on' : ''}${extra}`, title },
+        h('input', { type: 'checkbox', checked: on, onchange: e => onchange(e.target.checked) }), text, h('span', { class: 'n', text: String(n) }));
+      return [
+        nEsc > 0 ? h('span', { class: 'cq-eschid', title: 'Escalated orders are hidden here. They show on the Escalated and All work orders tabs and in a search. To show them everywhere, untick "Hide escalated orders" under Tools > Settings > Panel and pages.',
+          text: `${nEsc} escalated hidden` }) : null,
+        resAll.length || S.resOnly ? box(S.resOnly, 'Only resolution failed', resShown.length,
+          `${S.resOnly ? 'Showing only' : 'Tick to show only'} the disputes whose resolution failed (submitted, but the portal couldn't finish resolving them).${resAll.length > resShown.length ? ` ${resAll.length - resShown.length} more are escalated, so hidden (Hide escalated orders, in Settings).` : ''}`,
+          on => { S.resOnly = on; S.limit = 300; savePrefs(); render(); }, ' bad') : null,
+      ].filter(Boolean);
     }
     function filterButton(f) {
       const want = S.filters[f.key] || [];
@@ -4866,7 +4938,7 @@
         h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: S.sel.has(r.id), 'aria-label': `Select ${r.label} ${r.ref}`, onclick: e => selectClick(r, i, e) })),
         h('td', {}, h('span', { class: 'badge', text: r.label, title: r.label })),
         h('td', {}, h('div', { class: 'badges' }, h('span', { class: `badge st-${r.status}`, text: human2(r.status),
-          title: r.closed ? [RESOLUTIONS[r.resolution] || (r.resolution && human2(r.resolution)), r.resolutionNote].filter(Boolean).join(': ') : '' }), researchPill(r, 'badge'), r.resFailed ? h('span', { class: 'badge esc', text: '✕ Res. failed', title: "Resolution failed: the dispute was submitted, but the portal couldn't finish resolving it. Open it to see why." }) : null, r.escalatedTo ? h('span', { class: 'badge esc', text: `↑ ${r.escalatedTo === 'ENGINEERING' ? 'Eng' : human2(r.escalatedTo)}`, title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null)),
+          title: r.closed ? [RESOLUTIONS[r.resolution] || (r.resolution && human2(r.resolution)), r.resolutionNote].filter(Boolean).join(': ') : '' }), statusFlags(r))),
         h('td', {}, h('div', { class: 'title', title: r.items.join(' · ') || r.title }, isNew ? h('span', { class: 'new', title: 'New since your last visit' }) : null,
           r._copies?.length ? h('span', { class: 'badge many', text: `×${r._copies.length + 1}`, title: `${r._copies.length + 1} identical disputes: claim, select or open this one, and what you do is done to all of them` }) : null, r.title),
           r.problem ? h('div', { class: 'sub', title: r.detail, text: r.problem }) : null),
@@ -5483,6 +5555,15 @@
   // lines become a labeled grid (blank values left out, countries named), and every all-caps CBP message gets a
   // plain-English line under it. The portal's own text is never changed; it's hidden or added to.
   const READABLE_KEY = 'zt:readable';
+  const GLANCE_KEY = 'zt:orderGlance';          // order pages: At a glance, the Jump to bar, long sections folded
+  const TIDY_RESEARCH_KEY = 'zt:tidyResearch';  // the Research tab: what's wrong first, the extras folded at the bottom
+  const VIEW_SWITCH_KEY = 'zt:viewSwitch';      // a Normal | Advanced switch above Tools that sets both of those
+  const advancedView = () => GM_getValue(GLANCE_KEY, false) && GM_getValue(TIDY_RESEARCH_KEY, false);
+  function setAdvancedView(on) {
+    GM_setValue(GLANCE_KEY, on);
+    GM_setValue(TIDY_RESEARCH_KEY, on);
+    if (on) orderGlance(); else undoGlance();
+  }
   const ABBR = {
     DESC: 'description', MERCH: 'merchandise', INV: 'invoice', QTY: 'quantity', REQ: 'required', REQD: 'required', MISS: 'missing',
     INVLD: 'invalid', NO: 'number', NBR: 'number', NUM: 'number', ET: 'entry type', HTS: 'HTS', TARIFF: 'tariff', ORIG: 'origin', CTRY: 'country',
@@ -5554,6 +5635,146 @@
       existing?.remove();
       el.append(h('span', { class: 'zt-plain', text: plain }));
     }
+  }
+  // ---- An Entry Writer Queue order page, tidier (with "Tidier order pages"): an "At a glance" card at the top, a bar that
+  // sticks to the top to jump between the page's sections, and the long, rarely needed sections folded when the page
+  // opens (with the page's own fold arrows: nothing on the page is changed)
+  const GLANCE_CSS = `
+    :host { all: initial; display: block; --bg:#ffffff; --fg:#09090b; --muted:#71717a; --line:#e4e4e7; --soft:#f4f4f5; --blue:#0066cc; --err:#dc2626; --warn:#b45309; }
+    :host([data-theme="dark"]) { --bg:#09090b; --fg:#fafafa; --muted:#a1a1aa; --line:#27272a; --soft:#18181b; --blue:#2997ff; --err:#f87171; --warn:#fbbf24; }
+    :host(#zt-jump) { background: var(--bg); }
+    * { box-sizing: border-box; }
+    .g { font: 13px/1.45 Inter, -apple-system, "Segoe UI", sans-serif; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin: 0 0 14px; }
+    .top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .kicker { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+    .who { font-size: 12.5px; color: var(--muted); }
+    .who b { color: var(--fg); font-weight: 600; }
+    .who .late { color: var(--err); font-weight: 600; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px 18px; margin-top: 10px; }
+    .grid dt { font-size: 11px; color: var(--muted); }
+    .grid dd { margin: 1px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+    .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+    table { width: 100%; margin-top: 12px; border-collapse: collapse; font-size: 12.5px; }
+    th { text-align: left; font-size: 11px; font-weight: 600; color: var(--muted); padding: 0 8px 4px 0; border-bottom: 1px solid var(--line); }
+    td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+    td.num, th.num { text-align: right; white-space: nowrap; }
+    .more { margin-top: 6px; font-size: 12px; color: var(--muted); }
+    .answer { margin-top: 12px; padding: 9px 12px; border-radius: 9px; background: var(--soft); font-size: 13px; }
+    .answer small { display: block; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+    .bar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 0; background: var(--bg); border-bottom: 1px solid var(--line); font: 12.5px/1.2 Inter, -apple-system, "Segoe UI", sans-serif; }
+    .bar span { color: var(--muted); align-self: center; margin-right: 2px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .bar button { border: 1px solid var(--line); background: var(--bg); color: var(--fg); border-radius: 999px; padding: 4px 11px; font: inherit; cursor: pointer; }
+    .bar button:hover { border-color: var(--blue); color: var(--blue); }
+    .bar button i { font-style: normal; color: var(--muted); margin-left: 4px; }
+    .bar button.folded { color: var(--muted); border-style: dashed; }`;
+  const glanceHost = (id, sticky) => {
+    let el = document.getElementById(id);
+    if (!el) {
+      el = document.createElement('div');
+      el.id = id;
+      el.attachShadow({ mode: 'open' }).append(h('style', { text: GLANCE_CSS }), h('div', { class: 'in' }));
+      if (sticky) el.style.cssText = 'position:sticky;top:0;z-index:20;margin:0 0 12px';
+    }
+    el.dataset.theme = pageIsDarkSoon() ? 'dark' : 'light';
+    return el;
+  };
+  // The page's own sections: the fold arrows with a heading (Documents, Parties, Items, Status history…)
+  const pageSections = main => [...main.querySelectorAll('button[aria-expanded]')].filter(b => {
+    const t = clean(b.textContent);
+    return t && (t.length < 40 || / · \d{4}/.test(t)) && !b.closest('[role="dialog"], nav, header') && !/\([A-Z]{2}\)$/.test(t) && !b.getAttribute('aria-haspopup') && b.getAttribute('role') !== 'combobox';
+  });
+  let glanceSig = '';
+  let glanceFolded = '';
+  function orderGlance() {
+    const main = document.querySelector('main');
+    // Dispute reviews have their own summary cards on the page
+    if (!main || !WORK_ORDER_PATH.test(location.pathname) || /^\/entry-writer-queue\/DUTY_DISPUTE/.test(location.pathname)) { undoGlance(); return; }
+    const g0 = desk.glance();
+    const g = g0 && (g0.tracking || g0.entryNo || g0.items.length) ? g0 : null;
+    const secs = pageSections(main);
+    if (!g && !secs.length) return;
+    const page = main.firstElementChild;
+    if (!page) return;
+    const card = glanceHost('zt-glance');
+    const bar = glanceHost('zt-jump', true);
+    // An answer saved for this order in Tools (its one sentence)
+    const wo = WORK_ORDER_PATH.exec(location.pathname);
+    const saved = wo ? visibleAnswers(loadNotes(`wo_${caseIdOf(decodeURIComponent(wo[2]))}`))[0] : null;
+    const said = saved && finalSentence(saved.text);
+    const sig = JSON.stringify([g, secs.map(b => [clean(b.textContent), b.getAttribute('aria-expanded')]), said, card.dataset.theme]);
+    if (sig !== glanceSig || !card.isConnected || !bar.isConnected) {
+      glanceSig = sig;
+      if (g) {
+        const due = g.due ? Date.parse(g.due) : 0;
+        const late = due && due < Date.now();
+        const fact = (k, v, mono) => (v ? h('div', {}, h('dt', { text: k }), h('dd', { class: mono ? 'mono' : '', text: v })) : null);
+        card.shadowRoot.querySelector('.in').replaceChildren(h('div', { class: 'g' },
+          h('div', { class: 'top' },
+            h('span', { class: 'kicker', text: `At a glance · ${g.kind}` }),
+            h('span', { class: 'who' },
+              g.holder ? ['Held by ', h('b', { text: g.holder })] : 'Unclaimed',
+              due ? [' · due ', h('span', { class: late ? 'late' : '', text: `${new Date(due).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}${late ? ` (${ageText(due)} overdue)` : ''}` })] : null,
+              g.escalatedTo ? ` · escalated to ${human2(g.escalatedTo)}` : null,
+              g.status === 'WAITING' ? ' · waiting' : null)),
+          h('dl', { class: 'grid' },
+            fact('Tracking', g.tracking, true), fact('Entry', g.entryNo, true), fact('Master bill', g.mbol, true),
+            fact('Ship-from → US', g.shipFrom ? `${regionName(g.shipFrom)} → United States` : ''), fact('Port of entry', g.port, true),
+            fact('Carrier · mode', [g.carrier, g.mode].filter(Boolean).join(' · ')), fact('Arrival', g.arrival), fact('Declared value', g.declared),
+            fact('Consignee', g.consignee && [g.consignee.name, g.consignee.place].filter(Boolean).join(' · ')),
+            fact('Shipper', g.shipper && [g.shipper.name, g.shipper.place].filter(Boolean).join(' · '))),
+          g.items.length ? h('table', {},
+            h('thead', {}, h('tr', {}, h('th', { text: `Items (${g.items.length + g.moreItems})` }), h('th', { text: 'HS code' }), h('th', { text: 'Origin' }), h('th', { class: 'num', text: 'Qty' }), h('th', { class: 'num', text: 'Value' }))),
+            h('tbody', {}, g.items.map(it => h('tr', {}, h('td', { text: it.d || '—' }), h('td', { class: 'mono', text: tidyCode(it.hs) || it.hs || '—' }),
+              h('td', { text: it.coo ? regionName(it.coo) : '—' }), h('td', { class: 'num', text: it.q ?? '—' }), h('td', { class: 'num', text: it.v || '—' }))))) : null,
+          g.moreItems ? h('p', { class: 'more', text: `…and ${g.moreItems} more on the page.` }) : null,
+          said ? h('div', { class: 'answer' }, h('small', { text: `Researched · ${shortDate(saved.createdAt)}` }), said) : null));
+      } else card.shadowRoot.querySelector('.in').replaceChildren();
+      // One chip per section; items with their own fold ("thread · 5204.20.0000") are one Items chip, to the first
+      const chips = [];
+      for (const b of secs) {
+        let t = clean(b.textContent);
+        if (t.length % 2 === 0 && t.slice(0, t.length / 2) === t.slice(t.length / 2)) t = t.slice(0, t.length / 2);   // "ConsigneeConsignee"
+        if (/ · /.test(t)) {
+          const it = chips.find(c => c.items);
+          if (it) it.n = String(+it.n + 1); else chips.push({ b, name: 'Items', n: '1', items: true });
+        } else {
+          const n = (t.match(/(\d+)$/) || [])[1];
+          chips.push({ b, name: n ? t.slice(0, -n.length).trim() : t, n });
+        }
+      }
+      bar.shadowRoot.querySelector('.in').replaceChildren(chips.length ? h('div', { class: 'bar' }, h('span', { text: 'Jump to' }),
+        chips.map(({ b, name, n }) => {
+          const open = b.getAttribute('aria-expanded') === 'true';
+          return h('button', { type: 'button', class: open ? '' : 'folded', title: open ? `Go to ${name}` : `${name} is folded: open it and go there`,
+            onclick: () => { if (b.getAttribute('aria-expanded') === 'false') b.click(); setTimeout(() => b.scrollIntoView({ block: 'start', behavior: 'smooth' }), 60); } },
+            name, n ? h('i', { text: n }) : null);
+        })) : '');
+      // Stuck at the very top of the scrolling area, over its top padding, so nothing shows through above it
+      let sc = main;
+      while (sc && !/auto|scroll/.test(getComputedStyle(sc).overflowY)) sc = sc.parentElement;
+      const pt = sc ? parseFloat(getComputedStyle(sc).paddingTop) || 0 : 0;
+      bar.style.top = `-${pt}px`;
+      bar.style.paddingTop = `${pt}px`;
+      bar.style.marginTop = `-${pt}px`;
+      if (card.parentElement !== page || page.firstElementChild !== card) page.prepend(card);
+      if (bar.previousElementSibling !== card) card.after(bar);
+    }
+    // The long, rarely needed sections start folded, once each time an order opens
+    if (glanceFolded !== location.pathname && secs.length) {
+      glanceFolded = location.pathname;
+      for (const b of secs) {
+        const t = clean(b.textContent);
+        const box = b.closest('section, [class*="rounded"]') || b.parentElement;
+        const fold = /^(Parties|Status history)/i.test(t) || (/^Handling units\s*0$/i.test(t))
+          || (/^Landed cost/i.test(t) && /not yet assessed/i.test(box?.textContent || '') && !/\$\d/.test((box?.textContent || '').replace(/Landed cost est\.\s*—/, '')));
+        if (fold && b.getAttribute('aria-expanded') === 'true') b.click();
+      }
+    }
+  }
+  function undoGlance() {
+    document.getElementById('zt-glance')?.remove();
+    document.getElementById('zt-jump')?.remove();
+    glanceSig = '';
   }
   function undoReadable() {
     for (const g of document.querySelectorAll('.zt-meta, .zt-plain')) g.remove();
@@ -6812,6 +7033,18 @@
     .order-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
     .order-q { margin: 0 0 4px; font-weight: 600; }
     .order-links { margin-top: 8px; display: grid; gap: 4px; }
+    .rt > .section + .section { padding-top: 14px; border-top: 1px solid var(--line); }
+    .rt-sub { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+    .rt-problem { margin-top: 8px; padding: 8px 10px; border-radius: 7px; background: rgba(220,38,38,.07); border: 1px solid rgba(220,38,38,.25); }
+    .rt-line { margin-top: 4px; font-size: 12.5px; overflow-wrap: anywhere; }
+    .rt-line small { display: block; font-size: 11.5px; color: var(--muted); }
+    .rt-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; }
+    .rt-chips .rt-sub { margin-right: 2px; }
+    .chip.rt-code { cursor: pointer; font-family: ui-monospace, Consolas, monospace; color: var(--accent); border-color: currentColor; background: none; }
+    .rt-extras .rt-fold { margin-bottom: 6px; }
+    .rt-fold > summary { gap: 8px; }
+    .rt-fold > summary::after { margin-left: 0; }
+    .rt-meta { margin-left: auto; font-size: 11.5px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--muted); }
     .reply-ready summary { cursor: pointer; font-size: 12px; color: var(--muted); }
     .answer-card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
     .answer-card.theirs { border-left: 3px solid var(--accent); }
@@ -7066,6 +7299,14 @@
       class: 'flex w-full items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors',
       style: 'border-color:#f59e0b;color:#ffffff;background:#d97706;font-weight:600;cursor:pointer;margin-bottom:6px',
       onclick: () => quickResearch() }, h('span', { 'aria-hidden': 'true', text: '✦' }), h('span', { text: 'Research' }));
+    // Normal | Advanced, on dispute and order pages when turned on under Settings > Panel and pages
+    const viewBtn = (adv, label, title) => h('button', { type: 'button', 'data-adv': String(adv), title,
+      style: 'flex:1;padding:5px 0;border:0;font:600 12.5px system-ui,sans-serif;cursor:pointer;background:transparent;color:#b45309',
+      onclick: () => { setAdvancedView(adv); placeQuick(); if (state && !panel.hidden) render(); } }, label);
+    const sideView = h('div', { id: 'zt-side-view', role: 'group', 'aria-label': 'Page view',
+      style: 'display:none;margin-bottom:6px;border:1px solid #f59e0b;border-radius:6px;overflow:hidden' },
+      viewBtn(false, 'Normal', "The portal's pages and the Research tab as they usually are"),
+      viewBtn(true, 'Advanced', "An At a glance summary and a Jump to bar on order pages, and the Research tab with what's wrong first"));
     const sideStatus = h('div', { id: 'zt-side-status', role: 'status', hidden: true, style: 'font-size:12px;line-height:1.35;margin:0 2px 6px;color:#b45309' });
     let quickBusy = false;
     let quietOpen = false;   // open() reads the page without showing the panel
@@ -7097,7 +7338,7 @@
       let m = location.pathname.match(/^\/duty-disputes\/(duty_dispute_(?!item_)[A-Za-z0-9]+)/);
       if (m) return { id: m[1] };
       m = location.pathname.match(/^\/entry-writer-queue\/[A-Z][A-Z_]+\/([^/?#]+)/);
-      return m ? { id: decodeURIComponent(m[1]) } : null;
+      return m ? { id: caseIdOf(decodeURIComponent(m[1])) } : null;
     };
     async function quickResearch() {
       if (quickBusy) return;
@@ -7137,8 +7378,16 @@
       const title = quickTitle();
       sideQuick.hidden = !show;
       if (sideQuick.title !== title) sideQuick.title = title;
+      sideView.style.display = isCasePage() && GM_getValue(VIEW_SWITCH_KEY, false) ? 'flex' : 'none';
+      const adv = advancedView();
+      for (const b of sideView.children) {
+        const on = (b.dataset.adv === 'true') === adv;
+        b.setAttribute('aria-pressed', String(on));
+        b.style.background = on ? '#f59e0b' : 'transparent';
+        b.style.color = on ? '#ffffff' : '#b45309';
+      }
     }
-    const sideWrap = h('div', { class: 'px-2 pb-2', id: 'zt-side-wrap' }, sideStatus, sideQuick, sideBtn);
+    const sideWrap = h('div', { class: 'px-2 pb-2', id: 'zt-side-wrap' }, sideStatus, sideView, sideQuick, sideBtn);
     // (runs every second: when the button is already in place by References, nothing is looked for)
     let refHolder = null;
     function placeLauncher() {
@@ -8179,8 +8428,12 @@
           h('option', { value: 'portal', text: "Default Portal: the portal's own queue", selected: queueView() === 'portal' }),
           h('option', { value: 'classic', text: 'Portal+: the portal\'s queue in one sortable list, with search, one-click claim and bulk actions', selected: queueView() === 'classic' }),
           h('option', { value: 'tools', text: 'Advanced View: dense, with summaries, grouping and saved views', selected: queueView() === 'tools' }))),
+      check('Hide escalated orders in the work queue (they still show on its Escalated and All work orders tabs, and in a search)', hideEscalated(), on => { GM_setValue(HIDE_ESC_KEY, on); queueCtl?.refreshView(); }),
       check("Quote tab: use my duty calculator (Entry Assistant) instead of the portal's quoter, filled in from the order, with its questions to answer", dutyCalcOn(), on => { GM_setValue(DUTY_CALC_KEY, on); refreshTools(); }),
       check('Easier-to-read order pages (labeled details, CBP messages in plain English)', GM_getValue(READABLE_KEY, false), on => { GM_setValue(READABLE_KEY, on); if (on) makeReadable(); else undoReadable(); }),
+      check('Order pages: an "At a glance" summary at the top, a bar to jump between sections, and long sections folded', GM_getValue(GLANCE_KEY, false), on => { GM_setValue(GLANCE_KEY, on); if (on) orderGlance(); else undoGlance(); }),
+      check("Research tab, reorganized: what's wrong with the order first, then the answer, with Links, Comments and writing the answer yourself folded at the bottom", GM_getValue(TIDY_RESEARCH_KEY, false), on => { GM_setValue(TIDY_RESEARCH_KEY, on); refreshTools(); }),
+      check('A Normal | Advanced switch above Tools on dispute and order pages (Advanced turns on both of the two above; Normal turns them off)', GM_getValue(VIEW_SWITCH_KEY, false), on => { GM_setValue(VIEW_SWITCH_KEY, on); placeLauncher(); }),
       check("Hide the portal's own Classify / Quote rail", GM_getValue(HIDE_RAIL_KEY, false), on => { GM_setValue(HIDE_RAIL_KEY, on); refreshTools(); }),
       check('Denied-party reviews: "Listed on" opens the official list (and copies the name) instead of a Google search', GM_getValue(LIST_LINKS_KEY, false), on => { GM_setValue(LIST_LINKS_KEY, on); fixListLinks(); }),
       check("Clicking an HS code on the page opens it in the Entry Assistant tab (off: the portal's own References window)", GM_getValue(ENTRY_CLICKS_KEY, false), on => GM_setValue(ENTRY_CLICKS_KEY, on)),
@@ -8691,6 +8944,8 @@
       body.replaceChildren(h('p', { class: 'muted', text: 'Reading the order…' }));
       await waitFor(() => document.querySelector('main section h2, main h1, main button[title="Look up in the HTS"]'));
       if (path !== location.pathname) return;
+      const wm = WORK_ORDER_PATH.exec(path);
+      if (wm?.[1] === 'ADCVD_REVIEW' && /^\d+$/.test(wm[2])) await waitFor(() => caseIdOf(wm[2]) !== wm[2], { timeout: 6000 });
       const data = await readWorkOrderOpen();
       // A duty dispute review from the queue is a dispute too: load its questionnaire answers for the prompt
       if (data?.type === 'DUTY_DISPUTE_REVIEW' && /^duty_dispute_/.test(data.workOrderId) && programsFor !== data.workOrderId) await loadPrograms(data.workOrderId);
@@ -8989,17 +9244,43 @@
       const latest = isOrder && answers.find(a => decisionOf(a.text));
       const latestDecision = latest && decisionOf(latest.text);
       const latestNote = latest && noteOf(latest.text);
+      const tidy = GM_getValue(TIDY_RESEARCH_KEY, false);
+      rest.className = tidy ? 'rt' : '';
+      // What's wrong with the order, from the portal's data (its rejections, else its detail), in plain English too
+      const problems = isOrder && tidy ? (() => {
+        const facts = desk.caseFacts();
+        const rej = facts.filter(l => /^Rejection: /.test(l)).map(l => l.replace(/^Rejection: /, ''));
+        // The detail's own lines, without the tracking number and the item list (they're elsewhere)
+        const det = facts.filter(l => /^Detail: /.test(l)).map(l => l.replace(/^Detail: /, '')).join('\n').split('\n').map(clean)
+          .filter(l => l && !/^(Tracking\b|Items:?$|- )/.test(l));
+        return [...new Set([...rej, ...(rej.length ? [] : det.slice(0, 3))])].slice(0, 4);
+      })() : [];
+      // Without a CBP rejection, the page's own one-line problem leads ("Quote blocked on an AD/CVD case…")
+      const leadLine = isOrder && tidy && d.summary && !problems.some(t => /^\d{2,3}\b/.test(t)) ? d.summary : '';
+      const plainOf = t => { const m = t.replace(/\s*\(CBP [^)]*\)$/, '').match(/(?:^|\s)(\d{2,3})\s*[—–-]?\s*([A-Z0-9][A-Z0-9/&().,' -]{6,})/); return m && m[2].replace(/[^A-Z]/g, '').length >= 8 ? plainEnglish(m[2].trim()) : ''; };
       const orderSection = isOrder && h('div', { class: 'section' },
-        h('p', { class: 'label', text: d.label }),
-        h('div', { class: 'order-card' },
+        h('p', { class: 'label', text: tidy ? `The order · ${d.label}` : d.label }),
+        !tidy ? h('div', { class: 'order-card' },
           d.question && h('p', { class: 'order-q', text: d.question }),
           d.summary && h('p', { class: 'hint', style: 'margin:0', text: d.summary }),
           d.choices.length > 0 && h('p', { class: 'hint', text: `Choices on the page: ${d.choices.map(c => c.label).join(' · ')}` }),
           latestDecision && h('p', { class: 'verdict', style: 'margin-top:8px', text: `Decision: ${latestDecision.decision} · ${latest.author} · ${shortDate(latest.createdAt)}` }),
-          latestNote && noteLink(`Copy the ${guideFor(d.type).note.toLowerCase()}`, () => copyNote(latestNote))),
-        (d.pair.length === 2 || d.codes.length > 0) && h('div', { class: 'order-links' },
+          latestNote && noteLink(`Copy the ${guideFor(d.type).note.toLowerCase()}`, () => copyNote(latestNote))) : null,
+        !tidy && (d.pair.length === 2 || d.codes.length > 0) && h('div', { class: 'order-links' },
           d.pair.length === 2 && h('div', {}, noteLink(`Compare ${d.pair[0]} with ${d.pair[1]} in Entry Assistant`, () => showEntry({ codes: d.pair, from: d.pairFrom }))),
           d.codes.slice(0, 4).map(c => h('div', {}, noteLink(`Look up ${c.code}${c.from ? ` (made in ${regionName(c.from)})` : ''} in Entry Assistant`, () => showEntry({ codes: [c.code], from: c.from }))))),
+        tidy && h('div', { class: 'order-card' },
+          d.question && h('p', { class: 'order-q', text: d.question }),
+          leadLine && h('p', { style: 'margin:6px 0 0;font-size:13px', text: leadLine }),
+          problems.length > 0 && h('div', { class: 'rt-problem' },
+            h('p', { class: 'rt-sub', text: "What's wrong" }),
+            problems.map(t => h('div', { class: 'rt-line' }, h('span', { text: t }), plainOf(t) ? h('small', { text: plainOf(t) }) : null))),
+          d.choices.length > 0 && h('div', { class: 'rt-chips' }, h('span', { class: 'rt-sub', text: 'On the page:' }), d.choices.map(c => h('span', { class: 'chip', text: c.label, title: c.hint || '' }))),
+          latestDecision && h('p', { class: 'verdict', style: 'margin-top:8px', text: `Decision: ${latestDecision.decision} · ${latest.author} · ${shortDate(latest.createdAt)}` }),
+          latestNote && noteLink(`Copy the ${guideFor(d.type).note.toLowerCase()}`, () => copyNote(latestNote)),
+          (d.pair.length === 2 || d.codes.length > 0) && h('div', { class: 'rt-chips' }, h('span', { class: 'rt-sub', text: 'Codes:' }),
+            d.pair.length === 2 && h('button', { class: 'chip rt-code', type: 'button', text: `${d.pair[0]} vs ${d.pair[1]}`, title: 'Compare in Entry Assistant', onclick: () => showEntry({ codes: d.pair, from: d.pairFrom }) }),
+            d.codes.slice(0, 6).map(c => h('button', { class: 'chip rt-code', type: 'button', text: `${c.code}${c.from ? ` · ${c.from}` : ''}`, title: `Look up ${c.code}${c.from ? ` (made in ${regionName(c.from)})` : ''} in Entry Assistant`, onclick: () => showEntry({ codes: [c.code], from: c.from }) })))),
         !d.hasShipper && /HS_CODE|VALUE|DENIED/.test(d.type) && h('p', { class: 'hint', text: 'Open Parties and Items on the page before you send, so Claude gets the shipper and every line.' }),
         !WORK_ORDER_GUIDES[d.type] && h('p', { class: 'hint warn', text: `No research guide for ${d.label} yet, so Claude gets the page with a general brief.` }));
       const tokenHint = !entryToken() && h('p', { class: 'hint warn' },
@@ -9033,8 +9314,15 @@
       for (const [el, v] of [[frontIn, known.front], [slackIn, known.slack], [chatIn, known.chat || GM_getValue(CHAT_URL_PREFIX + d.disputeId, '')]]) {
         if (v && !el.value && root.activeElement !== el) el.value = v;   // what's known, without overwriting your typing
       }
-      const linksSection = h('div', { class: 'section' },
-        h('p', { class: 'label', text: 'Links' }),
+      // Folded extras at the bottom, each saying what's in it; open or shut is remembered
+      const FOLDS_KEY = 'zt:researchFolds';
+      const folds = GM_getValue(FOLDS_KEY, {});
+      const fold = (key, title, meta, openByDefault, ...kids) => h('details', { class: 'group setting rt-fold', open: folds[key] ?? openByDefault,
+        ontoggle: e => { const all = GM_getValue(FOLDS_KEY, {}); all[key] = e.currentTarget.open; GM_setValue(FOLDS_KEY, all); } },
+        h('summary', {}, h('span', { class: 'label', style: 'margin:0', text: title }), meta ? h('span', { class: 'rt-meta', text: meta }) : null),
+        h('div', { class: 'setting-body' }, kids));
+      const linksSection = h('div', { class: tidy ? '' : 'section' },
+        !tidy && h('p', { class: 'label', text: 'Links' }),
         h('div', { class: 'row' }, frontIn),
         h('div', { class: 'row', style: 'margin-top:6px' }, slackIn),
         h('div', { class: 'row', style: 'margin-top:6px' }, chatIn),
@@ -9069,10 +9357,11 @@
         s.commentNote = h('p', { class: 'hint' });
       }
       const list = comments?.list || [];
-      const commentSection = h('div', { class: 'section' },
-        h('div', { class: 'row', style: 'align-items:baseline' },
-          h('p', { class: 'label', style: 'margin:0', text: `Comments${list.length ? ` (${list.length})` : ''}` }),
-          desk.tracking() && h('span', { style: 'margin-left:auto' }, noteLink('Refresh', () => desk.loadComments()))),
+      const commentSection = h('div', { class: tidy ? '' : 'section' },
+        tidy ? desk.tracking() && h('div', { class: 'row', style: 'justify-content:flex-end' }, noteLink('Refresh', () => desk.loadComments()))
+          : h('div', { class: 'row', style: 'align-items:baseline' },
+            h('p', { class: 'label', style: 'margin:0', text: `Comments${list.length ? ` (${list.length})` : ''}` }),
+            desk.tracking() && h('span', { style: 'margin-left:auto' }, noteLink('Refresh', () => desk.loadComments()))),
         comments?.state === 'loading' ? h('p', { class: 'hint', text: 'Loading the comments on this case…' })
           : comments?.state === 'error' ? h('p', { class: 'hint err', text: `Couldn't read the comments: ${comments.error}` })
           : comments?.state === 'off' ? h('p', { class: 'hint', text: 'Set up the Google Sheet (Settings) to see and post comments on the case.' })
@@ -9096,8 +9385,8 @@
         setStatus(desk.tracking() && !desk.dryRun() ? `Saved to ${trackedIn}.` : `Saved on this computer (${desk.tracking() ? 'test mode' : `${trackedIn} isn't set up`}).`, 'ok');
         render();
       };
-      const detailsSection = h('div', { class: 'section' },
-        h('p', { class: 'label', text: 'The answer we found' }),
+      const detailsSection = h('div', { class: tidy ? '' : 'section' },
+        !tidy && h('p', { class: 'label', text: 'The answer we found' }),
         foundIn,
         h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => run(saveDetails) })),
         h('p', { class: 'hint', text: !desk.tracking() ? 'Saved on this computer.'
@@ -9105,12 +9394,18 @@
 
       desk.setPageData(d);
       const deskCard = desk.card(noteLink);
+      const linkCount = [frontIn, slackIn, chatIn].filter(i => clean(i.value)).length;
+      const extras = tidy && h('div', { class: 'section rt-extras' },
+        fold('found', 'Write the answer yourself', 'saved to the case with your name', false, detailsSection),
+        fold('links', 'Links', linkCount ? `${linkCount} of 3 saved` : 'Front, Slack, AI chat', false, linksSection),
+        fold('comments', 'Comments', comments?.state === 'loading' ? 'loading…' : list.length ? `${list.length} comment${list.length === 1 ? '' : 's'}` : 'none yet', list.length > 0, commentSection));
       if (isOrder) {
-        rest.replaceChildren(...[deskCard, linksSection, commentSection, orderSection, answerSection, detailsSection, tokenHint].filter(Boolean));
+        rest.replaceChildren(...(tidy ? [deskCard, orderSection, answerSection, tokenHint, extras]
+          : [deskCard, linksSection, commentSection, orderSection, answerSection, detailsSection, tokenHint]).filter(Boolean));
       } else rest.replaceChildren(...[
         deskCard,
-        linksSection,
-        commentSection,
+        !tidy && linksSection,
+        !tidy && commentSection,
         h('div', { class: 'section' },
           h('p', { class: 'label', text: 'Lines to research' }),
           inDispute.length > 0
@@ -9128,8 +9423,9 @@
         docsBlock,
         valueHint,
         answerSection,
-        detailsSection,
+        !tidy && detailsSection,
         tokenHint,
+        extras,
       ].filter(Boolean));
 
       body.scrollTop = scroll;
@@ -9337,6 +9633,7 @@
     const onRoute = () => {
       ui?.keepAttached();
       if (GM_getValue(READABLE_KEY, false)) makeReadable();
+      if (GM_getValue(GLANCE_KEY, false)) orderGlance();
       fixListLinks();
       showPrograms();
       if (onQueuePage()) { queue = queue || createQueue(); queue.mount(); }
