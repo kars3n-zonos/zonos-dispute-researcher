@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.49.0
+// @version      7.50.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3458,7 +3458,9 @@
       return decodeURIComponent(c || l || 'live').replace(/"/g, '') === 'test' ? 'test' : 'live';
     }
     // `headers` adds to the portal's own, e.g. x-act-as-org: some calls answer only on behalf of the order's company
-    async function gql(op, query, variables = {}, headers = {}) {
+    // The portal's answer as it is: its data and its errors (an answer can carry both, which the portal itself reads as
+    // field errors on data that's there)
+    async function gqlLoose(op, query, variables = {}, headers = {}) {
       const res = await W.fetch(`/api/graphql/brokerage/${op}`, {
         method: 'POST', credentials: 'include',
         headers: { 'content-type': 'application/json', 'x-app-mode': mode(), ...headers },
@@ -3466,9 +3468,14 @@
       });
       let j = null;
       try { j = await res.json(); } catch { /* not JSON */ }
-      if (j?.errors?.length) throw new Error(j.errors.map(e => e.message).join('; '));
-      if (!res.ok || !j?.data) throw new Error(`The portal answered ${res.status}.`);
-      return j.data;
+      if (!j?.data && !j?.errors?.length) throw new Error(`The portal answered ${res.status}.`);
+      return { data: j?.data || null, errors: (j?.errors || []).map(e => e.message).filter(Boolean), status: res.status };
+    }
+    async function gql(op, query, variables = {}, headers = {}) {
+      const { data, errors, status } = await gqlLoose(op, query, variables, headers);
+      if (errors.length) throw new Error(errors.join('; '));
+      if (!data) throw new Error(`The portal answered ${status}.`);
+      return data;
     }
     let session = null;
     async function me() {
@@ -3575,7 +3582,7 @@
       return { done, failed };
     }
 
-    return { mode, gql, me, workOrders, search, orgNames, orgs, act };
+    return { mode, gql, gqlLoose, me, workOrders, search, orgNames, orgs, act };
   })();
 
   /* ------------------------------------------------- dashboard: the work queue */
@@ -4704,6 +4711,9 @@
         h('span', { class: 'sel-n', text: `${sel.length} selected` }),
         batchUnlocked() ? null : h('span', { class: 'muted', style: 'font-size:12px', text: 'Acting on many at once needs the access code (Tools ⚙ Settings).' }),
         batchUnlocked() && sel.some(r => r.type === 'DUTY_DISPUTE_REVIEW' && !r.closed)
+          ? h('button', { class: 'btn small', type: 'button', text: 'Decide by reason',
+            title: "Accept or deny every claim on the selected disputes whose merchant gave the exact same reason on every line, with one note", onclick: () => runDecideByReason() }) : null,
+        batchUnlocked() && sel.some(r => r.type === 'DUTY_DISPUTE_REVIEW' && !r.closed)
           ? h('button', { class: 'btn small primary', type: 'button', text: `Submit (${sel.filter(r => r.type === 'DUTY_DISPUTE_REVIEW' && !r.closed).length})`,
             title: 'Submit the selected duty disputes with the decisions already saved on them, the same as the Submit button on each dispute', onclick: () => runSubmit() }) : null,
         batchUnlocked() && sel.some(r => r.type === 'ENTRY_REJECTED')
@@ -4904,6 +4914,22 @@
     document.addEventListener('keydown', onKey, true);
     document.addEventListener('click', () => { if (S.pop) { S.pop = ''; render(); } });
 
+    // The outcome of a bulk run, order by order: what worked, what didn't and why, each opening its page
+    function resultsDialog(title, items) {
+      const bad = items.filter(x => !x.ok);
+      const warn = items.filter(x => x.ok && x.note);
+      const line = x => h('div', { style: 'margin:3px 0' }, h('a', { href: x.url, target: '_blank', rel: 'noopener', text: x.ref, style: 'color:var(--accent)' }),
+        ` · ${x.ok ? (x.note || 'done') : x.error}`);
+      const scrim = h('div', { class: 'scrim', onclick: e => { if (e.target === scrim) scrim.remove(); } },
+        h('div', { class: 'dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+          h('h2', { text: title }),
+          h('p', { text: `${items.length - bad.length} of ${items.length} done${bad.length ? `, ${bad.length} not` : ''}.` }),
+          bad.length ? [h('label', { class: 'f', text: `Not done (${bad.length})` }), h('div', { class: 'list' }, bad.map(line))] : null,
+          warn.length ? [h('label', { class: 'f', text: `Done, with a note (${warn.length})` }), h('div', { class: 'list' }, warn.map(line))] : null,
+          h('div', { class: 'actions' }, bad.length ? h('button', { class: 'btn', type: 'button', text: 'Copy the list', onclick: () => copy(bad.map(x => `${x.ref}: ${x.error}`).join('\n'), 'Copied.') }) : null,
+            h('button', { class: 'btn primary', type: 'button', text: 'Close', onclick: () => scrim.remove() }))));
+      root.append(scrim);
+    }
     function toast(text, err = false) {
       root.querySelector('.toast')?.remove();
       const t = h('div', { class: `toast${err ? ' err' : ''}`, role: 'status', text });
@@ -5004,16 +5030,144 @@
           const bad = new Set(res.failed.map(fl => fl.id));
           for (const c of toClaim) if (bad.has(c.r.id)) todo.splice(todo.indexOf(c), 1);
         }
-        let done = 0, n = 0;
+        const results = failed.map(t => { const [ref, ...why] = t.split(': '); const c = checked.find(x => x.r.ref === ref); return { ref, url: c?.r.url || '', ok: false, error: why.join(': ') }; });
+        let n = 0;
         for (const c of todo) {
           msg.textContent = `Submitting ${++n} of ${todo.length}…`;
-          try { await completeDispute(c.d.id, c.d.organizationId); done++; }
-          catch (e) { failed.push(`${c.r.ref}: ${e.message}`); }
+          const r = await submitDispute(c.d.id, c.d.organizationId);
+          results.push({ ref: c.r.ref, url: c.r.url, ...r });
           bar.firstChild.style.width = `${Math.round(n / todo.length * 100)}%`;
         }
         scrim.remove();
         S.sel.clear();
-        toast(`Submitted ${done} duty dispute${done === 1 ? '' : 's'}.${failed.length ? `\n${failed.length} failed:\n${failed.slice(0, 6).join('\n')}${failed.length > 6 ? '\n…' : ''}` : ''}`, failed.length > 0);
+        resultsDialog('Submitted', results);
+        load({ quiet: true });
+      });
+    }
+    // Decide by reason: the selected disputes are read, and every distinct reason a merchant gave is offered. Picking one
+    // takes only the disputes whose every claim, on every line, gives exactly that reason (as written, spacing aside),
+    // and decides all their claims the same way with your note (accepted as the merchant proposed), then can submit them.
+    function runDecideByReason() {
+      if (!batchUnlocked()) return;
+      const me = S.me?.id;
+      const rows = selectedRows().filter(r => r.type === 'DUTY_DISPUTE_REVIEW' && !r.closed);
+      const mode = portal.mode();
+      const reasons = h('div', { class: 'list', style: 'max-height:200px' }, h('div', { class: 'muted', text: `Reading ${rows.length} dispute${rows.length === 1 ? '' : 's'}…` }));
+      const which = h('div', { class: 'list', hidden: true });
+      const verdict = h('select', { 'aria-label': 'Decision' }, h('option', { value: 'ACCEPTED', text: 'Accept every claim (as the merchant proposed)' }), h('option', { value: 'DENIED', text: 'Deny every claim' }));
+      const note = h('textarea', { 'aria-label': 'Note', placeholder: 'Required: the note saved on every claim' });
+      const submitToo = h('input', { type: 'checkbox', checked: true });
+      const claimFirst = h('input', { type: 'checkbox', checked: true });
+      const claimRow = h('label', { style: 'display:flex;gap:6px;align-items:center;margin-top:6px', hidden: true }, claimFirst, h('span'));
+      const bar = h('div', { class: 'progress', hidden: true }, h('div'));
+      const msg = h('p', { class: 'muted' });
+      const go = h('button', { class: 'btn primary', type: 'button', text: 'Decide', disabled: true });
+      const cancel = h('button', { class: 'btn', type: 'button', text: 'Cancel', onclick: () => scrim.remove() });
+      const scrim = h('div', { class: 'scrim', onclick: e => { if (e.target === scrim) scrim.remove(); } },
+        h('div', { class: 'dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Decide by reason' },
+          h('h2', { text: 'Decide by the merchant\'s reason' }),
+          h('p', {}, 'In ', h('span', { class: `mode ${mode}`, text: mode.toUpperCase() }), " mode. Pick the reason: only disputes that give exactly that reason on every claim, on every line, are decided."),
+          h('label', { class: 'f', text: 'The reason' }), reasons,
+          which,
+          h('label', { class: 'f', text: 'Decision' }), verdict,
+          h('label', { class: 'f', text: 'Note (on every claim)' }), note,
+          h('label', { style: 'display:flex;gap:6px;align-items:center;margin-top:8px' }, submitToo, 'Submit them after deciding (the same as each one\'s Submit button)'),
+          claimRow, msg, bar,
+          h('div', { class: 'actions' }, cancel, go)));
+      root.append(scrim);
+      let read = [];
+      let picked = '';
+      const matching = () => read.filter(x => x.ok && x.reasons.length === 1 && x.reasons[0] === picked);
+      const draw = () => {
+        const m = matching();
+        which.hidden = !picked;
+        if (picked) {
+          const left = read.filter(x => !m.includes(x));
+          which.replaceChildren(h('div', { style: 'font-weight:600;margin-bottom:4px', text: `${m.length} dispute${m.length === 1 ? '' : 's'} (${m.reduce((a, x) => a + x.claims.length, 0)} claims on ${m.reduce((a, x) => a + x.lines, 0)} lines) give only this reason` }),
+            ...m.map(x => h('div', { text: `✓ ${x.r.ref} · ${x.r.customer || x.r.consignee || ''} · ${x.lines} line${x.lines === 1 ? '' : 's'}, ${x.claims.length} claim${x.claims.length === 1 ? '' : 's'} (${[...new Set(x.claims.map(c => CLAIM_TYPE_LABELS[c.type] || human2(c.type)))].join(', ')})${x.r.assigneeId ? '' : ' · unclaimed'}` })),
+            ...left.map(x => h('div', { class: 'muted', text: `– ${x.r.ref} · skipped: ${!x.ok ? x.why : x.reasons.length > 1 ? `gives ${x.reasons.length} different reasons` : 'gives another reason'}` })));
+        }
+        const unclaimed = m.filter(x => !x.r.assigneeId);
+        claimRow.hidden = !unclaimed.length;
+        claimRow.lastChild.textContent = `Claim the ${unclaimed.length} unclaimed first (deciding needs the order to be yours)`;
+        const n = m.filter(x => x.r.assigneeId || claimFirst.checked).length;
+        go.textContent = n ? `${verdict.value === 'DENIED' ? 'Deny' : 'Accept'} ${n}${submitToo.checked ? ' and submit' : ''}` : 'Decide';
+        go.disabled = !n;
+      };
+      [verdict, submitToo, claimFirst].forEach(el => el.addEventListener('change', draw));
+      (async () => {
+        const out = [];
+        for (let i = 0; i < rows.length; i += 6) {
+          await Promise.all(rows.slice(i, i + 6).map(async r => {
+            const x = { r, ok: false, reasons: [], claims: [] };
+            if (r.assigneeId && r.assigneeId !== me) { x.why = `${r.assigneeName || 'someone else'} holds it`; out.push(x); return; }
+            try {
+              const d = await fetchDispute(r.sid, r.orgId);
+              if (!d) x.why = "couldn't read it";
+              else if (!DECIDABLE.has(d.status)) x.why = `already ${human2(d.status).toLowerCase()}`;
+              else {
+                x.d = d;
+                x.claims = (d.items || []).flatMap(it => it.claims || []);
+                x.lines = (d.items || []).filter(it => it.claims?.length).length;
+                x.reasons = [...new Set(x.claims.map(c => exactText(c.justification)))];
+                if (!x.claims.length) x.why = 'no claims on it';
+                else if (x.reasons.some(t => !t)) x.why = 'a claim has no reason given';
+                else x.ok = true;
+              }
+            } catch (e) { x.why = e.message; }
+            out.push(x);
+          }));
+          reasons.firstChild.textContent = `Reading… ${Math.min(rows.length, i + 6)} of ${rows.length}`;
+        }
+        if (!scrim.isConnected) return;
+        read = rows.map(r => out.find(x => x.r === r)).filter(Boolean);
+        // Each reason that a dispute gives on every one of its claims, with how many disputes give only it
+        const tally = new Map();
+        for (const x of read) if (x.ok && x.reasons.length === 1) tally.set(x.reasons[0], (tally.get(x.reasons[0]) || 0) + 1);
+        const mixed = read.filter(x => x.ok && x.reasons.length > 1).length;
+        if (!tally.size) { reasons.replaceChildren(h('div', { class: 'muted', text: `No selected dispute gives one reason on every claim${mixed ? ` (${mixed} give several different reasons)` : ''}.` })); return; }
+        const opts = [...tally].sort((a, b) => b[1] - a[1]);
+        reasons.replaceChildren(...opts.map(([t, n], k) => h('label', { style: 'display:flex;gap:8px;align-items:flex-start;margin:4px 0;cursor:pointer;color:var(--fg)' },
+          h('input', { type: 'radio', name: 'zt-reason', checked: k === 0, onchange: () => { picked = t; draw(); } }),
+          h('span', {}, h('b', { text: `${n} dispute${n === 1 ? '' : 's'}: ` }), `"${t.length > 400 ? `${t.slice(0, 400)}…` : t}"`))));
+        picked = opts[0][0];
+        msg.textContent = mixed ? `${mixed} selected dispute${mixed === 1 ? ' gives' : 's give'} several different reasons, so ${mixed === 1 ? "it isn't" : "they aren't"} offered.` : '';
+        draw();
+      })();
+      go.addEventListener('click', async () => {
+        const text = note.value.trim();
+        if (!text) { msg.textContent = 'Write the note first: it\'s saved on every claim.'; note.focus(); return; }
+        const todo = matching().filter(x => x.r.assigneeId || claimFirst.checked);
+        if (!confirm(`${verdict.value === 'DENIED' ? 'Deny' : 'Accept'} every claim on ${todo.length} dispute${todo.length === 1 ? '' : 's'}${submitToo.checked ? ' and submit them' : ''}, in ${mode.toUpperCase()} mode?\n\nNote: ${text}`)) return;
+        go.disabled = cancel.disabled = true;
+        bar.hidden = false;
+        const results = [];
+        const toClaim = todo.filter(x => !x.r.assigneeId);
+        if (toClaim.length) {
+          msg.textContent = `Claiming ${toClaim.length}…`;
+          const res = await portal.act('BrokerageWorkOrderClaim', toClaim.map(x => x.r.id));
+          for (const fl of res.failed) {
+            const x = toClaim.find(y => y.r.id === fl.id);
+            results.push({ ref: x?.r.ref || fl.id, url: x?.r.url || '', ok: false, error: `couldn't claim it (${fl.error})` });
+            todo.splice(todo.indexOf(x), 1);
+          }
+        }
+        let n = 0;
+        for (const x of todo) {
+          msg.textContent = `${submitToo.checked ? 'Deciding and submitting' : 'Deciding'} ${++n} of ${todo.length}…`;
+          try {
+            await decideDispute(x.d.id, x.d.organizationId, x.claims.map(c => ({ claimId: c.id, verdict: verdict.value, note: text, adjusted: null })));
+            const back = await fetchDispute(x.d.id, x.d.organizationId);
+            const undecided = (back?.items || []).flatMap(it => it.claims || []).filter(c => c.decision?.verdict !== verdict.value);
+            if (undecided.length) throw new Error(`${undecided.length} claim${undecided.length === 1 ? '' : 's'} didn't take the decision`);
+            if (submitToo.checked) results.push({ ref: x.r.ref, url: x.r.url, ...(await submitDispute(x.d.id, x.d.organizationId)) });
+            else results.push({ ref: x.r.ref, url: x.r.url, ok: true, note: '' });
+          } catch (e) { results.push({ ref: x.r.ref, url: x.r.url, ok: false, error: e.message }); }
+          bar.firstChild.style.width = `${Math.round(n / todo.length * 100)}%`;
+        }
+        scrim.remove();
+        S.sel.clear();
+        resultsDialog(submitToo.checked ? 'Decided and submitted' : 'Decided', results);
         load({ quiet: true });
       });
     }
@@ -5582,6 +5736,24 @@
 
   // The portal's calls for one dispute, on behalf of its company
   const asOrg = org => (org ? { 'x-act-as-org': org } : {});
+  // Submits one dispute (the same request as its own Submit button) and reads it back, since an answer with an error
+  // can still mean it went through (or the reverse): { ok, status, note } or { ok: false, error }. One more try on a failure.
+  async function submitDispute(id, org) {
+    let said = '';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const { errors } = await portal.gqlLoose('BrokerageDutyDisputeComplete', 'mutation BrokerageDutyDisputeComplete($id: ID!) { brokerageDutyDisputeComplete(id: $id) { id status outcome } }', { id }, asOrg(org));
+        said = errors.join('; ');
+      } catch (e) { said = e.message; }
+      const d = await fetchDispute(id, org).catch(() => null);
+      if (d && !DECIDABLE.has(d.status)) {
+        return { ok: true, status: d.status, note: d.status === 'RESOLUTION_FAILED' ? "submitted, but the portal couldn't finish resolving it (Resolution failed): open it to see why"
+          : said ? `submitted; the portal also said: ${said}` : '' };
+      }
+      if (attempt === 0) await sleep(1500);
+    }
+    return { ok: false, error: said || 'the portal kept it under review' };
+  }
   const fetchDispute = (id, org) => portal.gql('BrokerageDutyDispute', `query BrokerageDutyDispute($id: ID!) { brokerageDutyDispute(id: $id) { ${DISPUTE_FIELDS} } }`,
     { id }, asOrg(org)).then(x => x.brokerageDutyDispute);
   const decideDispute = (id, org, claims) => portal.gql('BrokerageDutyDisputeClaimsDecide',
