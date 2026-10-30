@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.32.0
+// @version      7.33.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3393,7 +3393,7 @@
       Object.assign(research, f);
       GM_setValue(`desk:research:${ent.id}`, research);
       if (D.ent === ent) { D.research = research; changed(); }
-      return { requestId: r.requestId, session: f.session, fireError: f.fireError, limited: f.limited, retryAfter: f.retryAfter };
+      return { requestId: r.requestId, session: f.session, fireError: f.fireError, limited: f.limited, retryAfter: f.retryAfter, refused: f.refused };
     }
     // What the cloud session is told (its worker, dispute-desk-cloud's worker.py, takes Google Sheet requests too):
     // the request id, that request's own token and the sheet's web app address
@@ -3415,6 +3415,8 @@
       for (;;) {
         routine = pickRoutine(tried);
         if (!routine) {
+          const bad = refusedRoutines();
+          if (bad.length === routines().length) return { fireError: `Anthropic refused the API token of ${bad.length === 1 ? 'your routine' : `all ${bad.length} of your routines`} (${bad.map(r => r.id.slice(0, 14)).join(', ')}). Make a new token for ${bad.length === 1 ? 'it' : 'each'} in claude.ai and paste it under Tools > Settings > Claude Code research`, refused: true };
           const wait = Math.max(60, Math.round((nextRoom() - Date.now()) / 1000));
           return { fireError: tried.length ? 'every routine refused (over its hourly limit)' : 'every routine is at its hourly limit', limited: true, retryAfter: wait };
         }
@@ -3426,6 +3428,8 @@
             data: JSON.stringify({ text: text || `Research request (Notion task id): ${taskId}` }),
           });
         } catch (e) { return { fireError: e.message }; }
+        // Its token refused: nothing started, so the next routine can try; this one waits for a new token
+        if (r.status === 401 || r.status === 403) { markRefused(routine, r.status); continue; }
         if (r.status !== 429) break;
         coolRoutine(routine.id, Number((String(r.responseHeaders || '').match(/retry-after:\s*(\d+)/i) || [])[1]) || 0);
       }
@@ -6646,17 +6650,23 @@
   function recentFires(routineId) { return fireLog().filter(x => !routineId || x.r === routineId).map(x => x.t); }
   function noteFire(routineId) { GM_setValue(FIRES_KEY, [...fireLog(), { t: Date.now(), r: routineId }]); }
   const cooling = id => (GM_getValue(COOL_KEY, {})[id] || 0) > Date.now();
+  // A routine whose token was refused (401 / 403): left out until its token changes (kept by the token's last characters)
+  const BAD_KEY = 'zt:fires:bad';
+  const tokenTail = t => String(t || '').slice(-6);
+  const refused = r => { const b = GM_getValue(BAD_KEY, {})[r.id]; return !!b && b.tail === tokenTail(r.token); };
+  function markRefused(r, status) { const b = GM_getValue(BAD_KEY, {}); b[r.id] = { tail: tokenTail(r.token), status, at: Date.now() }; GM_setValue(BAD_KEY, b); }
+  const refusedRoutines = () => routines().filter(refused);
   function coolRoutine(id, seconds) { const c = GM_getValue(COOL_KEY, {}); c[id] = Date.now() + (seconds ? seconds * 1000 : 15 * 60000); GM_setValue(COOL_KEY, c); }
   // How many more can start this hour, across every routine
   function fireRoom() {
-    const perRoutine = routines().filter(r => !cooling(r.id)).reduce((a, r) => a + Math.max(0, PER_ROUTINE - recentFires(r.id).length), 0);
+    const perRoutine = routines().filter(r => !cooling(r.id) && !refused(r)).reduce((a, r) => a + Math.max(0, PER_ROUTINE - recentFires(r.id).length), 0);
     return Math.max(0, Math.min(perRoutine, PER_ACCOUNT - recentFires().length));
   }
   const perHour = () => Math.min(PER_ACCOUNT, PER_ROUTINE * Math.max(1, routines().length));
   // The routine with the most room this hour, or null when every one is full or refusing
   function pickRoutine(skip = []) {
     if (recentFires().length >= PER_ACCOUNT) return null;
-    return routines().filter(r => !skip.includes(r.id) && !cooling(r.id) && recentFires(r.id).length < PER_ROUTINE)
+    return routines().filter(r => !skip.includes(r.id) && !cooling(r.id) && !refused(r) && recentFires(r.id).length < PER_ROUTINE)
       .sort((a, b) => recentFires(a.id).length - recentFires(b.id).length)[0] || null;
   }
   // When the next start can go: the soonest a routine frees up
@@ -6728,7 +6738,12 @@
         const late = Date.now() - t.at > BULK_TAB_TIMEOUT;
         if (!r && !late && !t.handle.closed) continue;
         const it = j.items[i];
-        if (r?.limited) {
+        if (r?.refused) {
+          // Every routine's token refused: nothing will start until a new token is pasted, so the run stops here
+          it.state = 'waiting';
+          j.paused = true;
+          j.note = `Paused: ${r.error}. Then press Resume.`;
+        } else if (r?.limited) {
           // Refused, so nothing started: it goes back in line, and nothing more starts until the routine allows it
           it.state = 'waiting';
           j.waitUntil = Date.now() + (r.retryAfter ? r.retryAfter * 1000 : 15 * 60000);
@@ -6833,6 +6848,7 @@
     .an-table .n { text-align: right; font-variant-numeric: tabular-nums; }
     .an-table td:first-child { white-space: normal; min-width: 90px; }
     .an-table tr.me td { background: var(--tint); font-weight: 600; }
+    .extra-routine { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
     a.update-btn { display: block; text-align: center; font-size: 14px; font-weight: 600; padding: 7px 12px; margin: 0 0 14px; border-radius: 8px; text-decoration: none; color: #ffffff; border: 0; }
     a.update-btn .update-sub { display: block; font-size: 11.5px; font-weight: 400; opacity: .92; margin-top: 1px; }
     a.update-btn.ok { background: #15803d; } a.update-btn.new { background: #d97706; } a.update-btn.checking { background: #71717a; }
@@ -7283,30 +7299,54 @@
       setCfg({ routineId: clean(routineIdInput.value), ...(t ? { routineToken: t } : {}), ...(clean(routineIdInput.value) ? {} : { routineToken: '' }) });
       routineTokenInput.value = '';
       routineTokenInput.placeholder = cfg().routineToken ? 'Saved (paste a new one to replace it)' : 'Routine API token';
+      if (refusedNote()) { say(routineNote, refusedNote(), 'err'); afterSetup(); return; }
       say(routineNote, desk.researchOn() ? 'Saved. "Research in Claude Code" is on.' : cfg().routineId ? `Saved. It still needs ${desk.researchMissing().join(', ')}.` : 'Saved. Claude Code research is off.', desk.researchOn() ? 'ok' : cfg().routineId ? 'warn' : '');
       afterSetup();
     };
 
     // More routines: research starts are spread over all of them (each takes 30 an hour, the account 100)
-    const extraInput = h('textarea', { class: 'field', rows: 3, 'aria-label': 'Extra routines', spellcheck: 'false', autocomplete: 'off',
-      placeholder: 'More routines (optional), one per line: the routine id, a space, its API token' });
+    // One pair of fields per extra routine, like the first: its id, and its token (a saved one isn't shown again;
+    // leave it empty to keep it). Saved as "<id> <token>" lines.
+    const savedExtras = () => String(cfg().extraRoutines || '').split('\n').map(l => clean(l).split(' ')).filter(([id, t]) => id && t).map(([id, token]) => ({ id, token }));
+    const extraList = h('div', { class: 'extra-routines' });
+    function extraRow(saved = null) {
+      const idIn = h('input', { type: 'text', placeholder: 'Routine id (trig_…)', 'aria-label': 'Routine id', autocomplete: 'off', spellcheck: 'false', value: saved?.id || '' });
+      const tokIn = h('input', { type: 'password', placeholder: saved ? 'Saved (paste a new one to replace it)' : 'Routine API token', 'aria-label': 'Routine API token', autocomplete: 'off' });
+      const row = h('div', { class: 'extra-routine' },
+        h('div', { class: 'row' }, idIn, h('button', { class: 'secondary', type: 'button', text: '✕', title: 'Remove this routine', 'aria-label': 'Remove this routine', onclick: () => {
+          row.remove();
+          // A saved one is removed at once (and its token with it); a new row that was never saved just goes
+          if (!saved) return;
+          setCfg({ extraRoutines: savedExtras().filter(x => x.id !== saved.id).map(x => `${x.id} ${x.token}`).join('\n') });
+          say(extraNote, `Removed ${saved.id}. ${describeRoutines()}`, 'ok');
+        } })),
+        h('div', { class: 'row', style: 'margin-top:4px' }, tokIn));
+      row.read = () => ({ id: clean(idIn.value), token: clean(tokIn.value) || (saved && clean(idIn.value) === saved.id ? saved.token : '') });
+      return row;
+    }
+    const drawExtras = () => extraList.replaceChildren(...savedExtras().map(extraRow));
+    drawExtras();
     const extraNote = note();
     const describeRoutines = () => {
       const n = routines().length;
       const extra = n - (cfg().routineId && cfg().routineToken ? 1 : 0);
-      return extra ? `${extra} extra routine${extra === 1 ? '' : 's'} saved (${routines().slice(-extra).map(r => `${r.id.slice(0, 10)}…`).join(', ')}): ${n} in all, up to ${perHour()} research starts an hour. Paste the whole list again to change it.`
+      return extra ? `${n} routine${n === 1 ? "" : "s"} in all: up to ${perHour()} research starts an hour.`
         : 'One routine: up to 28 research starts an hour. Add more here to go faster (up to about 95 an hour with 4).';
     };
-    const saveExtra = () => {
-      const lines = extraInput.value.split('\n').map(clean).filter(Boolean);
-      const bad = lines.filter(l => !/^\S+ \S+$/.test(l));
-      if (bad.length) { say(extraNote, `Each line needs a routine id, a space, then its token ("${bad[0].slice(0, 20)}…" doesn't).`, 'err'); return; }
-      setCfg({ extraRoutines: lines.join('\n') });
-      extraInput.value = '';
-      say(extraNote, describeRoutines(), 'ok');
+    const refusedNote = () => {
+      const bad = refusedRoutines();
+      return bad.length ? `Anthropic refused the token of ${bad.map(r => r.id.slice(0, 14)).join(', ')} (${bad.map(r => GM_getValue(BAD_KEY, {})[r.id]?.status).join(', ')}): ${bad.length === 1 ? "it's" : "they're"} skipped until you paste a new token (make one in claude.ai, on the routine's page).` : '';
     };
-    const clearExtra = () => { setCfg({ extraRoutines: '' }); extraInput.value = ''; say(extraNote, describeRoutines()); };
-    say(extraNote, describeRoutines());
+    const saveExtra = () => {
+      const list = [...extraList.children].map(r => r.read()).filter(x => x.id || x.token);
+      const missing = list.find(x => !x.id || !x.token || /\s/.test(x.id));
+      if (missing) { say(extraNote, missing.id ? `Add the API token for ${missing.id}.` : 'Each routine needs its id (trig_…) as well as its token.', 'err'); return; }
+      if (list.some(x => x.id === cfg().routineId)) { say(extraNote, "That's your first routine already (above): add other routines here.", 'err'); return; }
+      setCfg({ extraRoutines: list.map(x => `${x.id} ${x.token}`).join('\n') });
+      drawExtras();
+      say(extraNote, refusedNote() || describeRoutines(), refusedNote() ? 'err' : 'ok');
+    };
+    say(extraNote, refusedNote() || describeRoutines(), refusedNote() ? 'err' : '');
 
     // Shared answers server
     const notesUrlInput = textField('notesUrl', 'Notes server address (optional)', 'Notes server address');
@@ -7475,8 +7515,8 @@
         h('div', { class: 'row', style: 'margin-top:6px' }, routineTokenInput, btn('Save', saveRoutine)),
         routineNote,
         h('p', { class: 'hint', style: 'margin:10px 0 0', text: 'Each routine starts at most 30 research sessions an hour. For more, make copies of your routine in claude.ai (same repo and environment) and add them here; starts are spread over all of them.' }),
-        h('div', { class: 'row', style: 'margin-top:6px' }, extraInput),
-        h('div', { class: 'row', style: 'margin-top:6px' }, btn('Save routines', saveExtra), btn('Remove extra routines', clearExtra)),
+        extraList,
+        h('div', { class: 'row', style: 'margin-top:6px' }, btn('+ Add a routine', () => { const r = extraRow(); extraList.append(r); r.querySelector('input').focus(); }), btn('Save routines', saveExtra)),
         extraNote,
         h('label', { class: 'doc', style: 'margin-top:8px' }, h('input', { type: 'checkbox', checked: GM_getValue(RESEARCH_LOG_KEY, false) === true, onchange: e => GM_setValue(RESEARCH_LOG_KEY, e.target.checked) }),
           h('span', { text: "Add Claude Code's full research log to the case doc (every search, page and source it checked, and how it reasoned), under its answer" }))),
@@ -8982,7 +9022,7 @@
           ui = ui || createPanel();
           const r = await ui.autoResearch();
           res = r?.skipped ? { skipped: true, session: '', error: r.why }
-            : { session: r?.session || '', error: r?.session ? '' : r?.fireError || 'the cloud session did not start', limited: !!r?.limited, retryAfter: r?.retryAfter || 0 };
+            : { session: r?.session || '', error: r?.session ? '' : r?.fireError || 'the cloud session did not start', limited: !!r?.limited, retryAfter: r?.retryAfter || 0, refused: !!r?.refused };
         } catch (e) { res = { session: '', error: e.message }; }
         GM_setValue(key, { ...res, at: Date.now() });
       })();
