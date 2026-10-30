@@ -15,11 +15,10 @@ $out = Join-Path $Here 'zonos-dispute-desk-sheets.user.js'
 $raw = 'https://gist.githubusercontent.com/kars3n-zonos/9dd13b6c4c3ea4d1d6a876d45002c0a3/raw/zonos-dispute-desk-sheets.user.js'
 
 $code = [IO.File]::ReadAllText($src, [Text.Encoding]::UTF8)
-if ($code -notmatch "(?m)^  const EDITION = 'sheets';") { throw "The script isn't the Sheets edition (its EDITION line should say 'sheets')." }
 if ($code -notmatch "(?m)^// @updateURL ") { throw "Couldn't find the @updateURL line in the script." }
 $code = $code -replace "(?m)^// @name(\s+).*$", "// @name`$1Zonos Dispute Desk (Sheets)"
 $code = $code -replace "(?m)^// @namespace(\s+).*$", "// @namespace`$1zonos-brokerage-sheets"
 $code = $code -replace "(?m)^// @(update|download)URL(\s+).*$", "// @`$1URL`$2$raw"
-if ($code -match 'ntn_[A-Za-z0-9]{20,}|sk-ant-') { throw 'A key ended up in the Sheets edition. Not written.' }
+if ($code -match 'sk-ant-') { throw 'A key ended up in the Sheets edition. Not written.' }
 [IO.File]::WriteAllText($out, $code, (New-Object Text.UTF8Encoding($false)))
 Write-Host "Wrote $out"

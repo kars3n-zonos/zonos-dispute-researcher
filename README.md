@@ -17,7 +17,7 @@ A Tampermonkey script for the Zonos broker portal (brokerage.dashboard.zonos.com
 
 Updates install automatically: Tampermonkey checks this repo about once a day. To update right away, use Tampermonkey's **Check for userscript updates**.
 
-Cases are tracked in the team's **Google Sheet** (since 7.17.0): one row per case, a Google Doc per case, and Comments, Prompts and Research tabs. Notion tracking is retired; its code is still in the script but off.
+Cases are tracked in the team's **Google Sheet** (since 7.17.0): one row per case, a Google Doc per case, and Comments, Prompts and Research tabs.
 
 For the maintainer:
 - Edit only `zonos-dispute-researcher.user.js`. On every push to `main`, a GitHub Action runs `build-sheets.ps1`, commits `zonos-dispute-desk-sheets.user.js` (the same script under its own name and update address), and publishes both to the secret gist Tampermonkey installs and updates from (needs the `GIST_TOKEN` secret, a token with only the "gist" scope).

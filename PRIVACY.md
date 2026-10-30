@@ -19,7 +19,6 @@ It has no ads and no analytics. It never sells data, and it uses data only for t
   - In the Entry Assistant tab, the codes being looked up.
 - **The team's Google Sheet (script.google.com)**, only once its address and secret are set up. For the disputes and orders you work it sends the case's name, type and portal link, what you do to it in the portal (claim, release, wait, escalate, resolve and decisions), saved answers, the Front / Slack / chat links you paste, your comments and research requests, with your name. It reads back the case's row, comments, the team's prompts and Claude Code's answers.
 - **Claude Code (api.anthropic.com)**, only if you set up a cloud routine. It sends the research request's id, that request's own one-time token and the sheet's web app address to start your routine; the routine reads only that request.
-- **Notion (api.notion.com)**: retired. Nothing goes to Notion unless the old Notion tracking is turned back on in the script.
 - **A notes server**, only if you enter its address. It sends saved answers, with your name, to share them with coworkers who use the same server. To join, it sends your dashboard sign-in token once; the server checks it and keeps your name and zonos.com email.
 - **Official screening lists.** "Listed on" links open the list's own site in a new tab. Nothing is sent to them except that the page opens.
 
