@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.48.0
+// @version      7.49.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3801,7 +3801,8 @@
     { key: 'escalate', label: 'Escalate', op: 'BrokerageWorkOrderEscalate', verb: 'Escalated', can: r => !r.escalatedTo, note: 'required', target: true, claimFirst: true },
     { key: 'note', label: 'Note', op: 'BrokerageWorkOrderNote', verb: 'Added a note to', can: () => true, note: 'required' },
     { key: 'assign', label: 'Assign', op: 'BrokerageWorkOrderAssign', verb: 'Assigned', can: () => true, assignee: true },
-    { key: 'resolve', label: 'Resolve', op: 'BrokerageWorkOrderResolve', verb: 'Resolved', can: r => r.status === 'OPEN' || r.status === 'WAITING', note: 'optional', resolution: true, danger: true },
+    // A duty dispute is finished with Submit (its decisions), not by resolving its work order
+    { key: 'resolve', label: 'Resolve', op: 'BrokerageWorkOrderResolve', verb: 'Resolved', can: r => (r.status === 'OPEN' || r.status === 'WAITING') && r.type !== 'DUTY_DISPUTE_REVIEW', note: 'optional', resolution: true, danger: true },
   ];
 
   const SCOPES = [
@@ -4702,6 +4703,9 @@
       return h('div', { class: 'bulk', role: 'toolbar', 'aria-label': 'Bulk actions' },
         h('span', { class: 'sel-n', text: `${sel.length} selected` }),
         batchUnlocked() ? null : h('span', { class: 'muted', style: 'font-size:12px', text: 'Acting on many at once needs the access code (Tools ⚙ Settings).' }),
+        batchUnlocked() && sel.some(r => r.type === 'DUTY_DISPUTE_REVIEW' && !r.closed)
+          ? h('button', { class: 'btn small primary', type: 'button', text: `Submit (${sel.filter(r => r.type === 'DUTY_DISPUTE_REVIEW' && !r.closed).length})`,
+            title: 'Submit the selected duty disputes with the decisions already saved on them, the same as the Submit button on each dispute', onclick: () => runSubmit() }) : null,
         batchUnlocked() && sel.some(r => r.type === 'ENTRY_REJECTED')
           ? h('button', { class: 'btn small primary', type: 'button', text: `Re-send as filed (${sel.filter(r => r.type === 'ENTRY_REJECTED').length})`,
             title: 'Re-send the selected rejected entries as filed: pick the streams and how to send them, as on the page', onclick: () => runResend() }) : null,
@@ -4924,6 +4928,95 @@
     // ---- bulk actions: a dialog says exactly what will happen, in which mode, before anything is sent
     // Re-send as filed, for every selected rejected entry: the page's Streams and Send as, claiming the ones nobody
     // has first (the portal re-sends only an order you hold); ones someone else holds are left alone
+    // Submit, for every selected duty dispute that's ready: each is read first, and only one whose every claim has a
+    // saved decision (Accept or Deny) and that's still open to decisions is submitted, the same as its own Submit
+    // button. Unclaimed ones can be claimed first; ones someone else holds, or with claims still undecided, are left alone.
+    function runSubmit() {
+      if (!batchUnlocked()) return;
+      const me = S.me?.id;
+      const rows = selectedRows().filter(r => r.type === 'DUTY_DISPUTE_REVIEW' && !r.closed);
+      const mode = portal.mode();
+      const list = h('div', { class: 'list' }, h('div', { class: 'muted', text: `Reading ${rows.length} dispute${rows.length === 1 ? '' : 's'}…` }));
+      const claimFirst = h('input', { type: 'checkbox', checked: true });
+      const claimRow = h('label', { style: 'display:flex;gap:6px;align-items:center;margin-top:8px', hidden: true }, claimFirst, h('span'));
+      const bar = h('div', { class: 'progress', hidden: true }, h('div'));
+      const msg = h('p', { class: 'muted' });
+      const go = h('button', { class: 'btn danger', type: 'button', text: 'Submit', disabled: true });
+      const cancel = h('button', { class: 'btn', type: 'button', text: 'Cancel', onclick: () => scrim.remove() });
+      const scrim = h('div', { class: 'scrim', onclick: e => { if (e.target === scrim) scrim.remove(); } },
+        h('div', { class: 'dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Submit duty disputes' },
+          h('h2', { text: `Submit ${rows.length} duty dispute${rows.length === 1 ? '' : 's'}` }),
+          h('p', {}, 'In ', h('span', { class: `mode ${mode}`, text: mode.toUpperCase() }), " mode. Each is submitted with the decisions saved on it, the same as its own Submit button. This can't be undone from here."),
+          list, claimRow, msg, bar,
+          h('div', { class: 'actions' }, cancel, go)));
+      root.append(scrim);
+      const verdictText = v => (v === 'ACCEPTED' ? 'accepted' : v === 'DENIED' ? 'denied' : String(v || '').toLowerCase());
+      let checked = [];
+      const count = () => checked.filter(c => c.ready && (c.r.assigneeId || claimFirst.checked)).length;
+      const sayCount = () => { const n = count(); go.textContent = `Submit ${n}`; go.disabled = !n; };
+      claimFirst.addEventListener('change', sayCount);
+      (async () => {
+        const out = [];
+        for (let i = 0; i < rows.length; i += 6) {
+          await Promise.all(rows.slice(i, i + 6).map(async r => {
+            const c = { r };
+            if (r.assigneeId && r.assigneeId !== me) { c.why = `${r.assigneeName || 'someone else'} holds it`; out.push(c); return; }
+            try {
+              const d = await fetchDispute(r.sid, r.orgId);
+              const claims = (d?.items || []).flatMap(it => it.claims || []);
+              const undecided = claims.filter(cl => !VERDICT_LABELS[cl.decision?.verdict]);
+              if (!d) c.why = "couldn't read it";
+              else if (!DECIDABLE.has(d.status)) c.why = `already ${human2(d.status).toLowerCase()}`;
+              else if (!claims.length) c.why = 'no claims on it';
+              else if (undecided.length) c.why = `${undecided.length} of ${claims.length} claim${claims.length === 1 ? '' : 's'} still undecided`;
+              else {
+                c.ready = true; c.d = d;
+                const tally = {};
+                for (const cl of claims) tally[verdictText(cl.decision.verdict)] = (tally[verdictText(cl.decision.verdict)] || 0) + 1;
+                c.what = Object.entries(tally).map(([k, n]) => `${n} ${k}`).join(', ');
+              }
+            } catch (e) { c.why = e.message; }
+            out.push(c);
+          }));
+          list.firstChild.textContent = `Reading… ${Math.min(rows.length, i + 6)} of ${rows.length}`;
+        }
+        if (!scrim.isConnected) return;
+        checked = rows.map(r => out.find(c => c.r === r)).filter(Boolean);
+        const ready = checked.filter(c => c.ready);
+        const unclaimed = ready.filter(c => !c.r.assigneeId);
+        list.replaceChildren(...checked.map(c => h('div', { class: c.ready ? '' : 'muted',
+          text: `${c.ready ? '✓' : '–'} ${c.r.ref} · ${c.r.customer || c.r.consignee || ''} · ${c.ready ? `ready: ${c.what}${c.r.assigneeId ? '' : ' (unclaimed)'}` : `skipped: ${c.why}`}` })));
+        if (unclaimed.length) { claimRow.hidden = false; claimRow.lastChild.textContent = `Claim the ${unclaimed.length} unclaimed first (submitting needs the order to be yours)`; }
+        msg.textContent = `${ready.length} of ${checked.length} ready to submit.${checked.length > ready.length ? ' The rest are left as they are.' : ''}`;
+        sayCount();
+      })();
+      go.addEventListener('click', async () => {
+        go.disabled = cancel.disabled = true;
+        claimFirst.disabled = true;
+        bar.hidden = false;
+        const todo = checked.filter(c => c.ready && (c.r.assigneeId || claimFirst.checked));
+        const failed = [];
+        const toClaim = todo.filter(c => !c.r.assigneeId);
+        if (toClaim.length) {
+          msg.textContent = `Claiming ${toClaim.length}…`;
+          const res = await portal.act('BrokerageWorkOrderClaim', toClaim.map(c => c.r.id));
+          for (const fl of res.failed) { const c = toClaim.find(x => x.r.id === fl.id); failed.push(`${c?.r.ref || fl.id}: couldn't claim it (${fl.error})`); }
+          const bad = new Set(res.failed.map(fl => fl.id));
+          for (const c of toClaim) if (bad.has(c.r.id)) todo.splice(todo.indexOf(c), 1);
+        }
+        let done = 0, n = 0;
+        for (const c of todo) {
+          msg.textContent = `Submitting ${++n} of ${todo.length}…`;
+          try { await completeDispute(c.d.id, c.d.organizationId); done++; }
+          catch (e) { failed.push(`${c.r.ref}: ${e.message}`); }
+          bar.firstChild.style.width = `${Math.round(n / todo.length * 100)}%`;
+        }
+        scrim.remove();
+        S.sel.clear();
+        toast(`Submitted ${done} duty dispute${done === 1 ? '' : 's'}.${failed.length ? `\n${failed.length} failed:\n${failed.slice(0, 6).join('\n')}${failed.length > 6 ? '\n…' : ''}` : ''}`, failed.length > 0);
+        load({ quiet: true });
+      });
+    }
     function runResend() {
       if (!batchUnlocked()) return;
       const me = S.me?.id;
