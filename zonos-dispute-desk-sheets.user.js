@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.46.0
+// @version      7.48.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3432,7 +3432,7 @@
           const ent = D.ent || currentEntity();
           if (!ent) return {};
           const { cm, dd } = dataFor(ent);
-          const lines = (cm?.consignmentItems || []).map(it => ({ code: it.hsCode || '', origin: it.countryOfOrigin || '', value: it.amount != null ? String(it.amount) : '', currency: it.currencyCode || '' }));
+          const lines = (cm?.consignmentItems || []).map(it => ({ code: it.hsCode || '', origin: it.countryOfOrigin || '', value: it.amount != null ? String(it.amount) : '', currency: it.currencyCode || '', desc: clean(it.description || it.name || '') }));
           const tm = String(cm?.consolidation?.transportationMode || '').toUpperCase();
           const mode = [['AIR', 'air'], ['OCEAN', 'ocean'], ['VESSEL', 'ocean'], ['TRUCK', 'truck'], ['ROAD', 'truck'], ['RAIL', 'rail'], ['MAIL', 'mail'], ['POST', 'mail']].find(([k]) => tm.includes(k))?.[1] || '';
           const o = dd?.originalOrder;
@@ -3648,7 +3648,7 @@
     };
   }
   // The text a search looks through, built once per row (and again when its customer name arrives)
-  const hay = r => r._hay || (r._hay = [r.label, r.status, r.title, r.problem, r.detail, r.tracking, r.entryNo, r.mbol, r.sid, r.id, r.customer, r.consignee,
+  const hay = r => r._hay || (r._hay = [r.label, r.status, human2(r.status), r.escalatedTo ? 'escalated' : '', r.title, r.problem, r.detail, r.tracking, r.entryNo, r.mbol, r.sid, r.id, r.customer, r.consignee,
     r.assigneeName, r.stream, r.escalatedTo, r.escalationNote, r.claims, RESOLUTIONS[r.resolution] || r.resolution, r.resolutionNote, r.resolverName, ...r.items, ...r.codes].join(' \u0001 ').toLowerCase());
 
   // One date formatter for every row (making one per call was the queue's slowest step), and today's start and
@@ -4023,7 +4023,7 @@
       type: 'text', placeholder: 'Search anything: tracking, entry, master bill, customer, item, HS code, note… (paste a list to match many)',
       'aria-label': 'Search the queue', autocomplete: 'off', spellcheck: 'false',
       // Redrawn once typing pauses (120 ms), not on every key
-      oninput: e => { S.q = e.target.value; S.extra = null; S.limit = 300; clearTimeout(searchTimer); searchTimer = setTimeout(render, 120); },
+      oninput: e => { S.q = e.target.value; S.extra = null; S.limit = 300; clearTimeout(searchTimer); searchTimer = setTimeout(render, 120); if (searching()) loadClosed(); },
       onkeydown: e => {
         if (e.key === 'Escape') { searchInput.value = ''; S.q = ''; S.extra = null; render(); }
         if (e.key === 'Enter' && S.shown.length === 1) openRow(S.shown[0], e);
@@ -4049,7 +4049,7 @@
         S.loading = false;
         render();
         if (placePending) { placePending = false; restorePlace(); }
-        if (everythingShown()) loadClosed(!quiet);
+        if (everythingShown() || searching()) loadClosed(!quiet);
         // Names the cache didn't have yet come in after the first draw
         const missing = rows.filter(r => r.orgId && !(r.orgId in names)).map(r => r.orgId);
         if (missing.length) {
@@ -4066,6 +4066,8 @@
     // The closed orders, for the All work orders tab: read when it's opened, and again at most every 5 minutes
     // (or on ↻ Refresh), since there are hundreds and they rarely change
     const everythingShown = () => skin() === 'tools' && !!SCOPES.find(s => s.key === S.scope)?.every;
+    // A search looks through every work order, whatever tab is open (the closed ones load the first time)
+    const searching = () => !!clean(S.q);
     async function loadClosed(force = false) {
       if (S.closedLoading || (!force && Date.now() - S.closedAt < 5 * 60000)) return;
       S.closedLoading = true; S.closedError = '';
@@ -4117,11 +4119,13 @@
       const scope = scopeList().find(s => s.key === S[scopeKey()]) || scopeList()[0];
       const me = S.me?.id;
       const pq = parseQuery(S.q);
-      let rows = baseRows(scope).filter(r => scope.test(r, me));
+      // A search: every work order, whatever the tab (the filters you set still apply)
+      const all = searching();
+      let rows = all ? baseRows({ every: true }) : baseRows(scope).filter(r => scope.test(r, me));
       for (const f of filterList()) {
         let want = S.filters[f.key];
-        // The Escalated and All work orders tabs show escalated orders, hidden or not
-        if (f.key === 'status' && S.excl.status && (scope.key === 'escalated' || scope.every)) want = want?.filter(v => v !== 'Escalated');
+        // The Escalated and All work orders tabs, and a search, show escalated orders, hidden or not
+        if (f.key === 'status' && S.excl.status && (all || scope.key === 'escalated' || scope.every)) want = want?.filter(v => v !== 'Escalated');
         if (f.key === ignore || !want?.length) continue;
         rows = rows.filter(r => filterVals(f, r).some(v => want.includes(v)) !== !!S.excl[f.key]);
       }
@@ -4380,6 +4384,7 @@
           stat(rows.filter(r => r.status === 'WAITING').length, 'waiting', ''),
           stat(rows.filter(r => r.escalatedTo).length, 'escalated', ''),
           stat(rows.filter(r => r.createdMs > S.seenAt).length, 'new since last visit', '')),
+        searching() ? h('p', { class: 'muted', style: 'font-size:12px;margin:8px 0 0', text: `Searching every work order, open, waiting and closed, whatever tab is open${S.closedLoading ? ' (loading the closed ones…)' : ''}. Filters you set still apply.` }) : null,
         h('div', { class: 'chips' }, h('span', { class: 'muted', style: 'font-size:12px', text: 'Classes:' }), byType.length ? byType.slice(0, 10).map(([k, n]) => chip('type', k, n)) : h('span', { class: 'muted', style: 'font-size:12px', text: 'none' })),
         viewsBar());
 
@@ -4468,6 +4473,7 @@
           onclick: () => { for (const f of CLASSIC_FILTERS) { delete S.filters[f.key]; delete S.excl[f.key]; } S.filters = { ...S.filters }; S.excl = { ...S.excl }; S.q = ''; searchInput.value = ''; S.limit = 300; savePrefs(); render(); } }));
       const note = h('div', { class: 'cq-note' },
         S.missing?.length ? [h('b', { text: `Not found: ${S.missing.join(', ')}` }), ' · ', h('button', { class: 'linkish', type: 'button', text: 'Copy', onclick: () => copy(S.missing.join('\n'), 'Copied.') })]
+          : searching() ? ['Searching ', h('b', { text: 'every work order' }), `, open, waiting and closed, whatever tab is open${S.closedLoading ? ' (loading the closed ones…)' : ''}. Filters you set still apply. Clear the search to see the tab again.`]
           : ['Showing every ', h('b', { text: 'Open' }), ' and ', h('b', { text: 'Waiting' }), ' order in one list. Click a column to sort; Ctrl-click a row for a new tab; Shift-click checkboxes to select a range.']);
       drawRun();
       wrap.replaceChildren(...[top, tabs, stats, bar, note, runBar, S.sel.size && h('div', { class: 'cq-bulk' }, bulkBar()), classicTable(rows)].filter(Boolean));
@@ -4542,7 +4548,11 @@
       const claimedAgo = r.claimedAt ? ` · claimed ${ageText(Date.parse(r.claimedAt))} ago` : '';
       const n = 1 + (r._copies?.length || 0);
       const many = n > 1 ? h('span', { class: 'cq-pill cq-many', text: `×${n}`, title: `${n} identical disputes (same company, exactly the same lines, claims and questionnaire answers). Claim, select or open this one, and what you do is done to all ${n}.` }) : null;
-      const who = r.assigneeId
+      // A closed order (found by a search): who closed it and when, instead of an assignee
+      const who = r.closed
+        ? h('div', { class: 'cq-who', title: [r.resolverName && `Closed by ${r.resolverName}`, r.resolutionNote].filter(Boolean).join(': ') },
+          h('span', { class: 'muted', text: `✓ ${r.resolvedBy && r.resolvedBy === S.me?.id ? 'You' : r.resolverName || 'Closed'}${r.resolvedMs ? ` · ${ageText(r.resolvedMs)} ago` : ''}` }))
+        : r.assigneeId
         ? h('div', { class: 'cq-who', title: `${r.assigneeName || 'Someone'}${claimedAgo}` },
           h('span', { class: `cq-av${mine ? '' : ' other'}`, text: initials(mine ? S.me?.name || r.assigneeName : r.assigneeName) }),
           h('span', {}, mine ? 'You' : r.assigneeName || 'Someone', h('span', { class: 'muted', style: 'font-size:12px', text: claimedAgo })))
@@ -6638,6 +6648,48 @@
     .dc-tip b { display: block; }
     .dc-tip.red b { color: var(--err); }
     .dc-hint { margin: 8px 0 0; font-size: 12.5px; color: var(--muted); }
+    .dc-grid textarea { width: 100%; min-width: 0; min-height: 64px; padding: 7px 8px; font: inherit; font-size: 13px; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; resize: vertical; }
+    .dc-grid textarea:focus { outline: none; border-color: var(--dc-blue); }
+    .dc-grid .wide { grid-column: 1 / -1; }
+    .dc-btn { height: 34px; padding: 0 16px; border: 1px solid var(--dc-fill); border-radius: 8px; background: var(--dc-fill); color: #ffffff; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .dc-btn:hover:not(:disabled) { filter: brightness(.92); }
+    .dc-btn:disabled { opacity: .6; cursor: default; }
+    .dc-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+    .cl-picks { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+    .cl-hero { margin-top: 18px; padding: 16px; border-radius: 14px; background: var(--soft); border: 1px solid var(--line); }
+    .cl-hero-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .cl-code { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 26px; font-weight: 600; letter-spacing: .01em; line-height: 1.1; }
+    .cl-friendly { margin: 6px 0 0; font-size: 14px; font-weight: 500; }
+    .cl-full { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+    .cl-conf { flex: none; width: 92px; text-align: right; }
+    .cl-conf b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+    .cl-conf span { font-size: 11px; color: var(--muted); }
+    .cl-meter { height: 6px; margin-top: 5px; border-radius: 99px; background: var(--line); overflow: hidden; }
+    .cl-meter > i { display: block; height: 100%; border-radius: 99px; }
+    .cl-meter.hi > i { background: #16a34a; } .cl-meter.mid > i { background: #f59e0b; } .cl-meter.lo > i { background: #dc2626; }
+    .cl-customs { margin: 12px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--bg); border: 1px dashed var(--line); font-size: 12.5px; }
+    .cl-customs small { display: block; font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+    .cl-path { list-style: none; margin: 10px 0 0; padding: 0; }
+    .cl-path li { position: relative; padding: 4px 0 4px 14px; font-size: 12px; color: var(--muted); }
+    .cl-path li::before { content: ""; position: absolute; left: 3px; top: 0; bottom: 0; border-left: 2px solid var(--line); }
+    .cl-path li:last-child { color: var(--fg); font-weight: 500; }
+    .cl-path b { font-family: ui-monospace, Consolas, monospace; font-weight: 600; color: var(--dc-blue); margin-right: 6px; }
+    .cl-check { margin-top: 12px; padding: 10px 12px; border-radius: 10px; font-size: 12.5px; border: 1px solid; }
+    .cl-check.ok { color: #15803d; background: rgba(22,163,74,.08); border-color: rgba(22,163,74,.35); }
+    .cl-check.bad { color: #b42318; background: rgba(220,38,38,.07); border-color: rgba(220,38,38,.35); }
+    .cl-check.some { color: #b54708; background: rgba(245,158,11,.08); border-color: rgba(245,158,11,.4); }
+    :host([data-theme="dark"]) .cl-check.ok { color: #4ade80; } :host([data-theme="dark"]) .cl-check.bad { color: #f87171; } :host([data-theme="dark"]) .cl-check.some { color: #fbbf24; }
+    .cl-levels { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 3px; color: var(--fg); }
+    .cl-levels li { display: grid; grid-template-columns: 18px 86px auto 1fr; align-items: baseline; gap: 6px; font-size: 12px; }
+    .cl-levels .cl-mark { font-weight: 700; text-align: center; }
+    .cl-levels li.yes .cl-mark { color: #16a34a; } .cl-levels li.some .cl-mark { color: #f59e0b; } .cl-levels li.no .cl-mark { color: #dc2626; }
+    .cl-levels .cl-lvl { color: var(--muted); }
+    .cl-levels b { font-family: ui-monospace, Consolas, monospace; font-weight: 600; }
+    .cl-alts { display: grid; gap: 8px; margin-top: 8px; }
+    .cl-alt { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+    .cl-alt-top { display: flex; align-items: baseline; gap: 10px; }
+    .cl-alt-code { font-family: ui-monospace, Consolas, monospace; font-weight: 600; color: var(--dc-blue); }
+    .cl-alt .cl-path { margin-top: 6px; }
   `;
 
   function createPanel() {
@@ -7167,53 +7219,171 @@
     }
 
     const classifyBody = h('div', { class: 'body' });
-    function renderClassify() {
-      const pre = orderItem();
-      const name = h('input', { type: 'text', class: 'field', placeholder: "e.g. Men's cotton t-shirt", value: pre.name, 'aria-label': 'Item name' });
-      const desc = h('textarea', { class: 'field', rows: 3, placeholder: 'Material, use, construction, and anything that sets it apart', 'aria-label': 'Description' });
-      const material = h('input', { type: 'text', class: 'field', placeholder: 'e.g. 100% cotton', 'aria-label': 'Material' });
-      const shipTo = countrySelect('Ship to', 'US', true);
-      const origin = countrySelect('Country of origin', pre.coo);
-      const hs = h('input', { type: 'text', class: 'field', placeholder: 'Refine or check an existing code', value: pre.hs, 'aria-label': 'HS code' });
-      const out = h('div', { class: 'result', role: 'status' });
-      const go = h('button', { class: 'primary', type: 'submit', text: 'Classify' });
-      const form = h('form', { class: 'form', onsubmit: async e => {
-        e.preventDefault();
-        if (!clean(name.value)) { out.replaceChildren(h('p', { class: 'err', text: 'Item name is required.' })); return; }
-        const code = clean(hs.value);
-        go.disabled = true;
-        out.replaceChildren(h('p', { class: 'muted', text: 'Classifying…' }));
-        try {
-          const data = await portal.gql('ClassificationsCalculate', `mutation ClassificationsCalculate($level: ClassificationLevel!, $inputs: [ClassificationCalculateInput!]!) {
-            classificationsCalculate(input: $inputs, level: $level) { id confidenceScore customsDescription
-              hsCode { code description { friendly full } }
-              hsCodeProvidedValidation { code result type }
-              alternates { subheadingAlternate { code description { friendly } } } } }`,
-          { level: 'BASE', inputs: [{ name: clean(name.value), description: clean(desc.value).slice(0, 500) || undefined, material: clean(material.value) || undefined,
-            countryOfOrigin: origin.value || undefined,
-            configuration: { hsCodeProvided: code || undefined, hsCodeProvidedTreatment: code ? 'CHECK_COHERENCE' : 'IGNORE', shipToCountries: shipTo.value ? [shipTo.value] : null } }] });
-          const c = (data.classificationsCalculate || []).find(Boolean);
-          if (!c?.hsCode?.code) { out.replaceChildren(h('p', { class: 'warn', text: 'No classification came back. Add more detail and try again.' })); return; }
-          const v = c.hsCodeProvidedValidation;
-          const alts = (c.alternates || []).map(a => a.subheadingAlternate).filter(a => a?.code && a.code !== c.hsCode.code);
-          out.replaceChildren(h('div', { class: 'order-card' },
-            h('p', { class: 'label', text: 'Classification' }),
-            codeLine(c.hsCode.code),
-            h('p', { style: 'margin:6px 0 0', text: c.hsCode.description?.friendly || '' }),
-            c.hsCode.description?.full ? h('p', { class: 'hint', text: c.hsCode.description.full }) : null,
-            c.confidenceScore != null ? h('p', { class: 'hint', text: `Confidence ${Math.round(Number(c.confidenceScore) * 100)}%` }) : null,
-            c.customsDescription ? h('p', { class: 'hint', text: `Customs description: ${c.customsDescription}` }) : null,
-            v && code ? h('p', { class: `hint ${/COHERENT$/.test(v.result || '') && !/NOT/.test(v.result || '') ? 'ok' : 'warn'}`, text: `Your code ${v.code || code}: ${human2(v.result || '')}${v.type ? ` (${human2(v.type)})` : ''}` }) : null,
-            alts.length ? [h('p', { class: 'label', style: 'margin-top:10px', text: 'Alternate subheadings' }),
-              alts.map(a => h('div', { style: 'margin-top:4px' }, codeLine(a.code), a.description?.friendly ? h('span', { class: 'hint', style: 'display:block;margin:0', text: a.description.friendly }) : null))] : null));
-        } catch (err) { out.replaceChildren(h('p', { class: 'err', text: err.message })); }
-        finally { go.disabled = false; }
-      } },
-      fieldRow('Item name', name), fieldRow('Description', desc), fieldRow('Material (optional)', material),
-      h('div', { class: 'frow2' }, fieldRow('Ship to', shipTo), fieldRow('Country of origin (optional)', origin)),
-      fieldRow('HS code (optional)', hs), h('div', { class: 'actions' }, go), out);
-      classifyBody.replaceChildren(form);
-      name.focus();
+    // The case this page's Research tab has read, or null. Tools can open Classify while the panel is still being built
+    // (on a page with nothing to research), before `state` exists, so it's read with care.
+    function openCase() {
+      let st = null;
+      try { st = state; } catch { /* the panel is still being set up */ }
+      return st && st.path === location.pathname ? st.data : null;
+    }
+    // ---- Classify: the portal's own Classify request (the same one its Classify box sends, with each code's place in the
+    // HTS), filled in from the order and laid out like the duty calculator. It changes nothing: it only classifies.
+    const CLASSIFY_Q = `mutation ClassificationsCalculate($level: ClassificationLevel!, $inputs: [ClassificationCalculateInput!]!) {
+      classificationsCalculate(input: $inputs, level: $level) { id confidenceScore customsDescription
+        hsCode { code description { friendly full } fragments { code description type } }
+        hsCodeProvidedValidation { code result type }
+        alternates { subheadingAlternate { code description { friendly } fragments { code description type } } } } }`;
+    let CL = null;   // { for, picks, pick, form, busy, result, error }
+    // The order's items, each ready to classify: a dispute's disputed lines (the merchant's description when they claim
+    // one), otherwise the portal's items for the order
+    function clPicks() {
+      const d = openCase();
+      const out = [];
+      if (d && d.kind !== 'workOrder') {
+        for (const i of d.items.filter(x => x.inDispute)) {
+          const fd = re => i.fields.find(x => re.test(x.label));
+          const desc = fd(/^description$/i);
+          out.push({ label: `Line ${i.line}`, name: clean(i.title), description: clean(desc?.claimed || desc?.current || ''), material: '',
+            origin: isoCountry(fd(/^country of origin$/i)?.current), hs: tidyCode(hsCodeIn(fd(/^hs code$/i)?.claimed || fd(/^hs code$/i)?.current)) });
+        }
+      }
+      if (!out.length) for (const [n, l] of (desk.calcPrefill().lines || []).entries()) out.push({ label: `Item ${n + 1}`, name: l.desc || '', description: '', material: '', origin: isoCountry(l.origin), hs: tidyCode(l.code) });
+      if (!out.length && d?.kind === 'workOrder') for (const [n, c] of d.codes.entries()) out.push({ label: `Code ${n + 1}`, name: '', description: '', material: '', origin: c.from || '', hs: c.code });
+      return out.slice(0, 12);
+    }
+    const clEmpty = () => ({ name: '', description: '', material: '', shipTo: 'US', origin: '', hs: '' });
+    const clFrom = p => ({ ...clEmpty(), ...(p ? { name: p.name, description: p.description, material: p.material, origin: p.origin, hs: p.hs } : {}) });
+    async function clRun() {
+      const S = CL;
+      const fm = S.form;
+      if (!clean(fm.name)) { S.error = 'Give the item a name first.'; clDraw(); return; }
+      const code = clean(fm.hs);
+      S.busy = true; S.error = '';
+      clDraw();
+      try {
+        const data = await portal.gql('ClassificationsCalculate', CLASSIFY_Q, { level: 'BASE', inputs: [{ name: clean(fm.name), description: clean(fm.description).slice(0, 500) || undefined,
+          material: clean(fm.material) || undefined, countryOfOrigin: fm.origin || undefined,
+          configuration: { hsCodeProvided: code || undefined, hsCodeProvidedTreatment: code ? 'CHECK_COHERENCE' : 'IGNORE', shipToCountries: fm.shipTo ? [fm.shipTo] : null } }] });
+        if (CL !== S) return;
+        S.result = (data.classificationsCalculate || []).find(Boolean) || null;
+        if (!S.result?.hsCode?.code) { S.result = null; S.error = 'No classification came back. Add more detail (what it is, what it’s made of, what it’s for) and try again.'; }
+        S.asked = { ...fm };
+      } catch (e) { if (CL === S) S.error = e.message; }
+      if (CL === S) { S.busy = false; clDraw(); }
+    }
+    // A code's place in the HTS: its fragments (chapter, heading, subheading, tariff line), widest first
+    const clPath = frags => (frags || []).filter(x => x?.code).length ? h('ol', { class: 'cl-path' },
+      [...frags].filter(x => x?.code).sort((a, b) => digitsOf(a.code).length - digitsOf(b.code).length)
+        .map(x => h('li', {}, h('b', { text: tidyCode(x.code) || x.code }), x.description || human2(x.type || ''))) ) : null;
+    const clCopy = code => h('button', { class: 'dc-chip', type: 'button', text: 'Copy', onclick: e => { GM_setClipboard(code, 'text'); e.currentTarget.textContent = 'Copied'; } });
+    // Sends a code to the duty calculator (the Duties tab), with the item's origin, the order's value when there's one
+    function clToDuties(code, origin) {
+      const base = dcPrefill();
+      const known = base.lines.find(l => sameCode(l.code, code)) || base.lines[0];
+      DC = { ...base, lines: [{ code: tidyCode(code), origin: origin || known?.origin || '', value: known?.value || '' }], filled: true, touched: true };
+      setView('quote');
+    }
+    let clFormEl = null, clOutEl = null;
+    function clDraw() {
+      const S = CL;
+      const fm = S.form;
+      const set = k => e => { fm[k] = e.target.value; };
+      const countrySel = (k, none) => h('select', { onchange: set(k) }, h('option', { value: '', text: none }),
+        COUNTRIES.map(c => [c, regionName(c)]).sort((a, b) => a[1].localeCompare(b[1])).map(([c, n]) => h('option', { value: c, text: n, selected: c === fm[k] })));
+      clFormEl.replaceChildren(
+        S.picks.length > 1 ? h('div', { class: 'cl-picks' }, S.picks.map((p, i) => h('button', { class: `dc-chip${S.pick === i ? ' on' : ''}`, type: 'button', text: p.label, title: p.name,
+          onclick: () => { S.pick = i; S.form = clFrom(p); S.result = null; S.error = ''; clDraw(); } }))) : null,
+        h('div', { class: 'dc-line' }, h('div', { class: 'dc-grid two' },
+          h('label', { class: 'wide' }, 'Item name', h('input', { type: 'text', placeholder: "e.g. Men's cotton t-shirt", value: fm.name, oninput: set('name'),
+            onkeydown: e => { if (e.key === 'Enter') clRun(); } })),
+          h('label', { class: 'wide' }, 'Description', h('textarea', { rows: 3, placeholder: 'What it is, what it’s made of, what it’s for, and anything that sets it apart', value: fm.description, oninput: set('description') })),
+          h('label', {}, 'Material', h('input', { type: 'text', placeholder: 'e.g. 100% cotton', value: fm.material, oninput: set('material') })),
+          h('label', {}, 'HS code to check (optional)', h('input', { class: 'dc-mono', type: 'text', placeholder: '6109.10.00.12', value: fm.hs, oninput: set('hs') })),
+          h('label', {}, 'Ship to', countrySel('shipTo', 'Pick a country')),
+          h('label', {}, 'Country of origin', countrySel('origin', 'Not sure')))),
+        h('div', { class: 'dc-actions' },
+          h('button', { class: 'dc-btn', type: 'button', text: S.busy ? 'Classifying…' : 'Classify', disabled: S.busy, onclick: () => clRun() }),
+          isCasePage() ? h('button', { class: 'dc-chip', type: 'button', text: 'Fill from this order', onclick: () => renderClassify(true) }) : null,
+          h('button', { class: 'dc-chip ghost', type: 'button', text: 'Clear', onclick: () => { S.form = clEmpty(); S.pick = -1; S.result = null; S.error = ''; clDraw(); } })));
+      const r = S.result;
+      const out = [];
+      if (S.error) out.push(h('p', { class: 'hint err', style: 'margin-top:12px', text: S.error }));
+      if (!r && !S.error && !S.busy) out.push(h('p', { class: 'dc-hint', text: 'The more you say about what it is, what it’s made of and what it’s for, the better the code.' }));
+      if (r) {
+        const code = tidyCode(r.hsCode.code) || r.hsCode.code;
+        const conf = r.confidenceScore == null ? null : Math.round(Number(r.confidenceScore) * 100);
+        const asked = S.asked || {};
+        // The check of your code comes level by level (chapter, heading, subheading, tariff line), each coherent,
+        // somewhat coherent or not
+        const v = [r.hsCodeProvidedValidation].flat().filter(x => x?.result);
+        const LEVELS = ['CHAPTER', 'HEADING', 'SUBHEADING', 'TARIFF'];
+        v.sort((a, b) => LEVELS.indexOf(a.type) - LEVELS.indexOf(b.type));
+        const verdictOf = x => (/NOT|INCOHERENT/.test(x.result) ? 'no' : /SOMEWHAT|PARTIAL/.test(x.result) ? 'some' : 'yes');
+        const firstNo = v.find(x => verdictOf(x) === 'no');
+        const firstSome = v.find(x => verdictOf(x) === 'some');
+        out.push(h('div', { class: 'cl-hero' },
+          h('div', { class: 'cl-hero-top' },
+            h('div', { style: 'min-width:0' }, h('div', { class: 'dc-kicker', text: 'Classification' }), h('div', { class: 'cl-code', text: code }),
+              h('p', { class: 'cl-friendly', text: r.hsCode.description?.friendly || '' })),
+            conf != null ? h('div', { class: 'cl-conf' }, h('b', { text: `${conf}%` }), h('span', { text: 'confidence' }),
+              h('div', { class: `cl-meter ${conf >= 80 ? 'hi' : conf >= 50 ? 'mid' : 'lo'}` }, h('i', { style: `width:${Math.max(4, Math.min(100, conf))}%` }))) : null),
+          // The full HTS wording only when there's no path to show (the path already says it, level by level)
+          !(r.hsCode.fragments || []).some(x => x?.code) && r.hsCode.description?.full && r.hsCode.description.full !== r.hsCode.description?.friendly ? h('p', { class: 'cl-full', text: r.hsCode.description.full }) : null,
+          clPath(r.hsCode.fragments),
+          r.customsDescription ? h('div', { class: 'cl-customs' }, h('small', { text: 'Customs description' }), r.customsDescription) : null,
+          h('div', { class: 'dc-actions' },
+            clCopy(code),
+            h('button', { class: 'dc-chip', type: 'button', text: 'Open in Entry Assistant', onclick: () => showEntry({ codes: [code], from: asked.origin || '' }) }),
+            dutyCalcOn() ? h('button', { class: 'dc-chip', type: 'button', text: 'Duties for this code', title: 'Work out its duties and Chapter 99 codes in the duty calculator', onclick: () => clToDuties(code, asked.origin) }) : null)));
+        if (v.length && clean(asked.hs)) {
+          const mine = tidyCode(asked.hs) || asked.hs;
+          const lvl = x => human2(x.type === 'TARIFF' ? 'tariff line' : x.type || '').toLowerCase();
+          const tone = firstNo ? 'bad' : firstSome ? 'some' : 'ok';
+          out.push(h('div', { class: `cl-check ${tone}` },
+            h('b', { text: firstNo ? `Your code ${mine} doesn't fit from its ${lvl(firstNo)} down`
+              : firstSome ? `Your code ${mine} fits, but its ${lvl(firstSome)} is only a partial match` : `Your code ${mine} fits` }),
+            h('ol', { class: 'cl-levels' }, v.map(x => h('li', { class: verdictOf(x) },
+              h('span', { class: 'cl-mark', text: verdictOf(x) === 'yes' ? '✓' : verdictOf(x) === 'some' ? '~' : '✕' }),
+              h('span', { class: 'cl-lvl', text: human2(x.type === 'TARIFF' ? 'tariff line' : x.type || '') }),
+              h('b', { text: tidyCode(x.code) || x.code }),
+              h('span', { class: 'dc-sub', text: verdictOf(x) === 'yes' ? 'fits' : verdictOf(x) === 'some' ? 'partly' : "doesn't fit" })))),
+            !sameCode(mine, code) ? h('div', { class: 'dc-actions', style: 'margin-top:8px' },
+              h('button', { class: 'dc-chip', type: 'button', text: `Compare ${mine} with ${code}`, onclick: () => showEntry({ codes: [mine, code], from: asked.origin || '' }) })) : null));
+        }
+        const alts = (r.alternates || []).map(a => a.subheadingAlternate).filter(a => a?.code && !sameCode(a.code, code));
+        if (alts.length) {
+          out.push(h('div', { class: 'dc-qs-head' }, h('h3', { text: 'Alternates' }), h('span', { class: 'dc-sub', text: `· ${alts.length}` })),
+            h('div', { class: 'cl-alts' }, alts.map(a => {
+              const ac = tidyCode(a.code) || a.code;
+              return h('div', { class: 'cl-alt' },
+                h('div', { class: 'cl-alt-top' }, h('span', { class: 'cl-alt-code', text: ac }), h('span', { style: 'font-size:12.5px', text: a.description?.friendly || '' })),
+                (a.fragments || []).length ? h('details', { class: 'dc-fold' }, h('summary', { style: 'padding:6px 0 0;font-size:12px;color:var(--dc-blue)' }, 'Where it sits'), h('div', {}, clPath(a.fragments))) : null,
+                h('div', { class: 'dc-actions', style: 'margin-top:8px' }, clCopy(ac),
+                  h('button', { class: 'dc-chip', type: 'button', text: `Compare with ${code}`, onclick: () => showEntry({ codes: [code, ac], from: asked.origin || '' }) }),
+                  dutyCalcOn() ? h('button', { class: 'dc-chip ghost', type: 'button', text: 'Duties', onclick: () => clToDuties(ac, asked.origin) }) : null));
+            })));
+        }
+        out.push(h('p', { class: 'dc-hint', style: 'margin-top:14px', text: "From Zonos Classify, the same as the portal's Classify box. It isn't a binding ruling: check the HTS notes and CBP rulings (Entry Assistant) before relying on it." }));
+      }
+      clOutEl.replaceChildren(...out);
+    }
+    function renderClassify(fresh = false) {
+      if (fresh || !CL || CL.for !== location.pathname) {
+        const picks = clPicks();
+        CL = { for: location.pathname, picks, pick: picks.length ? 0 : -1, form: clFrom(picks[0]), busy: false, result: null, error: '' };
+      }
+      const S = CL;
+      clFormEl = h('div');
+      clOutEl = h('div');
+      classifyBody.replaceChildren(h('div', { class: 'dc' },
+        h('div', { class: 'dc-kicker', text: 'Zonos' }),
+        h('h2', { class: 'dc-title', text: 'Classify' }),
+        h('p', { class: 'dc-sub', style: 'margin:6px 0 14px', text: 'Describe the item and get its HS code, how sure Classify is, where the code sits in the HTS, and the alternates. Give it a code to check one you already have.' }),
+        clFormEl, clOutEl));
+      clDraw();
+      // Opened before the order was read: filled in once it is (unless you've started typing)
+      if (!S.picks.length && isCasePage()) waitFor(() => openCase(), { timeout: 30000 })
+        .then(ok => { if (ok && CL === S && !clean(S.form.name) && view === 'classify') renderClassify(true); });
     }
 
     const quoteBody = h('div', { class: 'body' });
@@ -7428,7 +7598,7 @@
     function dcPrefill() {
       const ship = { currency: 'USD', exportDate: new Date().toLocaleDateString('sv-SE'), entryDate: '', mode: 'unknown', entryType: 'unknown', freight: '' };
       let lines = [];
-      const d = state && state.path === location.pathname ? state.data : null;
+      const d = openCase();
       // A dispute: its disputed lines as the page shows them, the order date, and mail for a postal tracking number
       if (d && d.kind !== 'workOrder') {
         for (const i of d.items.filter(x => x.inDispute)) {
@@ -7632,7 +7802,7 @@
       dcDrawForm();
       dcRun();
       // Opened before the order was read: filled in once it is (unless you've started typing)
-      if (!S.filled && isCasePage()) waitFor(() => state && state.path === location.pathname && state.data, { timeout: 30000 })
+      if (!S.filled && isCasePage()) waitFor(() => openCase(), { timeout: 30000 })
         .then(ok => { if (ok && DC === S && !S.touched && view === 'quote') renderDutyCalc(true); });
     }
 
