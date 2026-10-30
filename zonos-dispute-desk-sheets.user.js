@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.44.0
+// @version      7.45.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1385,6 +1385,7 @@
       }
     }
     for (const c of f.calc || []) {
+      if (c === f.calc[0]) L.push('', "Duty calculator results (Entry Assistant API) may not be 100% correct: double-check them against the HTS and CBP guidance, and say so in the reply.");
       L.push('', `Duty calculator (Entry Assistant API${c.release ? `, ${c.release}` : ''}) for the ${c.role.toLowerCase()} \`${c.code}\`${c.origin ? ` made in ${regionName(c.origin)}` : ', origin not given (the costliest country assumed)'}${c.value ? ` at ${c.value}` : ' (value not known: $100 stands in, so only the codes count, not the amounts)'}:`);
       if (c.error) { L.push(`- It couldn't work this line out: ${c.error}`); continue; }
       L.push('- Duties, with every open question taken the costlier way:',
@@ -1886,7 +1887,7 @@
     const qs = calcQuestions(facts);
     return [
       ...(qs.length ? ['**Duty calculator answers**', ...qs.map(q => `- ${q.text.replace(/\.$/, '')}: <yes | no | can't tell> — <the evidence from your research, with its source>`)] : []),
-      `**Chapter 99:** <${codes}>`,
+      `**Chapter 99:** <${codes}> (from the duty calculator: may not be 100% correct, so double-check before acting)`,
       '',
     ];
   }
@@ -8147,7 +8148,7 @@
               const noted = `zt:calcNoted:${newest.id}`;
               if (desk.caseDoc() && !desk.dryRun() && !GM_getValue(noted, false)) {
                 GM_setValue(noted, true);
-                desk.docNote(`Duty calculator with the research's answers (${n} answered): ${runs.map(r => `${r.role || 'code'} ${r.code}${r.origin ? ` from ${r.origin}` : ''}: ${r.error || calcCodes(r)}`).join('; ')}.`)
+                desk.docNote(`Duty calculator with the research's answers (${n} answered; it may not be 100% correct, so double-check): ${runs.map(r => `${r.role || 'code'} ${r.code}${r.origin ? ` from ${r.origin}` : ''}: ${r.error || calcCodes(r)}`).join('; ')}.`)
                   .catch(e => { GM_deleteValue(noted); console.warn('[Tools] calculator note', e); });
               }
               if (s === state) render();
@@ -8158,7 +8159,8 @@
           got?.runs ? got.runs.map(r => h('p', { class: 'hint', style: 'margin:2px 0' },
             h('b', { text: `${r.role || 'Code'} ${r.code}${r.origin ? ` (${r.origin})` : ''}: ` }), r.error || calcCodes(r),
             r.questions?.length ? ` · ${r.questions.length} question${r.questions.length === 1 ? '' : 's'} still open` : ''))
-            : h('p', { class: 'hint', style: 'margin:0', text: 'Working it out…' }));
+            : h('p', { class: 'hint', style: 'margin:0', text: 'Working it out…' }),
+          h('p', { class: 'hint', style: 'margin:4px 0 0', text: 'From the Entry Assistant duty calculator: it may not be 100% correct, so double-check before acting.' }));
       })();
       const answerSection = (finalCard || replyBlock || newest) && h('div', { class: 'section' },
         h('p', { class: 'label', text: 'Answer' }),
