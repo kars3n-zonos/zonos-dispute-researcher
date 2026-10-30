@@ -26,6 +26,7 @@ For the maintainer:
 ## Opening Tools
 
 - **The button:** an orange **Tools** button in the sidebar above References (the default), or an orange **⚒ Tools** bubble you can drag anywhere. Pick one in Settings.
+- **Quick research:** on dispute and order pages, a button above Tools starts research in one click: **Research in Claude Code** if it's set up for you, otherwise **Open in claude.ai**.
 - **`\` key:** opens and closes it.
 - **Where it opens:** as an overlay beside the button. Drag the edge away from the button to resize it. The ◫ button docks it side by side with the page, and ⧉ floats it again.
 - **Header:**
@@ -49,10 +50,11 @@ For the maintainer:
   - Search across everything, including a pasted list of tracking numbers.
   - Mine / Unclaimed / Waiting / Escalated / All open.
   - Filters, sorting, grouping, summary counts and saved views.
-  - Bulk Claim, Release, Wait, Resume, Escalate, Note, Assign and Resolve. Each shows what will happen, and in which mode (LIVE / TEST), before anything is sent.
+  - Bulk Claim, Release, Wait, Resume, Escalate, Note, Assign and Resolve (with the access code; without it you can still select and copy refs, links or a CSV). Each shows what will happen, and in which mode (LIVE / TEST), before anything is sent.
   - The view picker switches back to the portal's own queue, or to **Portal+**.
 - **Portal+** (optional): the portal's own queue as you know it, without its limits: one list that loads as you scroll, sortable columns, search on anything, one-click Claim, details at once, select and bulk actions, and your place kept when you come back from an order.
 - **Batch work** (behind an access code in Settings): claim every unclaimed order of one class, then decide identical orders together. Orders are only grouped within one company, and disputes only when every disputed line's HS code, description, origin, claims, merchant reasons and questionnaire answers match exactly.
+  - **Research all shown** (a switch under Settings > Access code, off until ticked): a queue button that starts Claude Code research on every order the list shows, one per ×N stack, at most 28 an hour, in background tabs. Already researched ones are skipped.
   - **Stack identical disputes in the queue** (a switch under Settings > Access code, shown only once unlocked, and off until ticked): in Portal+ and the Tools queue, identical disputes with the same assignee and status show as one row with ×N. Claim or select that row and all N are claimed or selected; open it and it's worked as one. Claim, release, saved decisions and Submit on its page are done to all N (Submit after a 5-second countdown you can cancel).
   - **Work as one** opens one dispute of an identical group in the portal. Decisions you save there are copied to the rest, and when you press Submit you're asked whether to submit the rest too. Each copy is read again first and left alone if it no longer matches.
 

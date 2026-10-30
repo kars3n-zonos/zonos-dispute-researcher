@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.22.0
+// @version      7.27.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -2205,13 +2205,15 @@
   // Collapsed sections (an AD/CVD review's item list, for one) aren't on the page until they're opened, so
   // the prompt would say there's nothing there. They're opened for the read and closed again after.
   // Activity, country pickers and menus are left alone.
-  const collapsedSections = main => [...main.querySelectorAll('button[aria-expanded="false"][aria-controls]')]
-    .filter(b => !/^activity$/i.test(clean(b.textContent)) && !b.getAttribute('aria-haspopup') && b.getAttribute('role') !== 'combobox' && !/\([A-Z]{2}\)$/.test(clean(b.textContent)));
+  // (An AD/CVD review's item dropdowns have no aria-controls, so any collapsed button counts.)
+  const collapsedSections = main => [...main.querySelectorAll('button[aria-expanded="false"]')]
+    .filter(b => !/^activity$/i.test(clean(b.textContent)) && !b.getAttribute('aria-haspopup') && b.getAttribute('role') !== 'combobox'
+      && !/\([A-Z]{2}\)$/.test(clean(b.textContent)) && !b.closest('nav, header, [role="menu"], [role="listbox"], [role="dialog"]'));
   async function readWorkOrderOpen() {
     const main = document.querySelector('main');
     const opened = main ? collapsedSections(main) : [];
     for (const b of opened) b.click();
-    if (opened.length) await sleep(450);
+    if (opened.length) await sleep(700);
     try { return readWorkOrder(); } finally { for (const b of opened) if (b.isConnected && b.getAttribute('aria-expanded') === 'true') b.click(); }
   }
 
@@ -2226,6 +2228,18 @@
       if (name && name.length < 60 && !/hs code|tracking|^\d/i.test(name) && !names.includes(name)) names.push(name);
     }
     return names.slice(0, 8);
+  }
+
+  // A code shown in an item card (an AD/CVD review's line items: "HS code 6804.22.1000 · Country of origin CN")
+  // rather than a table row: the origin from the same card, the smallest box around the code that has one
+  function itemOrigin(button, activity) {
+    for (let el = button.parentElement, i = 0; el && i < 8 && !el.matches('main'); el = el.parentElement, i++) {
+      if (activity?.contains(el)) return '';
+      if (el.querySelectorAll('button[title="Look up in the HTS"]').length > 1) return '';   // past its own card
+      const m = (el.innerText || '').match(/country of origin\s*[:\n]?\s*([A-Z]{2})\b/i);
+      if (m) return m[1].toUpperCase();
+    }
+    return '';
   }
 
   function readWorkOrder() {
@@ -2257,7 +2271,7 @@
       if (!code || codes.some(c => sameCode(c.code, code))) continue;
       const row = b.closest('tr');
       const rowText = row ? [...row.children].map(td => clean(td.textContent)).join(' | ') : '';
-      const from = (rowText.match(/\(([A-Z]{2})\)/) || rowText.match(/\|\s*([A-Z]{2})\s*(\||$)/) || [])[1] || pageOrigin;
+      const from = (rowText.match(/\(([A-Z]{2})\)/) || rowText.match(/\|\s*([A-Z]{2})\s*(\||$)/) || [])[1] || itemOrigin(b, activity) || pageOrigin;
       codes.push({ code, from: isChapter99(code) ? '' : from });
     }
     // HS code review: the flagged line's code, and GreenLight's suggestion or the code typed as the correction
@@ -2491,8 +2505,13 @@
   // - "Research in Claude Code" puts the research prompt on the case as a Notion task, Claude Code runs it,
   //   and its answer comes back into this panel (and the shared answers) by itself.
   // In the portal's TEST MODE nothing is written to Notion unless "Write in test mode" is ticked.
-  // Others that want the portal's replies as they come (Batch work's "Work as one"): fn(op, status, json)
+  // Others that want the portal's replies as they come (Batch work's "Work as one"): fn(op, status, json, vars)
   const replyWatchers = new Set();
+  // Orders kept out of the Google Sheet: the identical copies done along with the one you work (a stack's
+  // parent). Only the parent gets a row, its notes and its decisions. Work order and dispute ids, for 30 minutes.
+  const sheetQuiet = new Map();
+  function quietSheet(ids, ms = 30 * 60000) { const until = Date.now() + ms; for (const id of ids) if (id) sheetQuiet.set(id, until); }
+  const sheetQuieted = id => (sheetQuiet.get(id) || 0) > Date.now();
   const desk = (() => {
     // Notion ids and the cloud routine all come from Setup (none are built in)
     const DS = () => cfg().projectsDs;        // Notion "Projects" data source (one row per case)
@@ -2591,6 +2610,16 @@
     const recordAction = (op, v, data) => {
       actionChain = actionChain.then(() => handleAction(op, v, data)).catch(e => { D.state = 'error'; D.msg = e.message; changed(); });
     };
+    // A reply about identical copies only (quietSheet): what it names, else what was sent
+    function aboutCopiesOnly(v, data) {
+      const ids = [];
+      const d = data && Object.values(data)[0];
+      if (d && !Array.isArray(d) && typeof d.id === 'string') ids.push(d.id);
+      for (const o of walk(data)) if (isWorkOrder(o)) ids.push(o.id);
+      if (!ids.length) ids.push(...(Array.isArray(v?.ids) ? v.ids : []), v?.input?.id, v?.id);
+      const named = ids.filter(Boolean);
+      return named.length > 0 && named.every(sheetQuieted);
+    }
     function onData(op, status, json) {
       captured.push({ op, at: Date.now(), json });
       captureSeq++;
@@ -2600,6 +2629,7 @@
       if (!(enabled() || sheetsOn()) || status >= 300 || !json?.data || json.errors?.length) return;
       if (ACTIONS[op]) {
         const v = varsByOp[op] && Date.now() - varsByOp[op].at < 15000 ? varsByOp[op].vars : {};
+        if (aboutCopiesOnly(v, json.data)) return;
         recordAction(op, v, json.data);
         return;
       }
@@ -2609,6 +2639,7 @@
       for (const o of walk(json.data)) {
         if (!isWorkOrder(o) || !o.resolvedAt || Date.now() - Date.parse(o.resolvedAt) > 3 * 60 * 1000) continue;
         if (!D.me || o.assigneeId !== D.me) continue;
+        if (sheetQuieted(o.id) || sheetQuieted(subjectId(o))) continue;   // a stack's copy
         const k = `desk:resolved:${o.id}`;
         if (GM_getValue(k, 0)) continue;
         GM_setValue(k, Date.now());
@@ -3105,7 +3136,7 @@
       const line = data?.manifestLineRecalculate?.id || vars?.manifestLineId;   // an AD/CVD re-quote names only its manifest line
       if (op === 'ManifestLineAdcvdRequote' && line && !ents.length) ents.push({ type: 'ADCVD_REVIEW', id: line, url: `${location.origin}/entry-writer-queue/ADCVD_REVIEW/${line}` });
       if (!ents.length) { const e = currentEntity(); if (e) ents.push(e); }
-      for (const ent of ents.slice(0, 20)) {
+      for (const ent of ents.filter(e => !sheetQuieted(e.id) && !(e.wo && sheetQuieted(e.wo.id))).slice(0, 20)) {   // a stack's copies stay out
         if (op === 'BrokerageWorkOrderAssign' && ent.wo && D.me && ent.wo.assigneeId !== D.me) continue;   // assigned to someone else
         const ctx = caseContext(ent);
         const n = ent.wo || ent.dd || null;
@@ -3339,7 +3370,7 @@
       Object.assign(research, f);
       GM_setValue(`desk:research:${ent.id}`, research);
       if (D.ent === ent) { D.research = research; changed(); }
-      return { requestId: r.requestId, session: f.session, fireError: f.fireError, limited: f.limited };
+      return { requestId: r.requestId, session: f.session, fireError: f.fireError, limited: f.limited, retryAfter: f.retryAfter };
     }
     // What the cloud session is told (its worker, dispute-desk-cloud's worker.py, takes Google Sheet requests too):
     // the request id, that request's own token and the sheet's web app address
@@ -3361,6 +3392,7 @@
           data: JSON.stringify({ text: text || `Research request (Notion task id): ${taskId}` }),
         });
         const j = (() => { try { return JSON.parse(r.responseText); } catch { return null; } })();
+        if (r.status >= 200 && r.status < 300) noteFire();   // each start counts toward the routine's hourly limit
         if (r.status >= 200 && r.status < 300 && j?.claude_code_session_url) {
           if (openTab) GM_openInTab(j.claude_code_session_url, { active: true, insert: true });   // watch the research as it runs
           if (pageId) {
@@ -3369,7 +3401,9 @@
           }
           return { session: j.claude_code_session_url };
         }
-        return { fireError: r.status === 429 ? 'the routine run limit was hit' : `the routine answered ${r.status}`, limited: r.status === 429 };
+        // Over the limit: nothing started, and the server says when to try again
+        const retryAfter = Number((String(r.responseHeaders || '').match(/retry-after:\s*(\d+)/i) || [])[1]) || 0;
+        return { fireError: r.status === 429 ? 'the routine run limit was hit' : `the routine answered ${r.status}`, limited: r.status === 429, retryAfter };
       } catch (e) { return { fireError: e.message }; }
     }
 
@@ -4453,6 +4487,9 @@
     .cq .empty { padding: 36px; }
     .cq-many, .badge.many { color: #ffffff; background: #b45309; border-color: #b45309; font-weight: 700; margin-right: 6px; }
     :host([data-theme="dark"]) .cq-many, :host([data-theme="dark"]) .badge.many { color: #111111; background: #f59e0b; border-color: #f59e0b; }
+    .runbar { margin-top: 12px; padding: 10px 14px; border: 1px solid var(--line); border-left: 4px solid #b45309; border-radius: 8px; font-size: 13px; }
+    .runbar-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .runbar ul { margin: 4px 0 0; padding-left: 18px; } .runbar summary { cursor: pointer; color: var(--muted); margin-top: 6px; } .runbar a { color: inherit; }
     .cq-stack { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; cursor: pointer; }
   `;
 
@@ -4608,15 +4645,16 @@
       const k = r.type === 'DUTY_DISPUTE_REVIEW' && shapes.key(r.sid);
       return k && !/^(none|err):/.test(k) ? `${k}|${r.assigneeId}|${r.status}|${r.escalatedTo}` : '';
     }
+    const copyIds = new Set();   // rows standing behind a ×N row, as last drawn
     function stack(rows, mark = true) {
-      if (mark) for (const r of S.rows) r._copies = null;
+      if (mark) { for (const r of S.rows) r._copies = null; copyIds.clear(); }
       if (!stackOn()) return rows;
       const out = [];
       const leads = new Map();
       for (const r of rows) {
         const k = stackKey(r);
         const lead = k && leads.get(k);
-        if (lead) { if (mark) lead._copies.push(r); continue; }
+        if (lead) { if (mark) { lead._copies.push(r); copyIds.add(r.id); } continue; }
         if (k) { if (mark) r._copies = []; leads.set(k, r); }
         out.push(r);
       }
@@ -4643,6 +4681,55 @@
       if (st.length) merged.adoptMany(st.map(r => ({ lead: r, copies: r._copies })), 'queue');
     }
     function prepareOpen(r) { if (r._copies?.length) merged.adoptMany([{ lead: r, copies: r._copies }], 'queue'); }
+    // ---- "Research all shown" (with the access code, once Claude Code research is set up): every row this list
+    // shows, a ×N stack counted once, researched in the background (bulk)
+    function researchAllBtn(rows, cls) {
+      if (!researchAllAllowed() || !desk.researchOn()) return null;
+      const j = bulk.job();
+      const c = j ? bulk.counts(j) : {};
+      const busy = !!(c.waiting || c.running);
+      return h('button', { class: cls, type: 'button', text: `Research all shown (${rows.length})`, disabled: !rows.length || busy,
+        title: busy ? 'A research run is still going (see the bar above the list)' : 'Start Claude Code research on every order this list shows, one per ×N stack',
+        onclick: () => researchAll(rows) });
+    }
+    function researchAll(rows) {
+      const sent = rows.filter(r => GM_getValue(`desk:research:${r.sid}`, null)).length;
+      const todo = rows.length - sent;
+      const copies = rows.reduce((a, r) => a + (r._copies?.length || 0), 0);
+      if (!todo) { toast('Every order shown was already sent for research.'); return; }
+      const hours = Math.ceil(todo / FIRES_PER_HOUR);
+      if (!confirm(`Start Claude Code research on ${todo} order${todo === 1 ? '' : 's'}?\n\n`
+        + `${sent ? `${sent} already sent for research ${sent === 1 ? 'is' : 'are'} skipped. ` : ''}${copies ? `The ${copies} identical copies in ×N rows aren't researched separately. ` : ''}`
+        + `Each opens for a moment in a background tab, gets its Google Sheet row and case doc, and starts its own cloud session, like pressing Research in Claude Code.\n\n`
+        + `The routine starts at most ${FIRES_PER_HOUR} an hour, so ${todo > FIRES_PER_HOUR ? `this takes about ${hours} hours` : 'this starts within minutes'}. Keep a queue tab open; you can work in other tabs. Every session uses your usage credits (fast mode).\n\nPortal mode: ${portal.mode().toUpperCase()}`)) return;
+      bulk.start(rows);
+      render();
+    }
+    const runBar = h('div', { class: 'runbar', hidden: true });
+    function drawRun() {
+      const j = bulk.job();
+      runBar.hidden = !j;
+      if (!j) return;
+      const c = bulk.counts(j);
+      const active = c.waiting || c.running;
+      const failed = j.items.filter(x => x.state === 'failed');
+      const b = (text, onclick, cls = '') => h('button', { class: `cq-btn ${cls}`, type: 'button', text, onclick });
+      runBar.replaceChildren(...[
+        h('div', { class: 'runbar-top' },
+          h('b', { text: active ? (j.paused ? 'Research run paused' : 'Researching in Claude Code') : 'Research run finished' }),
+          h('span', { class: 'muted', text: [c.started && `${c.started} started`, c.running && `${c.running} opening`, c.waiting && `${c.waiting} waiting`,
+            c.failed && `${c.failed} failed`, c.skipped && `${c.skipped} already sent`].filter(Boolean).join(' · ') }),
+          h('span', { style: 'flex:1' }),
+          active ? b(j.paused ? 'Resume' : 'Pause', () => bulk.pause(!j.paused)) : null,
+          failed.length && !active ? b(`Try the ${failed.length} failed again`, () => bulk.retryFailed()) : null,
+          b(active ? 'Stop' : 'Close', () => { if (!active || confirm(`Stop the research run? The ${c.waiting} waiting won't be started (the ${c.started} already started keep running).`)) { bulk.clear(); render(); } })),
+        h('div', { class: 'progress' }, h('div', { style: `width:${Math.round((c.started + c.failed + c.skipped) / Math.max(1, j.items.length) * 100)}%` })),
+        j.note ? h('div', { class: 'muted', text: j.note }) : null,
+        failed.length ? h('details', {}, h('summary', { text: `${failed.length} failed` }),
+          h('ul', {}, failed.slice(0, 40).map(x => h('li', {}, h('a', { href: x.url, target: '_blank', text: x.ref }), `: ${x.why}`)))) : null,
+      ].filter(Boolean));
+    }
+    bulk.on(drawRun);
     function stackToggle(cls) {
       if (!stackAllowed()) return null;
       return h('label', { class: cls, title: 'Identical disputes (same company, assignee and status; exactly the same lines, claims and questionnaire answers) show as one row with ×N. Claim, select or open it, and what you do is done to all of them.' },
@@ -4685,6 +4772,7 @@
           h('label', { title: 'Reloads every minute while nothing is selected' },
             h('input', { type: 'checkbox', checked: S.auto, onchange: e => setAuto(e.target.checked) }), ' Auto-refresh'),
           stackToggle(''),
+          researchAllBtn(rows, 'btn'),
           h('button', { class: 'btn', type: 'button', text: '↻ Refresh', disabled: S.loading, onclick: () => load() }),
           viewPicker('btn')));
 
@@ -4722,7 +4810,8 @@
         h('div', { class: 'chips' }, h('span', { class: 'muted', style: 'font-size:12px', text: 'Classes:' }), byType.length ? byType.slice(0, 10).map(([k, n]) => chip('type', k, n)) : h('span', { class: 'muted', style: 'font-size:12px', text: 'none' })),
         viewsBar());
 
-      wrap.replaceChildren(top, scopes, bar, summary, h('div', { class: 'actionbar' }, bulkBar()), table(ordered, groups), foot(ordered));
+      drawRun();
+      wrap.replaceChildren(top, scopes, bar, summary, runBar, h('div', { class: 'actionbar' }, bulkBar()), table(ordered, groups), foot(ordered));
       if (S.pop) { const p = root.querySelector('.pop input[type=search]'); if (p) p.focus(); }
       if (focusEl) { searchInput.focus(); }
     }
@@ -4763,6 +4852,7 @@
           h('button', { class: 'cq-icon', type: 'button', text: '↻', title: 'Refresh queue (it also refreshes every minute)', 'aria-label': 'Refresh queue', disabled: S.loading, onclick: () => load() }),
           h('span', { class: `mode ${mode}`, text: mode.toUpperCase(), title: 'The portal mode every action here goes to' }),
           stackToggle('cq-stack'),
+          researchAllBtn(rows, 'cq-btn dark'),
           viewPicker('cq-view')));
       const tabs = h('div', { class: 'cq-tabs', role: 'tablist' }, CLASSIC_SCOPES.map(s =>
         h('button', { class: 'cq-tab', type: 'button', role: 'tab', 'aria-selected': String(S.cscope === s.key),
@@ -4777,7 +4867,8 @@
       const note = h('div', { class: 'cq-note' },
         S.missing?.length ? [h('b', { text: `Not found: ${S.missing.join(', ')}` }), ' · ', h('button', { class: 'linkish', type: 'button', text: 'Copy', onclick: () => copy(S.missing.join('\n'), 'Copied.') })]
           : ['Showing every ', h('b', { text: 'Open' }), ' and ', h('b', { text: 'Waiting' }), ' order in one list. Click a column to sort; Ctrl-click a row for a new tab; Shift-click checkboxes to select a range.']);
-      wrap.replaceChildren(...[top, tabs, bar, note, S.sel.size && h('div', { class: 'cq-bulk' }, bulkBar()), classicTable(rows)].filter(Boolean));
+      drawRun();
+      wrap.replaceChildren(...[top, tabs, bar, note, runBar, S.sel.size && h('div', { class: 'cq-bulk' }, bulkBar()), classicTable(rows)].filter(Boolean));
       moreObserver.disconnect();
       const sentinel = wrap.querySelector('.cq-sentinel');
       if (sentinel) moreObserver.observe(sentinel);
@@ -4877,6 +4968,7 @@
     // A stacked row claims all of its identical copies with it
     async function claimOne(r) {
       const rows = [r, ...(r._copies || [])];
+      quietSheet((r._copies || []).flatMap(c => [c.id, c.sid]));
       const res = await merged.holding(rows.map(x => x.id), () => portal.act('BrokerageWorkOrderClaim', rows.map(x => x.id)));
       if (res.failed.length && !res.done.length) { toast(`Couldn't claim ${r.ref}: ${res.failed[0].error}`, true); return; }
       const done = new Set(res.done);
@@ -4966,7 +5058,8 @@
       const sel = selectedRows();
       return h('div', { class: 'bulk', role: 'toolbar', 'aria-label': 'Bulk actions' },
         h('span', { class: 'sel-n', text: `${sel.length} selected` }),
-        BULK.map(a => {
+        batchUnlocked() ? null : h('span', { class: 'muted', style: 'font-size:12px', text: 'Acting on many at once needs the access code (Tools ⚙ Settings).' }),
+        !batchUnlocked() ? null : BULK.map(a => {
           const n = sel.filter(r => a.can(r, S.me?.id)).length;
           return h('button', { class: `btn small${a.danger ? ' danger' : ''}`, type: 'button', disabled: !n, title: n < sel.length ? `${n} of ${sel.length} can be ${a.verb.toLowerCase()}` : '', text: n < sel.length && n ? `${a.label} (${n})` : a.label, onclick: () => runBulk(a) });
         }),
@@ -5171,6 +5264,7 @@
 
     // ---- bulk actions: a dialog says exactly what will happen, in which mode, before anything is sent
     function runBulk(a) {
+      if (!batchUnlocked()) return;
       const sel = selectedRows();
       const ok = sel.filter(r => a.can(r, S.me?.id));
       const skipped = sel.length - ok.length;
@@ -5208,6 +5302,7 @@
         msg.hidden = true;
         go.disabled = cancel.disabled = true;
         bar.hidden = false;
+        quietSheet(ok.filter(r => copyIds.has(r.id)).flatMap(r => [r.id, r.sid]));   // a stack's copies: only its parent goes in the sheet
         const res = await portal.act(a.op, ok.map(r => r.id), vars, (d, n) => { bar.firstChild.style.width = `${Math.round(d / n * 100)}%`; });
         scrim.remove();
         for (const id of res.done) S.sel.delete(id);
@@ -5606,6 +5701,9 @@
   // Stacking identical disputes in the queue (and working each stack as one): off until turned on under the access code
   const STACK_KEY = 'zt:batch:stack';
   const stackAllowed = () => batchUnlocked() && GM_getValue(STACK_KEY, false) === true;
+  // "Research all shown" in the queue: the same, off until turned on under the access code
+  const RESEARCH_ALL_KEY = 'zt:batch:researchAll';
+  const researchAllAllowed = () => batchUnlocked() && GM_getValue(RESEARCH_ALL_KEY, false) === true;
   async function sha256(text) {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
     return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -5788,6 +5886,13 @@
       if (!take.length) return;
       run(async () => {
         say(status, `Claiming ${take.length} in ${portal.mode().toUpperCase()} mode…`);
+        // Identical ones already known (from the queue's stacking): only the first of each goes in the sheet
+        const firsts = new Set();
+        for (const r of take) {
+          const k = shapes.key(r.sid);
+          if (!k || /^(none|err):/.test(k) || !firsts.has(k)) { if (k) firsts.add(k); continue; }
+          quietSheet([r.id, r.sid]);
+        }
         const res = await portal.act('BrokerageWorkOrderClaim', take.map(r => r.id), {}, progress);
         const byId = new Map(take.map(r => [r.id, r]));
         await loadRows();
@@ -5875,7 +5980,10 @@
       });
       return { n, failed };
     }
+    // Every group's copies past its first stay out of the Google Sheet: its first one is the case there
+    const quietCopies = groups => quietSheet(groups.flatMap(g => g.members.slice(1).flatMap(m => [m.r.id, m.r.sid, m.d?.id])));
     async function saveGroups(groups) {
+      quietCopies(groups);
       const work = groups.flatMap(g => disputeState(g).toSave.map(m => ({ g, m })));
       const { n, failed } = await eachCopy(work, 'Saving decisions', async ({ g, m }) => refreshMember(m, await decideDispute(m.d.id, m.d.organizationId,
         m.slots.map((s, i) => ({ claimId: s.claim.id, verdict: g.drafts[i].verdict, note: g.drafts[i].note.trim(),
@@ -5892,6 +6000,7 @@
       const ms = groups.filter(g => g.drafts).flatMap(g => disputeState(g).toComplete);
       if (!ms.length) return;
       if (!confirm(`Complete ${plural(ms.length, 'dispute')} in ${portal.mode().toUpperCase()} mode?\n\nEach is completed with the decisions saved on it, the same as the portal's Complete button. This can't be undone from here.`)) return;
+      quietCopies(groups.filter(g => g.drafts));
       run(async () => {
         const { n, failed } = await eachCopy(ms.map(m => ({ m })), 'Completing', async ({ m }) => refreshMember(m, await completeDispute(m.d.id, m.d.organizationId)));
         return result(`${S.stop ? 'Stopped. ' : ''}Completed`, plural(n - failed.length, 'dispute'), failed);
@@ -5900,6 +6009,7 @@
     function noteGroup(g) {
       const text = g.note.trim();
       if (!text) { say(status, 'Write the note first.', 'err'); return; }
+      quietCopies([g]);
       run(async () => {
         const res = await portal.act('BrokerageWorkOrderNote', g.members.map(m => m.r.id), { note: text }, progress);
         return result('Added the note to', plural(res.done.length, 'order'), res.failed.map(f => `${f.id}: ${f.error}`));
@@ -5909,6 +6019,7 @@
       if (!g.resolution) { say(status, 'Pick a resolution first.', 'err'); return; }
       const n = g.members.length;
       if (!confirm(`Resolve ${plural(n, 'order')} as "${RESOLUTIONS[g.resolution]}" in ${portal.mode().toUpperCase()} mode?${g.note.trim() ? `\n\nNote: ${g.note.trim()}` : ''}`)) return;
+      quietCopies([g]);
       run(async () => {
         const res = await portal.act('BrokerageWorkOrderResolve', g.members.map(m => m.r.id), { resolution: g.resolution, ...(g.note.trim() ? { note: g.note.trim() } : {}) }, progress);
         await loadRows();
@@ -6196,6 +6307,7 @@
       if (!m) { next(); return; }
       Object.assign(R, { job, stop: false, cancel: false, counting: false });
       R.msgs[m.lead] = '';
+      quietSheet(m.copies.flatMap(c => [c.id, c.wo]));
       try {
         if (job.kind === 'wo') R.msgs[m.lead] = await workOrderCopies(m, job.op, job.vars);
         else {
@@ -6348,6 +6460,118 @@
     return { record, byKey, start, adoptMany, dropFrom, holding, onRoute };
   })();
 
+  /* ---- research every order the queue shows, in Claude Code (with the access code) */
+
+  // Starts of the cloud routine in the last hour, from anywhere on this computer (a routine takes 30 an hour;
+  // a start over that is refused, not queued)
+  const FIRES_KEY = 'zt:fires';
+  const FIRES_PER_HOUR = 28;   // a little under the routine's 30, for starts made elsewhere
+  function recentFires() { return GM_getValue(FIRES_KEY, []).filter(t => Date.now() - t < 3600000); }
+  function noteFire() { GM_setValue(FIRES_KEY, [...recentFires(), Date.now()]); }
+
+  // Each order opens in a background tab (#zt-bulk=job:n), which researches it the way the Research tab's
+  // "Research in Claude Code" does (its Google Sheet row, case doc and chat link included) and reports back;
+  // the tab is then closed. A few at a time, and never more starts than the routine allows in an hour: the rest
+  // wait their turn, so hundreds can be left running. Kept on this computer, so a closed queue tab can carry on.
+  const BULK_KEY = 'zt:bulk:research';
+  const BULK_TABS = 3;
+  const BULK_TAB_TIMEOUT = 150000;
+  const bulk = (() => {
+    const tabs = new Map();   // item index -> { handle, at }
+    const listeners = new Set();
+    let timer = null;
+    const job = () => GM_getValue(BULK_KEY, null);
+    const save = j => GM_setValue(BULK_KEY, j);
+    const resKey = (j, i) => `zt:bulk:res:${j.id}:${i}`;
+    const emit = () => listeners.forEach(fn => { try { fn(); } catch (e) { console.warn('[Tools]', e); } });
+    const counts = j => {
+      const c = { waiting: 0, running: 0, started: 0, failed: 0, skipped: 0 };
+      for (const x of j?.items || []) c[x.state] = (c[x.state] || 0) + 1;
+      return c;
+    };
+    // `rows`: queue rows, one per order to research (a stack's first one stands for its copies)
+    function start(rows, { skipDone = true } = {}) {
+      const done = r => !!GM_getValue(`desk:research:${r.sid}`, null);
+      const items = rows.map(r => ({ url: r.url, ref: r.ref, sid: r.sid, label: r.label, copies: r._copies?.length || 0,
+        state: skipDone && done(r) ? 'skipped' : 'waiting' }));
+      save({ id: Date.now().toString(36), at: Date.now(), mode: portal.mode(), items, paused: false, waitUntil: 0, note: '' });
+      run();
+    }
+    function run() {
+      if (!timer) timer = setInterval(tick, 2000);
+      tick();
+    }
+    // Only one tab runs the job (another queue tab just shows it); a tab that stops checking in is taken over
+    const me = Math.random().toString(36).slice(2);
+    function owned() {
+      const o = GM_getValue('zt:bulk:owner', null);
+      if (o && o.id !== me && Date.now() - o.at < 150000) return false;   // hidden tabs' timers can slow to once a minute
+      GM_setValue('zt:bulk:owner', { id: me, at: Date.now() });
+      return true;
+    }
+    function tick() {
+      const j = job();
+      if (!j) { stopTimer(); return; }
+      if (!tabs.size && !owned()) { emit(); return; }
+      if (!researchAllAllowed() && !j.paused) { j.paused = true; j.note = 'Research all is off (or the access code is locked): paused.'; }
+      GM_setValue('zt:bulk:owner', { id: me, at: Date.now() });
+      // Results from the tabs
+      for (const [i, t] of tabs) {
+        const r = GM_getValue(resKey(j, i), null);
+        const late = Date.now() - t.at > BULK_TAB_TIMEOUT;
+        if (!r && !late && !t.handle.closed) continue;
+        const it = j.items[i];
+        if (r?.limited) {
+          // Refused, so nothing started: it goes back in line, and nothing more starts until the routine allows it
+          it.state = 'waiting';
+          j.waitUntil = Date.now() + (r.retryAfter ? r.retryAfter * 1000 : 15 * 60000);
+          j.note = `The routine's hourly limit was reached: carrying on at ${new Date(j.waitUntil).toLocaleTimeString()}.`;
+        } else if (r) Object.assign(it, { state: r.session ? 'started' : 'failed', session: r.session || '', why: r.error || '' });
+        else Object.assign(it, { state: 'failed', why: t.handle.closed ? 'its tab was closed before it finished' : "its page didn't finish in time" });
+        GM_deleteValue(resKey(j, i));
+        try { t.handle.close(); } catch { /* already closed */ }
+        tabs.delete(i);
+      }
+      // Items left "running" by a queue tab that was closed: their tab may have finished since
+      for (const [i, it] of j.items.entries()) {
+        if (it.state !== 'running' || tabs.has(i)) continue;
+        const r = GM_getValue(resKey(j, i), null);
+        if (r) { Object.assign(it, { state: r.session ? 'started' : 'failed', session: r.session || '', why: r.error || '' }); GM_deleteValue(resKey(j, i)); }
+        else Object.assign(it, { state: 'failed', why: 'the queue tab was closed while it ran (it may have started: check the sheet before trying again)' });
+      }
+      // More, within the hour's allowance
+      if (!j.paused && Date.now() >= (j.waitUntil || 0)) {
+        if (j.waitUntil) { j.waitUntil = 0; j.note = ''; }
+        if (portal.mode() !== j.mode) { j.paused = true; j.note = `The portal is in ${portal.mode().toUpperCase()} mode now, but this was started in ${j.mode.toUpperCase()} mode: paused.`; }
+        while (!j.paused && tabs.size < BULK_TABS && recentFires().length + tabs.size < FIRES_PER_HOUR) {
+          const i = j.items.findIndex(x => x.state === 'waiting');
+          if (i < 0) break;
+          j.items[i].state = 'running';
+          tabs.set(i, { at: Date.now(), handle: GM_openInTab(`${location.origin}${j.items[i].url}#zt-bulk=${j.id}:${i}`, { active: false, insert: false }) });
+        }
+        const c = counts(j);
+        if (c.waiting && !tabs.size && recentFires().length >= FIRES_PER_HOUR) {
+          const next = Math.min(...recentFires()) + 3600000;
+          j.note = `${FIRES_PER_HOUR} started in the last hour (the routine's limit): the next starts at ${new Date(next).toLocaleTimeString()}.`;
+        } else if (!j.waitUntil && !j.paused) j.note = '';
+      }
+      save(j);
+      emit();
+      if (!tabs.size && !counts(j).waiting) stopTimer();
+    }
+    function stopTimer() { clearInterval(timer); timer = null; }
+    function pause(on) { const j = job(); if (!j) return; j.paused = on; if (!on) j.note = ''; save(j); if (on) emit(); else run(); }
+    function retryFailed() {
+      const j = job(); if (!j) return;
+      for (const it of j.items) if (it.state === 'failed') { it.state = 'waiting'; it.why = ''; }
+      save(j); run();
+    }
+    function clear() { for (const [, t] of tabs) { try { t.handle.close(); } catch { /* closed */ } } tabs.clear(); GM_deleteValue(BULK_KEY); stopTimer(); emit(); }
+    // A queue tab opened again picks up a job still going
+    function resume() { const j = job(); if (j && !j.paused && (counts(j).waiting || counts(j).running)) run(); }
+    return { job, counts, start, pause, retryFailed, clear, resume, running: () => !!timer, on: fn => listeners.add(fn) };
+  })();
+
   /* ------------------------------------------------- dashboard: the panel */
 
   const PANEL_CSS = `
@@ -6360,6 +6584,7 @@
     button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .launch { position: fixed; z-index: 2147483000; width: 58px; height: 58px; display: grid; place-items: center; background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 50%; padding: 0; font-weight: 700; font-size: 12px; line-height: 1.1; box-shadow: 0 6px 20px rgba(0,0,0,.4); cursor: grab; touch-action: none; user-select: none; }
     .launch .ico { display: block; font-size: 18px; }
+    .quick { position: fixed; z-index: 2147483000; width: 180px; padding: 7px 10px; border: 0; border-radius: 999px; background: var(--accent); color: var(--accent-fg); font-weight: 600; font-size: 12.5px; box-shadow: 0 4px 14px rgba(0,0,0,.35); }
     .launch.dragging { cursor: grabbing; transform: scale(1.06); }
     .panel { position: fixed; top: 0; right: 0; height: 100vh; width: min(var(--w, 480px), 100vw); z-index: 2147483001; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border-left: 1px solid var(--line); box-shadow: -10px 0 30px rgba(0,0,0,.3); }
     .panel.docked { box-shadow: none; }
@@ -6562,10 +6787,41 @@
       style: 'border-color:#f59e0b;color:#f59e0b;background:rgba(245,158,11,.10);font-weight:600;cursor:pointer',
       onclick: () => { if (panel.hidden) open(); else close(); } },
       h('span', { 'aria-hidden': 'true', text: '⚒' }), h('span', { text: 'Tools' }));
-    const sideWrap = h('div', { class: 'px-2 pb-2', id: 'zt-side-wrap' }, sideBtn);
+    // Above it, on dispute and order pages: start research in one click, in Claude Code when it's set up for you,
+    // else in claude.ai (both read the page the way the Research tab does first)
+    const quickText = () => (desk.researchOn() ? 'Research in Claude Code' : 'Open in claude.ai');
+    const sideQuick = h('button', { type: 'button', id: 'zt-side-research', hidden: true,
+      class: 'flex w-full items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors',
+      style: 'border-color:#f59e0b;color:#ffffff;background:#d97706;font-weight:600;cursor:pointer;margin-bottom:6px',
+      onclick: () => quickResearch() }, h('span', { 'aria-hidden': 'true', text: '✦' }), h('span', { text: quickText() }));
+    const bubbleQuick = h('button', { class: 'quick', type: 'button', hidden: true, onclick: () => quickResearch() }, quickText());
+    async function quickResearch() {
+      openTool('dispute');
+      const path = location.pathname;
+      setStatus('Reading this page…');
+      if (!await waitFor(() => state && state.path === path && state.data, { timeout: 45000 })) { setStatus("Couldn't read this page yet. Try again once it has loaded.", 'err'); return; }
+      if (state.data.kind !== 'workOrder' && !state.selected?.size) state.selected = new Set(state.data.items.filter(i => i.inDispute).map(i => i.line));
+      render();
+      run(desk.researchOn() ? sendToClaudeCode : handoff);
+    }
+    function placeQuick() {
+      const show = isCasePage();
+      const text = quickText();
+      sideQuick.hidden = !show;
+      if (sideQuick.lastChild.textContent !== text) sideQuick.lastChild.textContent = text;
+      bubbleQuick.hidden = !show || launch.style.display === 'none' || launch.hidden;
+      if (!bubbleQuick.hidden) {
+        if (bubbleQuick.textContent !== text) bubbleQuick.textContent = text;
+        const r = launch.getBoundingClientRect();
+        bubbleQuick.style.left = `${Math.max(8, Math.min(innerWidth - 200, r.left + r.width / 2 - 90))}px`;
+        bubbleQuick.style.top = `${Math.max(8, r.top - 44)}px`;
+      }
+    }
+    const sideWrap = h('div', { class: 'px-2 pb-2', id: 'zt-side-wrap' }, sideQuick, sideBtn);
     // (runs every second: when the button is already in place by References, nothing is looked for)
     let refHolder = null;
     function placeLauncher() {
+      placeQuick();
       const side = launcherMode() === 'sidebar';
       if (side && refHolder?.isConnected && sideWrap.nextElementSibling === refHolder && refHolder.offsetParent) return;
       const ref = side && [...document.querySelectorAll('aside button, aside a')].find(e => /References/.test(e.textContent));
@@ -6825,15 +7081,24 @@
     const stackRow = h('label', { class: 'row', style: 'align-items:flex-start;gap:8px;cursor:pointer', hidden: true }, stackBox,
       h('span', {}, h('b', { text: 'Stack identical disputes in the queue' }), h('span', { class: 'hint', style: 'display:block;margin:0',
         text: 'Portal+ and the Tools queue show exact duplicates (same company, assignee and status; the same lines, claims and questionnaire answers) as one row with ×N. Whatever you do on that one (claim, waiting, notes, decisions, Submit) is done to all of them.' })));
-    const accessGroup = group('Access code', 'Some features are only for the people given a code. Type it here to turn them on for this computer.',
+    const researchAllBox = h('input', { type: 'checkbox', checked: GM_getValue(RESEARCH_ALL_KEY, false) === true, onchange: e => {
+      GM_setValue(RESEARCH_ALL_KEY, e.target.checked);
+      if (!e.target.checked && bulk.job()) bulk.pause(true);
+      queueCtl?.refreshView();
+    } });
+    const researchAllRow = h('label', { class: 'row', style: 'align-items:flex-start;gap:8px;cursor:pointer', hidden: true }, researchAllBox,
+      h('span', {}, h('b', { text: 'Research all shown, in the queue' }), h('span', { class: 'hint', style: 'display:block;margin:0',
+        text: 'A button in Portal+ and the Tools queue that starts Claude Code research on every order the list shows (one per ×N stack), at most 28 an hour. Each one is a cloud session on your usage credits.' })));
+    const accessGroup = group('Access code', 'Some features are only for the people given a code. Type it here to turn them on for this computer. Bulk actions in the queue (selecting many orders and acting on them) also need it.',
       h('div', { class: 'row' }, codeInput, btn('Unlock', () => unlock()), btn('Lock', () => lock())),
-      codeNote, stackRow);
+      codeNote, stackRow, researchAllRow);
     function showLocked() {
       if (batchUnlocked() && !batchGroup) { batchGroup = batchTool({ group, note, say, btn }); accessGroup.after(batchGroup); }
       if (!batchUnlocked() && batchGroup) { batchGroup.remove(); batchGroup = null; }
-      stackRow.hidden = !batchUnlocked();
+      stackRow.hidden = researchAllRow.hidden = !batchUnlocked();
       stackBox.checked = GM_getValue(STACK_KEY, false) === true;
-      if (batchUnlocked()) say(codeNote, 'Unlocked on this computer: Batch work is below.', 'ok');
+      researchAllBox.checked = GM_getValue(RESEARCH_ALL_KEY, false) === true;
+      if (batchUnlocked()) say(codeNote, 'Unlocked on this computer: bulk actions in the queue work, the switches above turn on stacking and Research all, and Batch work is below.', 'ok');
     }
     async function unlock() {
       const hash = await sha256(clean(codeInput.value));
@@ -6845,9 +7110,10 @@
     function lock() {
       GM_deleteValue(BATCH_UNLOCK_KEY);
       merged.dropFrom('queue');
+      if (bulk.job()) bulk.pause(true);
       queueCtl?.refreshView();
       showLocked();
-      say(codeNote, 'Locked. Batch work is hidden again.');
+      say(codeNote, 'Locked. Bulk actions, stacking, Research all and Batch work are off again (a research run going is paused).');
     }
 
     const settingsBody = h('div', { class: 'body' },
@@ -7246,7 +7512,7 @@
           h('button', { class: 'icon', type: 'button', 'aria-label': 'Close panel', title: 'Close', text: '×', onclick: () => close() }))),
       toolstrip,
       views.dispute, views.doc, views.classify, views.quote, views.analytics, views.entry, views.settings);
-    root.append(h('style', { text: PANEL_CSS }), h('div', { class: 'wrap' }, launch, panel));
+    root.append(h('style', { text: PANEL_CSS }), h('div', { class: 'wrap' }, bubbleQuick, launch, panel));
 
     let view = 'dispute';
     let drawQueued = 0;          // a Research redraw waiting for the next frame (see render)
@@ -8275,6 +8541,25 @@
     if (window.onurlchange === null) window.addEventListener('urlchange', onRoute);
     setInterval(onRoute, 1000); // fallback for client-side navigation, and re-attaches if the app re-renders <body>
     onRoute();
+
+    // A tab the queue's "Research all" opened (#zt-bulk=job:n): research this order, report back, and wait to be
+    // closed. Any other queue tab carries on a job still going.
+    const bulkMark = INITIAL_HASH.match(/^#zt-bulk=([a-z0-9]+):(\d+)$/);
+    if (!bulkMark && onQueuePage()) bulk.resume();
+    if (bulkMark && batchUnlocked()) {
+      history.replaceState(history.state, '', location.pathname + location.search);
+      (async () => {
+        const key = `zt:bulk:res:${bulkMark[1]}:${bulkMark[2]}`;
+        let res;
+        try {
+          if (!await waitFor(() => isCasePage() && document.querySelector('main'), { timeout: 30000 })) throw new Error("the page didn't open");
+          ui = ui || createPanel();
+          const r = await ui.autoResearch();
+          res = { session: r?.session || '', error: r?.session ? '' : r?.fireError || 'the cloud session did not start', limited: !!r?.limited, retryAfter: r?.retryAfter || 0 };
+        } catch (e) { res = { session: '', error: e.message }; }
+        GM_setValue(key, { ...res, at: Date.now() });
+      })();
+    }
 
     // The Research Autopilot userscript talks to this one through page events (JSON strings, so they cross
     // script sandboxes): "zdd:ask" { id, cmd, ...args } is answered by "zdd:reply" { id, ok, result | error }.
