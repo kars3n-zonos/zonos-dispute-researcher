@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.29.0
+// @version      7.30.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -170,6 +170,7 @@
     projectsDs: TEAM.projectsDs || '', tasksDs: TEAM.tasksDs || '', notionUser: '',   // Notion case tracking
     promptsDs: TEAM.promptsDs || '',        // Notion "Prompts" data source: the team's edits to the research prompts
     routineId: '', routineToken: '',        // Claude Code cloud research: each person's own routine, never the team's
+    extraRoutines: '',                      // more of your routines, one per line "<id> <token>": research starts are spread over all of them
     notesUrl: TEAM.notesUrl || '',                           // shared answers server
     sheetsUrl: TEAM.sheetsUrl || '', sheetsSecret: TEAM.sheetsSecret || '',   // Sheets edition: the sheet's web app
   };
@@ -3384,6 +3385,7 @@
       } });
       const research = { at: Date.now(), what, requestId: r.requestId };
       const f = await fireResearch(null, null, { openTab, text: sheetResearchText(r.requestId, r.token) });
+      if (f.session) noteResearched(ent?.id, 'Claude Code');
       if (f.session) await sheetsCall('session', ctx, { requestId: r.requestId, session: f.session }).catch(e => console.warn('[Dispute Desk] sheet', e));
       // No session means nobody will answer it: the request is marked failed, not left waiting
       else await sheetsCall('fail', null, { requestId: r.requestId, reason: `The cloud session didn't start: ${f.fireError || 'no reason given'}.` }).catch(e => console.warn('[Dispute Desk] sheet', e));
@@ -3402,17 +3404,33 @@
 
     // Starts the cloud research session for a research task; the session URL goes on the case as its Chat Link.
     // `text` replaces the Notion task line (the Sheets edition's request).
+    // With several routines, the one with the most room this hour; one that refuses (over its limit) waits the time
+    // it gives, and the next is tried
     async function fireResearch(taskId, pageId, { openTab = true, text = '' } = {}) {
-      const { routineId, routineToken } = cfg();
-      if (!routineId || !routineToken) return { fireError: 'no routine set up' };
+      if (!routines().length) return { fireError: 'no routine set up' };
+      const tried = [];
+      let r = null;
+      let routine = null;
+      for (;;) {
+        routine = pickRoutine(tried);
+        if (!routine) {
+          const wait = Math.max(60, Math.round((nextRoom() - Date.now()) / 1000));
+          return { fireError: tried.length ? 'every routine refused (over its hourly limit)' : 'every routine is at its hourly limit', limited: true, retryAfter: wait };
+        }
+        tried.push(routine.id);
+        try {
+          r = await gmRequest({
+            method: 'POST', url: `https://api.anthropic.com/v1/claude_code/routines/${routine.id}/fire`, timeout: 30000,
+            headers: { Authorization: `Bearer ${routine.token}`, 'anthropic-version': '2026-10-21', 'Content-Type': 'application/json' },
+            data: JSON.stringify({ text: text || `Research request (Notion task id): ${taskId}` }),
+          });
+        } catch (e) { return { fireError: e.message }; }
+        if (r.status !== 429) break;
+        coolRoutine(routine.id, Number((String(r.responseHeaders || '').match(/retry-after:\s*(\d+)/i) || [])[1]) || 0);
+      }
       try {
-        const r = await gmRequest({
-          method: 'POST', url: `https://api.anthropic.com/v1/claude_code/routines/${routineId}/fire`, timeout: 30000,
-          headers: { Authorization: `Bearer ${routineToken}`, 'anthropic-version': '2026-10-21', 'Content-Type': 'application/json' },
-          data: JSON.stringify({ text: text || `Research request (Notion task id): ${taskId}` }),
-        });
         const j = (() => { try { return JSON.parse(r.responseText); } catch { return null; } })();
-        if (r.status >= 200 && r.status < 300) noteFire();   // each start counts toward the routine's hourly limit
+        if (r.status >= 200 && r.status < 300) noteFire(routine.id);   // each start counts toward that routine's hourly limit
         if (r.status >= 200 && r.status < 300 && j?.claude_code_session_url) {
           if (openTab) GM_openInTab(j.claude_code_session_url, { active: true, insert: true });   // watch the research as it runs
           if (pageId) {
@@ -3421,9 +3439,7 @@
           }
           return { session: j.claude_code_session_url };
         }
-        // Over the limit: nothing started, and the server says when to try again
-        const retryAfter = Number((String(r.responseHeaders || '').match(/retry-after:\s*(\d+)/i) || [])[1]) || 0;
-        return { fireError: r.status === 429 ? 'the routine run limit was hit' : `the routine answered ${r.status}`, limited: r.status === 429, retryAfter };
+        return { fireError: `the routine answered ${r.status}` };
       } catch (e) { return { fireError: e.message }; }
     }
 
@@ -4523,7 +4539,9 @@
     .cq.dense .cq-t tr.row td { height: 40px; padding-top: 4px; padding-bottom: 4px; font-size: 13px; }
     .cq.dense .cq-t .cq-small { display: none; }
     .cq.dense .cq-t tr.row td .cq-who .muted { display: none; }
-    .cq-res { margin-left: 4px; color: #7c3aed; background: rgba(124,58,237,.1); border-color: rgba(124,58,237,.4); padding: 2px 7px; }
+    .cq-res { margin-left: 4px; color: #7c3aed; background: rgba(124,58,237,.08); border: 1px solid rgba(124,58,237,.45); padding: 2px 7px; }
+    .cq-res-live { color: #ffffff; background: #7c3aed; border-color: #7c3aed; }
+    :host([data-theme="dark"]) .cq-res { color: #c4b5fd; } :host([data-theme="dark"]) .cq-res-live { color: #ffffff; }
     .cq-res-bad { color: var(--err); background: var(--red-bg); border-color: var(--red-line); }
     .cq-many, .badge.many { color: #ffffff; background: #b45309; border-color: #b45309; font-weight: 700; margin-right: 6px; }
     :host([data-theme="dark"]) .cq-many, :host([data-theme="dark"]) .badge.many { color: #111111; background: #f59e0b; border-color: #f59e0b; }
@@ -4746,7 +4764,7 @@
       if (!research.length) { toast('Nothing to do: everything selected is claimed by someone else.', true); return; }
       if (!confirm(`Claim ${toClaim.length} and start Claude Code research on ${research.length}?\n\n`
         + `${copies ? `The ${copies} identical copies behind ×N rows are claimed with them but not researched separately. ` : ''}${theirs.length ? `${theirs.length} claimed by someone else ${theirs.length === 1 ? 'is' : 'are'} left alone. ` : ''}`
-        + `Research starts in background tabs, at most ${FIRES_PER_HOUR} an hour, and ones already researched (by anyone) are skipped. Keep a queue tab open.\n\nPortal mode: ${portal.mode().toUpperCase()}`)) return;
+        + `Research starts in background tabs, at most ${perHour()} an hour, and ones already researched (by anyone) are skipped. Keep a queue tab open.\n\nPortal mode: ${portal.mode().toUpperCase()}`)) return;
       if (toClaim.length) {
         quietSheet(toClaim.filter(r => copyIds.has(r.id)).flatMap(r => [r.id, r.sid]));
         const ids = toClaim.map(r => r.id);
@@ -4765,11 +4783,11 @@
       const todo = rows.length - sent;
       const copies = rows.reduce((a, r) => a + (r._copies?.length || 0), 0);
       if (!todo) { toast('Every order shown was already sent for research.'); return; }
-      const hours = Math.ceil(todo / FIRES_PER_HOUR);
+      const hours = Math.ceil(todo / perHour());
       if (!confirm(`Start Claude Code research on ${todo} order${todo === 1 ? '' : 's'}?\n\n`
         + `${sent ? `${sent} already sent for research ${sent === 1 ? 'is' : 'are'} skipped. ` : ''}${copies ? `The ${copies} identical copies in ×N rows aren't researched separately. ` : ''}`
         + `Each opens for a moment in a background tab, gets its Google Sheet row and case doc, and starts its own cloud session, like pressing Research in Claude Code.\n\n`
-        + `The routine starts at most ${FIRES_PER_HOUR} an hour, so ${todo > FIRES_PER_HOUR ? `this takes about ${hours} hours` : 'this starts within minutes'}. Keep a queue tab open; you can work in other tabs. Every session uses your usage credits (fast mode).\n\nPortal mode: ${portal.mode().toUpperCase()}`)) return;
+        + `${routines().length > 1 ? `Your ${routines().length} routines start` : 'The routine starts'} at most ${perHour()} an hour, so ${todo > perHour() ? `this takes about ${hours} hours` : 'this starts within minutes'}. Keep a queue tab open; you can work in other tabs. Every session uses your usage credits (fast mode).\n\nPortal mode: ${portal.mode().toUpperCase()}`)) return;
       bulk.start(rows);
       render();
     }
@@ -4813,6 +4831,7 @@
       host.dataset.theme = pageIsDarkSoon() ? 'dark' : 'light';
       host.dataset.skin = skin();
       const me = S.me?.id;
+      S.researched = GM_getValue(RESEARCHED_KEY, {});
       const all = sortRows(visible());
       const rows = stack(all);
       if (stackOn()) registerStacks(rows); else stackSig = '';
@@ -4945,7 +4964,7 @@
         pill(scoped.filter(r => r.status === 'WAITING').length, 'waiting', '', ''),
         pill(scoped.filter(r => r.escalatedTo).length, 'escalated', '', ''),
         pill(scoped.filter(r => r.createdMs > S.seenAt).length, 'new since your last visit', '', ''),
-        batchUnlocked() && desk.researchOn() ? pill(scoped.filter(r => GM_getValue(`desk:research:${r.sid}`, null)).length, 'sent for research', '', '') : null,
+        pill(scoped.filter(r => S.researched?.[r.sid] || GM_getValue(`desk:research:${r.sid}`, null)).length, 'researched by you', '', ''),
       ].filter(Boolean));
       const bar = h('div', { class: 'cq-bar' },
         CLASSIC_FILTERS.map(filterButton),
@@ -5013,11 +5032,16 @@
           : rows.length ? h('div', { class: 'cq-more', text: `All ${rows.length} shown` }) : null);
     }
     // Sent for research from this computer (Research in Claude Code, Research all, Claim & research): when
-    function researchPill(r) {
-      const rec = GM_getValue(`desk:research:${r.sid}`, null);
-      if (!rec?.at) return null;
-      return h('span', { class: `cq-pill cq-res${rec.session ? '' : ' cq-res-bad'}`, text: '✦',
-        title: rec.session ? `Sent for research ${ageText(rec.at)} ago (Claude Code)` : `Research was asked ${ageText(rec.at)} ago, but its session didn't start${rec.fireError ? `: ${rec.fireError}` : ''}` });
+    // ✦ beside the status: research started on it from this computer (lasting), filled while it's still running
+    function researchPill(r, cls = 'cq-pill') {
+      const done = S.researched?.[r.sid];
+      const live = GM_getValue(`desk:research:${r.sid}`, null);
+      if (!done && !live?.at) return null;
+      const failed = live?.at && !live.session;
+      const title = failed ? `Research was asked ${ageText(live.at)} ago, but its session didn't start${live.fireError ? `: ${live.fireError}` : ''}`
+        : live?.at ? `Researching in Claude Code (started ${ageText(live.at)} ago); the answer comes to the case doc`
+          : `You started research on this ${ageText(done.at)} ago (${done.how})`;
+      return h('span', { class: `${cls} cq-res${failed ? ' cq-res-bad' : live?.at ? ' cq-res-live' : ''}`, text: '✦', title, 'aria-label': title });
     }
     function classicRow(r, i) {
       const due = dueText(r);
@@ -5256,7 +5280,7 @@
         onauxclick: e => { if (e.button === 1) { e.preventDefault(); prepareOpen(r); GM_openInTab(location.origin + r.url, { active: false, insert: true }); } } },
         h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: S.sel.has(r.id), 'aria-label': `Select ${r.label} ${r.ref}`, onclick: e => selectClick(r, i, e) })),
         h('td', {}, h('span', { class: 'badge', text: r.label, title: r.label })),
-        h('td', {}, h('div', { class: 'badges' }, h('span', { class: `badge st-${r.status}`, text: human2(r.status) }), r.escalatedTo ? h('span', { class: 'badge esc', text: `↑ ${r.escalatedTo === 'ENGINEERING' ? 'Eng' : human2(r.escalatedTo)}`, title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null)),
+        h('td', {}, h('div', { class: 'badges' }, h('span', { class: `badge st-${r.status}`, text: human2(r.status) }), researchPill(r, 'badge'), r.escalatedTo ? h('span', { class: 'badge esc', text: `↑ ${r.escalatedTo === 'ENGINEERING' ? 'Eng' : human2(r.escalatedTo)}`, title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null)),
         h('td', {}, h('div', { class: 'title', title: r.items.join(' · ') || r.title }, isNew ? h('span', { class: 'new', title: 'New since your last visit' }) : null,
           r._copies?.length ? h('span', { class: 'badge many', text: `×${r._copies.length + 1}`, title: `${r._copies.length + 1} identical disputes: claim, select or open this one, and what you do is done to all of them` }) : null, r.title),
           r.problem ? h('div', { class: 'sub', title: r.detail, text: r.problem }) : null),
@@ -6588,9 +6612,58 @@
   // Starts of the cloud routine in the last hour, from anywhere on this computer (a routine takes 30 an hour;
   // a start over that is refused, not queued)
   const FIRES_KEY = 'zt:fires';
-  const FIRES_PER_HOUR = 28;   // a little under the routine's 30, for starts made elsewhere
-  function recentFires() { return GM_getValue(FIRES_KEY, []).filter(t => Date.now() - t < 3600000); }
-  function noteFire() { GM_setValue(FIRES_KEY, [...recentFires(), Date.now()]); }
+  // Orders you've started research on from this computer (Claude Code or claude.ai): the queue marks them ✦.
+  // Kept 60 days, by the order's id (a dispute id, or a work order's subject).
+  const RESEARCHED_KEY = 'zt:researched';
+  function noteResearched(id, how) {
+    if (!id) return;
+    const m = GM_getValue(RESEARCHED_KEY, {});
+    m[id] = { at: Date.now(), how };
+    for (const [k, v] of Object.entries(m)) if (Date.now() - v.at > 60 * 86400000) delete m[k];
+    GM_setValue(RESEARCHED_KEY, m);
+  }
+  // Claude Code takes 30 starts an hour per routine and 100 per account; a little under each, for starts made
+  // elsewhere (claude.ai's Run now, another computer)
+  const PER_ROUTINE = 28;
+  const PER_ACCOUNT = 95;
+  const COOL_KEY = 'zt:fires:cool';   // routine id -> refused until (the routine said so)
+  // Your routines: the one under Claude Code research, then the extra ones ("<id> <token>" per line)
+  function routines() {
+    const c = cfg();
+    const all = c.routineId && c.routineToken ? [{ id: c.routineId, token: c.routineToken }] : [];
+    for (const line of String(c.extraRoutines || '').split('\n')) {
+      const [id, token] = clean(line).split(' ');
+      if (id && token && !all.some(r => r.id === id)) all.push({ id, token });
+    }
+    return all;
+  }
+  // Starts in the last hour, all or one routine's ({ t, r } each; before several routines, just times)
+  function fireLog() { return GM_getValue(FIRES_KEY, []).map(x => (typeof x === 'number' ? { t: x, r: cfg().routineId } : x)).filter(x => Date.now() - x.t < 3600000); }
+  function recentFires(routineId) { return fireLog().filter(x => !routineId || x.r === routineId).map(x => x.t); }
+  function noteFire(routineId) { GM_setValue(FIRES_KEY, [...fireLog(), { t: Date.now(), r: routineId }]); }
+  const cooling = id => (GM_getValue(COOL_KEY, {})[id] || 0) > Date.now();
+  function coolRoutine(id, seconds) { const c = GM_getValue(COOL_KEY, {}); c[id] = Date.now() + (seconds ? seconds * 1000 : 15 * 60000); GM_setValue(COOL_KEY, c); }
+  // How many more can start this hour, across every routine
+  function fireRoom() {
+    const perRoutine = routines().filter(r => !cooling(r.id)).reduce((a, r) => a + Math.max(0, PER_ROUTINE - recentFires(r.id).length), 0);
+    return Math.max(0, Math.min(perRoutine, PER_ACCOUNT - recentFires().length));
+  }
+  const perHour = () => Math.min(PER_ACCOUNT, PER_ROUTINE * Math.max(1, routines().length));
+  // The routine with the most room this hour, or null when every one is full or refusing
+  function pickRoutine(skip = []) {
+    if (recentFires().length >= PER_ACCOUNT) return null;
+    return routines().filter(r => !skip.includes(r.id) && !cooling(r.id) && recentFires(r.id).length < PER_ROUTINE)
+      .sort((a, b) => recentFires(a.id).length - recentFires(b.id).length)[0] || null;
+  }
+  // When the next start can go: the soonest a routine frees up
+  function nextRoom() {
+    const now = Date.now();
+    const cool = GM_getValue(COOL_KEY, {});
+    const free = routines().map(r => Math.max(cool[r.id] || 0, recentFires(r.id).length >= PER_ROUTINE ? Math.min(...recentFires(r.id)) + 3600000 : now));
+    let t = free.length ? Math.min(...free) : now;
+    if (recentFires().length >= PER_ACCOUNT) t = Math.max(t, Math.min(...recentFires()) + 3600000);
+    return Math.max(now, t);
+  }
 
   // Each order opens in a background tab (#zt-bulk=job:n), which researches it the way the Research tab's
   // "Research in Claude Code" does (its Google Sheet row, case doc and chat link included) and reports back;
@@ -6674,16 +6747,16 @@
       if (!j.paused && Date.now() >= (j.waitUntil || 0)) {
         if (j.waitUntil) { j.waitUntil = 0; j.note = ''; }
         if (portal.mode() !== j.mode) { j.paused = true; j.note = `The portal is in ${portal.mode().toUpperCase()} mode now, but this was started in ${j.mode.toUpperCase()} mode: paused.`; }
-        while (!j.paused && tabs.size < BULK_TABS && recentFires().length + tabs.size < FIRES_PER_HOUR) {
+        while (!j.paused && tabs.size < BULK_TABS && tabs.size < fireRoom()) {
           const i = j.items.findIndex(x => x.state === 'waiting');
           if (i < 0) break;
           j.items[i].state = 'running';
           tabs.set(i, { at: Date.now(), handle: GM_openInTab(`${location.origin}${j.items[i].url}#zt-bulk=${j.id}:${i}`, { active: false, insert: false }) });
         }
         const c = counts(j);
-        if (c.waiting && !tabs.size && recentFires().length >= FIRES_PER_HOUR) {
-          const next = Math.min(...recentFires()) + 3600000;
-          j.note = `${FIRES_PER_HOUR} started in the last hour (the routine's limit): the next starts at ${new Date(next).toLocaleTimeString()}.`;
+        if (c.waiting && !tabs.size && !fireRoom()) {
+          const n = routines().length;
+          j.note = `${recentFires().length} started in the last hour (${n > 1 ? `your ${n} routines' limit` : "the routine's limit"}): the next starts at ${new Date(nextRoom()).toLocaleTimeString()}.`;
         } else if (!j.waitUntil && !j.paused) j.note = '';
       }
       save(j);
@@ -7197,6 +7270,27 @@
       afterSetup();
     };
 
+    // More routines: research starts are spread over all of them (each takes 30 an hour, the account 100)
+    const extraInput = h('textarea', { class: 'field', rows: 3, 'aria-label': 'Extra routines', spellcheck: 'false', autocomplete: 'off',
+      placeholder: 'More routines (optional), one per line: the routine id, a space, its API token' });
+    const extraNote = note();
+    const describeRoutines = () => {
+      const n = routines().length;
+      const extra = n - (cfg().routineId && cfg().routineToken ? 1 : 0);
+      return extra ? `${extra} extra routine${extra === 1 ? '' : 's'} saved (${routines().slice(-extra).map(r => `${r.id.slice(0, 10)}…`).join(', ')}): ${n} in all, up to ${perHour()} research starts an hour. Paste the whole list again to change it.`
+        : 'One routine: up to 28 research starts an hour. Add more here to go faster (up to about 95 an hour with 4).';
+    };
+    const saveExtra = () => {
+      const lines = extraInput.value.split('\n').map(clean).filter(Boolean);
+      const bad = lines.filter(l => !/^\S+ \S+$/.test(l));
+      if (bad.length) { say(extraNote, `Each line needs a routine id, a space, then its token ("${bad[0].slice(0, 20)}…" doesn't).`, 'err'); return; }
+      setCfg({ extraRoutines: lines.join('\n') });
+      extraInput.value = '';
+      say(extraNote, describeRoutines(), 'ok');
+    };
+    const clearExtra = () => { setCfg({ extraRoutines: '' }); extraInput.value = ''; say(extraNote, describeRoutines()); };
+    say(extraNote, describeRoutines());
+
     // Shared answers server
     const notesUrlInput = textField('notesUrl', 'Notes server address (optional)', 'Notes server address');
     const saveNotesUrl = () => {
@@ -7271,7 +7365,7 @@
     } });
     const researchAllRow = h('label', { class: 'row', style: 'align-items:flex-start;gap:8px;cursor:pointer', hidden: true }, researchAllBox,
       h('span', {}, h('b', { text: 'Research all shown, in the queue' }), h('span', { class: 'hint', style: 'display:block;margin:0',
-        text: 'A button in Portal+ and the Advanced View that starts Claude Code research on every order the list shows (one per ×N stack), at most 28 an hour. Each one is a cloud session on your usage credits.' })));
+        text: 'A button in Portal+ and the Advanced View that starts Claude Code research on every order the list shows (one per ×N stack), at most 28 an hour per routine (add more routines under Claude Code research to go faster). Each one is a cloud session on your usage credits.' })));
     const accessGroup = group('Access code', 'Some features are only for the people given a code. Type it here to turn them on for this computer. Bulk actions in the queue (selecting many orders and acting on them) also need it.',
       h('div', { class: 'row' }, codeInput, btn('Unlock', () => unlock()), btn('Lock', () => lock())),
       codeNote, stackRow, researchAllRow);
@@ -7339,6 +7433,10 @@
         h('div', { class: 'row' }, routineIdInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, routineTokenInput, btn('Save', saveRoutine)),
         routineNote,
+        h('p', { class: 'hint', style: 'margin:10px 0 0', text: 'Each routine starts at most 30 research sessions an hour. For more, make copies of your routine in claude.ai (same repo and environment) and add them here; starts are spread over all of them.' }),
+        h('div', { class: 'row', style: 'margin-top:6px' }, extraInput),
+        h('div', { class: 'row', style: 'margin-top:6px' }, btn('Save routines', saveExtra), btn('Remove extra routines', clearExtra)),
+        extraNote,
         h('label', { class: 'doc', style: 'margin-top:8px' }, h('input', { type: 'checkbox', checked: GM_getValue(RESEARCH_LOG_KEY, false) === true, onchange: e => GM_setValue(RESEARCH_LOG_KEY, e.target.checked) }),
           h('span', { text: "Add Claude Code's full research log to the case doc (every search, page and source it checked, and how it reasoned), under its answer" }))),
       EDITION === 'sheets' && group('claude.ai answers', "When you research in claude.ai (Open in claude.ai), Claude's finished answer comes back to the Research tab to save.",
@@ -8653,6 +8751,7 @@
       // How filling the message box went is reported back when you return here (see claudeTabNews)
       state.lastHandoff = { id, skipped, warning: lookupWarning().trim() };
       GM_openInTab(`https://claude.ai/new#zdr=${id}`, { active: true, insert: true, setParent: true });
+      noteResearched(entityFromPathHere()?.id, 'claude.ai');
       const warning = lookupWarning();
       if (skipped.length) setStatus(`Opened Claude, but couldn't download: ${skipped.join('; ')}.${warning}`, 'warn');
       else setStatus(`Opened Claude in a new tab. The prompt and files go into its message box; nothing is sent until you press Enter there.${warning}`, warning ? 'warn' : 'ok');
