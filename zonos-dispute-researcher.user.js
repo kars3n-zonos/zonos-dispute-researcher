@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.36.0
+// @version      7.38.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -4402,6 +4402,12 @@
   `;
 
   // Who can do what to an order. The portal still has the final say; a refusal is reported per order.
+  // An Entry rejected order's "Re-send as filed": which streams to send, and how (the portal page's own two lists)
+  const RESEND_STREAMS = [['ENTRY_SUMMARY_CARGO_RELEASE', 'Entry summary + cargo release'], ['ENTRY_SUMMARY', 'Entry summary'], ['CARGO_RELEASE', 'Cargo release'],
+    ['CARGO_RELEASE_WITH_PGA', 'Cargo release with PGA'], ['PGA_ONLY', 'PGA only']];
+  const RESEND_AS = [['REPLACE', 'Replace — amend what CBP holds'], ['ADD', 'Add — file a stream CBP rejected (008 not on file)'], ['UPDATE', 'Update']];
+  const RESEND_Q = `mutation EntryResend($entryId: ID!, $application: BrokerageAbiSendApplication!, $action: BrokerageAbiSendAction) {
+    entryResend(entryId: $entryId, application: $application, action: $action) { id status entryNumber } }`;
   const BULK = [
     { key: 'claim', label: 'Claim', op: 'BrokerageWorkOrderClaim', verb: 'Claimed', can: (r, me) => r.status === 'OPEN' && !r.assigneeId },
     { key: 'release', label: 'Release', op: 'BrokerageWorkOrderRelease', verb: 'Released', can: r => !!r.assigneeId },
@@ -5261,6 +5267,9 @@
       return h('div', { class: 'bulk', role: 'toolbar', 'aria-label': 'Bulk actions' },
         h('span', { class: 'sel-n', text: `${sel.length} selected` }),
         batchUnlocked() ? null : h('span', { class: 'muted', style: 'font-size:12px', text: 'Acting on many at once needs the access code (Tools ⚙ Settings).' }),
+        batchUnlocked() && sel.some(r => r.type === 'ENTRY_REJECTED')
+          ? h('button', { class: 'btn small primary', type: 'button', text: `Re-send as filed (${sel.filter(r => r.type === 'ENTRY_REJECTED').length})`,
+            title: 'Re-send the selected rejected entries as filed: pick the streams and how to send them, as on the page', onclick: () => runResend() }) : null,
         batchUnlocked() && desk.researchOn() ? (() => {
           const plan = claimPlan();
           if (!plan.research.length) return h('button', { class: 'btn small', type: 'button', text: 'Research', disabled: true, title: 'Everything selected is claimed by someone else' });
@@ -5474,6 +5483,66 @@
     }
 
     // ---- bulk actions: a dialog says exactly what will happen, in which mode, before anything is sent
+    // Re-send as filed, for every selected rejected entry: the page's Streams and Send as, claiming the ones nobody
+    // has first (the portal re-sends only an order you hold); ones someone else holds are left alone
+    function runResend() {
+      if (!batchUnlocked()) return;
+      const me = S.me?.id;
+      const entries = selectedRows().filter(r => r.type === 'ENTRY_REJECTED');
+      const theirs = entries.filter(r => r.assigneeId && r.assigneeId !== me);
+      const unclaimed = entries.filter(r => !r.assigneeId);
+      const mode = portal.mode();
+      const pick = (label, opts) => h('select', { 'aria-label': label }, opts.map(([v, t]) => h('option', { value: v, text: t })));
+      const streams = pick('Streams', RESEND_STREAMS);
+      const sendAs = pick('Send as', RESEND_AS);
+      const claimFirst = h('input', { type: 'checkbox', checked: true });
+      const bar = h('div', { class: 'progress', hidden: true }, h('div'));
+      const msg = h('p', { class: 'muted' });
+      const count = () => entries.length - theirs.length - (claimFirst.checked ? 0 : unclaimed.length);
+      const go = h('button', { class: 'btn primary', type: 'button' });
+      const sayCount = () => { go.textContent = `Re-send ${count()}`; go.disabled = !count(); };
+      claimFirst.addEventListener('change', sayCount);
+      sayCount();
+      const cancel = h('button', { class: 'btn', type: 'button', text: 'Cancel', onclick: () => scrim.remove() });
+      const scrim = h('div', { class: 'scrim', onclick: e => { if (e.target === scrim) scrim.remove(); } },
+        h('div', { class: 'dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Re-send as filed' },
+          h('h2', { text: `Re-send ${entries.length} rejected entr${entries.length === 1 ? 'y' : 'ies'} as filed` }),
+          h('p', {}, 'In ', h('span', { class: `mode ${mode}`, text: mode.toUpperCase() }), " mode, the same as the page's Re-send as filed: CBP re-adjudicates each, and Refresh from CBP reads the verdict.",
+            theirs.length ? ` ${theirs.length} held by someone else ${theirs.length === 1 ? 'is' : 'are'} left alone.` : ''),
+          h('div', { class: 'list' }, entries.slice(0, 60).map(r => h('div', { class: theirs.includes(r) ? 'muted' : '', text: `${r.ref} · ${r.customer || r.consignee || ''}${theirs.includes(r) ? ` · ${r.assigneeName}'s, skipped` : !r.assigneeId ? ' · unclaimed' : ''}` }))),
+          h('label', { class: 'f', text: 'Streams' }), streams,
+          h('label', { class: 'f', text: 'Send as' }), sendAs,
+          unclaimed.length ? h('label', { style: 'display:flex;gap:6px;align-items:center;margin-top:8px' }, claimFirst, `Claim the ${unclaimed.length} unclaimed first (the portal re-sends only orders you hold)`) : null,
+          msg, bar,
+          h('div', { class: 'actions' }, cancel, go)));
+      go.addEventListener('click', async () => {
+        go.disabled = cancel.disabled = true;
+        bar.hidden = false;
+        const failed = [];
+        let sent = 0, n = 0;
+        const todo = entries.filter(r => !theirs.includes(r) && (claimFirst.checked || r.assigneeId));
+        const toClaim = todo.filter(r => !r.assigneeId);
+        if (toClaim.length) {
+          msg.textContent = `Claiming ${toClaim.length}…`;
+          const res = await portal.act('BrokerageWorkOrderClaim', toClaim.map(r => r.id));
+          for (const fl of res.failed) { const r = toClaim.find(x => x.id === fl.id); failed.push(`${r?.ref || fl.id}: couldn't claim it (${fl.error})`); }
+          const claimed = new Set(res.done);
+          for (const r of toClaim) if (!claimed.has(r.id)) todo.splice(todo.indexOf(r), 1);
+        }
+        for (const r of todo) {
+          msg.textContent = `Re-sending ${++n} of ${todo.length}…`;
+          try { await portal.gql('EntryResend', RESEND_Q, { entryId: r.sid, application: streams.value, action: sendAs.value }); sent++; }
+          catch (e) { failed.push(`${r.ref}: ${e.message}`); }
+          bar.firstChild.style.width = `${Math.round(n / todo.length * 100)}%`;
+        }
+        scrim.remove();
+        S.sel.clear();
+        toast(`Re-sent ${sent} as filed (${RESEND_STREAMS.find(([v]) => v === streams.value)[1]}, ${RESEND_AS.find(([v]) => v === sendAs.value)[1].split(' — ')[0]}).${failed.length ? `\n${failed.length} failed:\n${failed.slice(0, 6).join('\n')}${failed.length > 6 ? '\n…' : ''}` : ' Refresh from CBP on each to read the verdict.'}`, failed.length > 0);
+        load({ quiet: true });
+      });
+      root.append(scrim);
+      streams.focus();
+    }
     function runBulk(a) {
       if (!batchUnlocked()) return;
       const sel = selectedRows();
@@ -7085,11 +7154,14 @@
     // above is no longer offered: it stays hidden). It lives in the page, so it's put back whenever the portal
     // redraws its sidebar. Without the sidebar (a narrow window),  opens Tools.
     const launcherMode = () => 'sidebar';
+    // A red "!" beside "Tools" when a newer version is out (see checkUpdate)
+    const updateDot = h('span', { 'aria-hidden': 'true', text: '!',
+      style: 'margin-left:-4px;display:none;place-items:center;width:17px;height:17px;border-radius:50%;background:#dc2626;color:#ffffff;font-size:11px;font-weight:700;line-height:1' });
     const sideBtn = h('button', { type: 'button', id: 'zt-side-launch', 'aria-label': 'Open Tools', title: 'Tools (\\ to toggle)',
       class: 'flex w-full items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors',
       style: 'border-color:#f59e0b;color:#f59e0b;background:rgba(245,158,11,.10);font-weight:600;cursor:pointer',
       onclick: () => { if (panel.hidden) open(); else close(); } },
-      h('span', { 'aria-hidden': 'true', text: '⚒' }), h('span', { text: 'Tools' }));
+      h('span', { 'aria-hidden': 'true', text: '⚒' }), h('span', { text: 'Tools' }), updateDot);
     // Above it, on dispute and order pages, when turned on under Settings > Panel and pages (off at first): claim
     // the order and start research in one click, in Claude Code when it's set up for you, else in claude.ai. Tools
     // stays closed while it works (what it's doing shows right above the button), and opens once it's started.
@@ -7530,6 +7602,9 @@
       title: "Opens the newest version on GitHub; press Tampermonkey's Update (or Reinstall) there, then reload this page" }, updateLabel, updateSub);
     function showUpdate(latest) {
       const behind = latest && newer(latest, myVersion);
+      updateDot.style.display = behind ? 'inline-grid' : 'none';
+      sideBtn.title = behind ? `Tools (\\ to toggle) · Update ${latest} is ready: open Settings (the cog) and press Update` : 'Tools (\\ to toggle)';
+      sideBtn.setAttribute('aria-label', behind ? `Open Tools (update ${latest} is ready)` : 'Open Tools');
       updateBtn.className = `update-btn ${!latest ? 'checking' : behind ? 'new' : 'ok'}`;
       updateLabel.textContent = !latest ? '⟳ Update' : behind ? `⟳ Update to ${latest}` : '✓ Up to date';
       updateSub.textContent = !latest ? `You have ${myVersion || '?'}. Click to check on GitHub.`
@@ -7546,6 +7621,9 @@
         if (r.status === 200 && latest) { GM_setValue(UPDATE_CHECK_KEY, { at: Date.now(), latest }); showUpdate(latest); }
       } catch { /* offline: it stays as it was, and a click still checks */ }
     }
+    // Checked when the portal opens and every 30 minutes too (GitHub at most every 15), for the "!" on the Tools button
+    setTimeout(() => checkUpdate(), 8000);
+    setInterval(() => checkUpdate(), 30 * 60000);
     const settingsBody = h('div', { class: 'body' },
       updateBtn,
       h('p', { class: 'hint', style: 'margin:0 0 14px', text: "Tools works without any of this: the queue, Classify, Quote and research prompts need nothing. Each part below adds something, and what you save stays on this computer." }),
