@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.31.0
+// @version      7.32.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -4085,12 +4085,15 @@
           receiver { person { companyName firstName lastName } } items { original { description } claims { type } } }
       }
       rejections { detail stream sourceCbpEvent { id cbpCode description severity } }`;
-    const LIST = `query BrokerageWorkOrders($first: Int, $after: String, $filter: BrokerageWorkOrderFilter) {
+    const LIST_PLAIN = `query BrokerageWorkOrders($first: Int, $after: String, $filter: BrokerageWorkOrderFilter) {
       brokerageWorkOrders(first: $first, after: $after, filter: $filter) { totalCount pageInfo { hasNextPage endCursor } edges { node { ${WO} } } } }`;
+    // The same, with each order's history: every claim, resolve, release, wait, note and escalation, who did it and when
+    const LIST_HISTORY = LIST_PLAIN.replace(`node { ${WO} }`, `node { ${WO} history { event createdAt actorId actorName assigneeName note } }`);
     const PAGE = 100;   // the most the portal returns at once
     // Every order matching a filter. The portal's cursors are offsets ("simple-offset-cursor<n>"), so the
     // pages after the first load side by side; if that ever stops matching the count, it reads them in order.
-    async function workOrders(filter, cap = 3000) {
+    async function workOrders(filter, cap = 3000, { history = false } = {}) {
+      const LIST = history ? LIST_HISTORY : LIST_PLAIN;
       const first = (await gql('BrokerageWorkOrders', LIST, { first: PAGE, filter })).brokerageWorkOrders;
       const total = Math.min(first.totalCount || 0, cap);
       const nodes = first.edges.map(e => e.node);
@@ -6819,6 +6822,17 @@
     .entry-blocked { padding: 16px; }
     .entry-blocked p { margin: 0 0 12px; }
     a.primary, a.secondary { display: inline-block; text-decoration: none; }
+    .an-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 6px; margin: 8px 0 14px; }
+    .an-stats .stat { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; }
+    .an-stats .stat b { font-size: 18px; } .an-stats .stat span { font-size: 11.5px; color: var(--muted); }
+    .an-stats .stat.warn b { color: var(--warn); } .an-stats .stat.err b { color: var(--err); }
+    .an-wrap { overflow-x: auto; }
+    .an-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    .an-table th { text-align: left; font-weight: 600; color: var(--muted); font-size: 11px; padding: 4px 5px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    .an-table td { padding: 5px 5px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    .an-table .n { text-align: right; font-variant-numeric: tabular-nums; }
+    .an-table td:first-child { white-space: normal; min-width: 90px; }
+    .an-table tr.me td { background: var(--tint); font-weight: 600; }
     a.update-btn { display: block; text-align: center; font-size: 14px; font-weight: 600; padding: 7px 12px; margin: 0 0 14px; border-radius: 8px; text-decoration: none; color: #ffffff; border: 0; }
     a.update-btn .update-sub { display: block; font-size: 11.5px; font-weight: 400; opacity: .92; margin-top: 1px; }
     a.update-btn.ok { background: #15803d; } a.update-btn.new { background: #d97706; } a.update-btn.checking { background: #71717a; }
@@ -7623,69 +7637,145 @@
       (pre.hs ? amount : hs).focus();
     }
 
-    // ---- Analytics: every order the portal has (closed ones included) for a period, by company, class,
-    // item / problem, resolution and who worked it. The portal keeps this history itself, so nothing is logged
-    // anywhere else; Export gives a CSV for bookkeeping.
+    // ---- Analytics: who did what, from the portal's own history of every work order (each claim, resolve, release,
+    // wait, escalation and note, who did it and when), for a period; and who holds what right now. Everything is
+    // read once (the portal has a couple of thousand orders); the period and class then change at once.
     const analyticsBody = h('div', { class: 'body' });
     const ANALYTICS_KEY = 'zt:analytics';
-    let analytics = null;   // { from, to, rows, at }
+    let analytics = null;   // { at, rows (every work order, with .history), me }
+    const PERIODS = [[1, 'Today'], [7, 'Last 7 days'], [30, 'Last 30 days'], [90, 'Last 90 days'], [365, 'Last 12 months']];
+    // RESOLVED counts their resolves and their duty dispute submits (the portal closes a submitted dispute's order
+    // itself, naming who submitted it); CLEARED, orders the portal closed on its own once the problem cleared (a
+    // rejected entry accepted on refiling, say) after they had worked it
+    const EVENT_COLS = [['RESOLVED', 'Resolved'], ['CLEARED', 'Cleared'], ['CLAIMED', 'Claimed'], ['RELEASED', 'Released'], ['WAITING', 'Waiting'], ['ESCALATED', 'Escal.'], ['NOTE', 'Notes']];
+    const closes = e => e.event === 'RESOLVED' || e.event === 'AUTO_RESOLVED';
+    // An order closed by the portal itself: the last person who claimed it before then
+    const lastClaimer = (r, at) => r.history.filter(x => x.event === 'CLAIMED' && x.actorName && Date.parse(x.createdAt) <= at).sort((x, y) => Date.parse(y.createdAt) - Date.parse(x.createdAt))[0]?.actorName || '';
+    // Who an event was by: a person's name; the portal itself ("Automatic"); or the merchant (an order's creation)
+    const actorOf = e => e.actorName || (!e.actorId || e.actorId === 'system' ? 'Automatic' : /^organization_/.test(e.actorId) ? 'Merchant' : e.actorId);
+    const spanText = ms => (ms < 3600000 ? `${Math.max(1, Math.round(ms / 60000))}m` : ms < 2 * DAY ? `${Math.round(ms / 3600000)}h` : `${Math.round(ms / DAY)}d`);
+    const median = xs => { if (!xs.length) return null; const v = [...xs].sort((a, b) => a - b); const m = Math.floor(v.length / 2); return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
     function renderAnalytics() {
-      const pref = GM_getValue(ANALYTICS_KEY, { days: 30 });
-      const days = h('select', { class: 'field', 'aria-label': 'Period' },
-        [[7, 'Last 7 days'], [30, 'Last 30 days'], [90, 'Last 90 days'], [365, 'Last 12 months']].map(([d, t]) => h('option', { value: String(d), text: t, selected: d === pref.days })));
-      const statusSel = h('select', { class: 'field', 'aria-label': 'Status' },
-        [['', 'Every status'], ['RESOLVED', 'Resolved'], ['OPEN', 'Open'], ['WAITING', 'Waiting'], ['CANCELLED', 'Cancelled'], ['AUTO_RESOLVED', 'Auto-resolved']]
-          .map(([v, t]) => h('option', { value: v, text: t, selected: v === (pref.status || '') })));
-      const mineOnly = h('input', { type: 'checkbox', checked: !!pref.mine });
+      const pref = { days: 7, cls: '', ...GM_getValue(ANALYTICS_KEY, {}) };
+      if (!PERIODS.some(([d]) => d === pref.days)) pref.days = 7;
+      const days = h('select', { class: 'field', 'aria-label': 'Period', onchange: () => { pref.days = Number(days.value); GM_setValue(ANALYTICS_KEY, pref); showAnalytics(); } },
+        PERIODS.map(([d, t]) => h('option', { value: String(d), text: t, selected: d === pref.days })));
+      const classes = analytics ? [...new Set(analytics.rows.map(r => r.label))].sort() : [];
+      const clsSel = h('select', { class: 'field', 'aria-label': 'Class', onchange: () => { pref.cls = clsSel.value; GM_setValue(ANALYTICS_KEY, pref); showAnalytics(); } },
+        h('option', { value: '', text: 'Every class' }), classes.map(c => h('option', { value: c, text: c, selected: c === pref.cls })));
       const out = h('div', { role: 'status' });
       const loadBtn = h('button', { class: 'primary', type: 'button', text: analytics ? 'Reload' : 'Load', onclick: () => loadAnalytics() });
       async function loadAnalytics() {
-        const p = { days: Number(days.value), status: statusSel.value, mine: mineOnly.checked };
-        GM_setValue(ANALYTICS_KEY, p);
         loadBtn.disabled = true;
-        out.replaceChildren(h('p', { class: 'muted', text: 'Reading the portal…' }));
+        out.replaceChildren(h('p', { class: 'muted', text: 'Reading every work order and its history from the portal…' }));
         try {
-          const me = await portal.me();
-          const filter = { createdAt: { after: new Date(Date.now() - p.days * DAY).toISOString() }, ...(p.status ? { status: p.status } : {}), ...(p.mine && me.id ? { assigneeIds: [me.id] } : {}) };
-          const rows = (await portal.workOrders(filter, 5000)).map(queueRow);
+          const [me, nodes] = await Promise.all([portal.me(), portal.workOrders({}, 8000, { history: true })]);
+          const rows = nodes.map(n => Object.assign(queueRow(n), { history: n.history || [], resolvedAt: Date.parse(n.resolvedAt) || 0 }));
           await portal.orgNames(rows.map(r => r.orgId));
           for (const r of rows) r.customer = portal.orgs[r.orgId] || '';
-          analytics = { ...p, rows, at: Date.now() };
-          showAnalytics();
+          analytics = { rows, at: Date.now(), me: me.name || '' };
+          renderAnalytics();
         } catch (e) { out.replaceChildren(h('p', { class: 'err', text: e.message })); }
         finally { loadBtn.disabled = false; loadBtn.textContent = 'Reload'; }
       }
-      function table(title, entries, total) {
-        return h('div', { class: 'section' }, h('p', { class: 'label', text: title }),
-          h('div', { class: 'bars' }, entries.slice(0, 12).map(([k, n]) => h('div', { class: 'bar-row', title: `${k}: ${n}` },
-            h('span', { class: 'bar-k', text: k }), h('span', { class: 'bar' }, h('span', { style: `width:${Math.max(2, Math.round(n / total * 100))}%` })), h('span', { class: 'bar-n', text: String(n) })))),
+      function bars(title, entries, note = '') {
+        const top = Math.max(1, ...entries.map(([, n]) => n));
+        return h('div', { class: 'section' }, h('p', { class: 'label', text: title }), note ? h('p', { class: 'hint', style: 'margin:-2px 0 6px', text: note }) : null,
+          entries.length ? h('div', { class: 'bars' }, entries.slice(0, 12).map(([k, n]) => h('div', { class: 'bar-row', title: `${k}: ${n}` },
+            h('span', { class: 'bar-k', text: k }), h('span', { class: 'bar' }, h('span', { style: `width:${Math.max(2, Math.round(n / top * 100))}%` })), h('span', { class: 'bar-n', text: String(n) }))))
+            : h('p', { class: 'hint', text: 'None.' }),
           entries.length > 12 ? h('p', { class: 'hint', text: `…and ${entries.length - 12} more (in the CSV)` }) : null);
+      }
+      function grid(title, note, head, body) {
+        return h('div', { class: 'section' }, h('p', { class: 'label', text: title }), note ? h('p', { class: 'hint', style: 'margin:-2px 0 6px', text: note }) : null,
+          body.length ? h('div', { class: 'an-wrap' }, h('table', { class: 'an-table' }, h('thead', {}, h('tr', {}, head.map((t, i) => h('th', { class: i ? 'n' : '', text: t })))),
+            h('tbody', {}, body.map(r => h('tr', { class: r.me ? 'me' : '' }, r.cells.map((c, i) => h('td', { class: i ? 'n' : '', text: c === 0 ? '·' : String(c ?? '') })))))))
+            : h('p', { class: 'hint', text: 'None.' }));
       }
       function showAnalytics() {
         const a = analytics;
-        if (!a) { out.replaceChildren(h('p', { class: 'hint', text: 'Pick a period and press Load. It reads every matching order from the portal, closed ones included.' })); return; }
-        const rows = a.rows;
-        const tally = fn => { const m = new Map(); for (const r of rows) { const k = fn(r) || '(unknown)'; m.set(k, (m.get(k) || 0) + 1); } return [...m].sort((x, y) => y[1] - x[1]); };
-        const n = rows.length || 1;
+        if (!a) { out.replaceChildren(h('p', { class: 'hint', text: "Press Load. It reads every work order the portal has, with its history (who claimed, resolved, released… each one, and when). Then the period and class change at once." })); return; }
+        const since = pref.days === 1 ? startOfDay(Date.now()) : Date.now() - pref.days * DAY;
+        const period = PERIODS.find(([d]) => d === pref.days)[1].toLowerCase();
+        const rows = a.rows.filter(r => !pref.cls || r.label === pref.cls);
+        const events = rows.flatMap(r => r.history.map(e => ({ ...e, at: Date.parse(e.createdAt) || 0, who: actorOf(e), r }))).filter(e => e.at >= since);
+        const you = name => !!a.me && name === a.me;
+
+        // Who did what in the period
+        const people = new Map();
+        for (const ev of events) {
+          // What it counts as, and for whom
+          let e = ev;
+          if (closes(ev)) e = ev.actorName ? { ...ev, event: 'RESOLVED' } : { ...ev, event: 'CLEARED', who: lastClaimer(ev.r, ev.at) };
+          if (!EVENT_COLS.some(([k]) => k === e.event) || !e.who || e.who === 'Merchant' || e.who === 'Automatic') continue;
+          const m = people.get(e.who) || { spans: [] };
+          m[e.event] = (m[e.event] || 0) + 1;
+          if (e.event === 'RESOLVED') {
+            // claim to resolve: this person's latest claim on the order before they resolved it
+            const claim = e.r.history.filter(x => x.event === 'CLAIMED' && actorOf(x) === e.who && Date.parse(x.createdAt) <= e.at).map(x => Date.parse(x.createdAt)).sort((x, y) => y - x)[0];
+            if (claim) m.spans.push(e.at - claim);
+          }
+          people.set(e.who, m);
+        }
+        const activity = [...people].sort((x, y) => (y[1].RESOLVED || 0) - (x[1].RESOLVED || 0) || (y[1].CLAIMED || 0) - (x[1].CLAIMED || 0))
+          .map(([who, m]) => ({ me: you(who), cells: [`${who}${you(who) ? ' (you)' : ''}`, ...EVENT_COLS.map(([k]) => m[k] || 0), m.spans.length ? spanText(median(m.spans)) : '—'] }));
+
+        // Who holds what right now (open and waiting orders)
+        const open = rows.filter(r => r.status === 'OPEN' || r.status === 'WAITING');
+        const holders = new Map();
+        for (const r of open.filter(x => x.assigneeName)) {
+          const m = holders.get(r.assigneeName) || { n: 0, overdue: 0, waiting: 0, oldest: Infinity };
+          m.n++;
+          if (DUE.overdue.test(r)) m.overdue++;
+          if (r.status === 'WAITING') m.waiting++;
+          if (r.claimedAt) m.oldest = Math.min(m.oldest, Date.parse(r.claimedAt));
+          holders.set(r.assigneeName, m);
+        }
+        const holding = [...holders].sort((x, y) => y[1].n - x[1].n)
+          .map(([who, m]) => ({ me: you(who), cells: [`${who}${you(who) ? ' (you)' : ''}`, m.n, m.overdue, m.waiting, m.oldest < Infinity ? spanText(Date.now() - m.oldest) : '—'] }));
+        const unclaimed = open.filter(r => !r.assigneeName);
+
+        // Totals
+        const closed = events.filter(closes);
+        const byPeople = closed.filter(e => e.actorName);
+        const cleared = closed.filter(e => !e.actorName && lastClaimer(e.r, e.at));
+        const auto = closed.length - byPeople.length - cleared.length;
+        const howResolved = e => (e.event === 'AUTO_RESOLVED' ? (e.r.type === 'DUTY_DISPUTE_REVIEW' ? 'Submitted (duty dispute)' : 'Closed by the portal') : e.r.resolution ? RESOLUTIONS[e.r.resolution] || human2(e.r.resolution) : 'Resolved');
+        const created = rows.filter(r => r.createdMs >= since);
+        const stat = (n, label, cls = '') => h('div', { class: `stat ${cls}` }, h('b', { text: String(n) }), h('span', { text: label }));
+        const counts = list => { const m = new Map(); for (const k of list) m.set(k, (m.get(k) || 0) + 1); return [...m].sort((x, y) => y[1] - x[1]); };
+
         const exportCsv = () => {
-          const cols = ['Created', 'Class', 'Status', 'Resolution', 'Company', 'Consignee', 'Item', 'Problem', 'Tracking', 'Entry', 'Assignee', 'Link'];
+          const cols = ['When', 'Event', 'Who', 'Class', 'Company', 'Reference', 'Item / problem', 'Resolution', 'Note', 'Link'];
           const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
-          const csv = [cols.map(q).join(','), ...rows.map(r => [r.createdMs ? new Date(r.createdMs).toISOString().slice(0, 10) : '', r.label, r.status, r.resolution, r.customer, r.consignee, r.title, r.problem, r.tracking, r.entryNo, r.assigneeName, location.origin + r.url].map(q).join(','))].join('\r\n');
-          const link = h('a', { href: URL.createObjectURL(new Blob([csv], { type: 'text/csv' })), download: `orders-${new Date().toISOString().slice(0, 10)}.csv` });
+          const csv = [cols.map(q).join(','), ...events.sort((x, y) => x.at - y.at).map(e => [new Date(e.at).toISOString().replace('T', ' ').slice(0, 16), human2(e.event), e.who, e.r.label, e.r.customer || e.r.consignee,
+            e.r.ref, e.r.title, closes(e) ? howResolved(e) : '', e.note || '', location.origin + e.r.url].map(q).join(','))].join('\r\n');
+          const link = h('a', { href: URL.createObjectURL(new Blob([csv], { type: 'text/csv' })), download: `work-order-activity-${new Date().toISOString().slice(0, 10)}.csv` });
           root.append(link); link.click(); link.remove();
         };
+
         out.replaceChildren(
-          h('p', { class: 'hint', text: `${rows.length} orders created in the ${days.selectedOptions[0].text.toLowerCase()}${a.status ? `, ${human2(a.status).toLowerCase()}` : ''}${a.mine ? ', assigned to you' : ''} · read ${new Date(a.at).toLocaleTimeString()}` }),
-          h('div', { class: 'actions', style: 'margin:6px 0 12px' }, h('button', { class: 'secondary', type: 'button', text: 'Export CSV', onclick: exportCsv })),
-          table('By company', tally(r => r.customer || r.consignee), n),
-          table('By class', tally(r => r.label), n),
-          table('By status / resolution', tally(r => r.resolution ? human2(r.resolution) : human2(r.status)), n),
-          table('By item / problem', tally(r => r.title), n),
-          table('By assignee', tally(r => r.assigneeName || 'Unclaimed'), n));
+          h('p', { class: 'hint', text: `${a.rows.length} work orders read ${new Date(a.at).toLocaleTimeString()}${pref.cls ? ` · ${pref.cls} only` : ''}. Activity is ${period}, from each order's own history; "Right now" is the queue as it is.` }),
+          h('div', { class: 'an-stats' },
+            stat(byPeople.length, `resolved or submitted by people, ${period}`),
+            stat(cleared.length, 'cleared after someone worked them'),
+            stat(auto, 'closed with nobody on them'),
+            stat(events.filter(e => e.event === 'CLAIMED').length, 'claims'),
+            stat(created.length, 'new orders'),
+            stat(open.length, 'open or waiting now'),
+            stat(unclaimed.length, 'unclaimed now', unclaimed.length ? 'warn' : ''),
+            stat(open.filter(DUE.overdue.test).length, 'overdue now', open.some(DUE.overdue.test) ? 'err' : '')),
+          grid(`Who did what · ${period}`, 'From each order\'s own history. Resolved includes duty disputes they submitted. "Cleared" is orders the portal closed on its own once the problem cleared (a rejected entry accepted, say) after they had worked it. "To resolve" is the typical time from their claim to their resolve.',
+            ['Person', ...EVENT_COLS.map(([, t]) => t), 'To resolve'], activity),
+          grid('Holding right now', `Open and waiting orders by who has them${unclaimed.length ? `; ${unclaimed.length} more are unclaimed` : ''}.`, ['Person', 'Holding', 'Overdue', 'Waiting', 'Held longest'], holding),
+          bars(`Resolved by class · ${period}`, counts(byPeople.map(e => e.r.label))),
+          bars(`How they were resolved · ${period}`, counts(byPeople.map(howResolved))),
+          bars(`New orders by company · ${period}`, counts(created.map(r => r.customer || r.consignee || '(unknown)'))),
+          bars('Unclaimed now, by class', counts(unclaimed.map(r => r.label))),
+          h('div', { class: 'actions', style: 'margin:6px 0 4px' }, h('button', { class: 'secondary', type: 'button', text: `Export the ${events.length} events (CSV)`, onclick: exportCsv })));
       }
       analyticsBody.replaceChildren(
-        h('div', { class: 'frow2' }, fieldRow('Period', days), fieldRow('Status', statusSel)),
-        h('label', { class: 'doc', style: 'margin:6px 0' }, mineOnly, h('span', { text: 'Only orders assigned to me' })),
+        h('div', { class: 'frow2' }, fieldRow('Period', days), fieldRow('Class', clsSel)),
         h('div', { class: 'actions', style: 'margin-bottom:10px' }, loadBtn), out);
       showAnalytics();
     }
@@ -7694,7 +7784,7 @@
       if (panel.hidden) open();
       setView(name);
     }
-    const analyticsBtn = h('button', { class: 'icon', type: 'button', text: '▤', title: 'Analytics: orders by company, class and item', 'aria-label': 'Analytics', 'aria-pressed': 'false', onclick: () => setView(view === 'analytics' ? lastView : 'analytics') });
+    const analyticsBtn = h('button', { class: 'icon', type: 'button', text: '▤', title: 'Analytics: who resolved and claimed what, who holds what now, and orders by class and company', 'aria-label': 'Analytics', 'aria-pressed': 'false', onclick: () => setView(view === 'analytics' ? lastView : 'analytics') });
     // On order pages only: Prev / Next through your queue as you last left it, and back to the queue
     const prevBtn = h('button', { class: 'tool', type: 'button', text: '◀', title: 'Previous order in your queue ([)', 'aria-label': 'Previous order', onclick: () => step(-1) });
     const nextBtn = h('button', { class: 'tool', type: 'button', text: '▶', title: 'Next order in your queue (])', 'aria-label': 'Next order', onclick: () => step(1) });
