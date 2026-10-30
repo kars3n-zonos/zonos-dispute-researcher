@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.41.0
+// @version      7.42.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -2907,11 +2907,28 @@
     }
     // A case with research in the sheet's Research tab but no row in Cases (the row was deleted): the card offers to add
     // it back, with Claude Code's answers in a new case doc
-    async function orphanResearch(ent) {
+    async function caseResearch(ent, noRow) {
       const { requests = [] } = await sheetsCall('researchStatus', caseContext(ent)).catch(() => ({}));
       if (D.ent !== ent || !requests.length) return;
-      D.orphan = { id: ent.id, requests, busy: false };
+      noteSessions(ent, requests);
+      if (noRow) D.orphan = { id: ent.id, requests, busy: false };
       changed();
+    }
+    // The newest Claude Code session of the case's research, for the card's chat link (kept after the answer is in)
+    function noteSessions(ent, requests) {
+      const s = requests.map(q => q.session).filter(Boolean);
+      if (s.length) D.sessions = { id: ent.id, latest: s[s.length - 1] };
+    }
+    // The case's chats: its Claude Code research session, and the claude.ai chat Open in claude.ai started for it on
+    // this computer (else the AI chat link on its row, whichever kind it is)
+    function chatLinks(ent) {
+      const row = (D.sheetCase?.id === ent.id && D.sheetCase.links?.chat) || '';
+      const code = D.research?.session || GM_getValue(`desk:research:${ent.id}`, null)?.session
+        || (D.sessions?.id === ent.id && D.sessions.latest) || (/claude\.ai\/code\//.test(row) && row) || '';
+      const ai = GM_getValue(CHAT_URL_PREFIX + ent.id, '') || GM_getValue(CHAT_URL_PREFIX + `wo_${ent.id}`, '') || (/claude\.ai\/chat\//.test(row) && row) || '';
+      const a = (href, text, title) => h('a', { href, target: '_blank', rel: 'noopener', text, title });
+      return [code && a(code, 'Claude Code chat', 'The Claude Code session that researched this case'),
+        ai && a(ai, 'claude.ai chat', 'The claude.ai chat this case was researched in')].filter(Boolean);
     }
     async function addToSheet() {
       const ent = D.ent;
@@ -2982,7 +2999,7 @@
       await sleep(3000);
       if (D.ent !== ent) return;
       const j = await sheetsCall('find', caseContext(ent)).catch(e => { console.warn('[Dispute Desk] sheet', e); return null; });
-      if (j && !j.doc && D.ent === ent) orphanResearch(ent);   // researched, but its row is gone?
+      if (j && D.ent === ent) caseResearch(ent, !j.doc);   // its Claude Code sessions (and, with no row, whether it was researched)
       if (D.ent === ent) pollAnswers(true);   // an answer that came in while you were away
     }
 
@@ -3136,6 +3153,7 @@
       try {
         const { requests = [] } = await sheetsCall('researchStatus', caseContext(ent));
         if (D.ent !== ent) return;
+        noteSessions(ent, requests);
         const done = GM_getValue(IMPORTED, {});
         let news = false;
         for (const q of requests) {
@@ -3161,8 +3179,13 @@
     function card(link) {
       if (!onDashboard) return null;
       const ent = D.ent;
+      if (!ent) return null;
+      const chats = chatLinks(ent);
+      // Without the sheet, just the case's chats
+      if (!sheetsOn()) return chats.length ? h('div', { class: 'section' }, h('p', { class: 'label', text: `Case · ${kindOf(ent.type)}` }),
+        h('div', { class: 'order-card' }, h('div', { class: 'row', style: 'gap:12px;flex-wrap:wrap' }, chats))) : null;
       // Whether the case is in the sheet yet, with its sheet and doc
-      if (sheetsOn() && ent) {
+      {
         const sc = D.sheetCase?.id === ent.id ? D.sheetCase : null;
         const a = (href, text) => h('a', { href, target: '_blank', rel: 'noopener', text });
         return h('div', { class: 'section' }, h('p', { class: 'label', text: `Case · ${kindOf(ent.type)}` }),
@@ -3175,7 +3198,7 @@
                 h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'secondary', type: 'button', text: o.busy ? 'Adding…' : 'Add to the Google Sheet', disabled: o.busy,
                   title: "Adds the case's row back, and puts Claude Code's answers in a new case doc", onclick: () => addToSheet() }))];
             })(),
-            sc && h('div', { class: 'row', style: 'gap:12px;margin-top:6px' }, sc.sheet && a(sc.sheet, 'Sheet'), sc.doc && a(sc.doc, 'Case doc'), sc.links?.chat && a(sc.links.chat, 'Claude chat')),
+            (sc || chats.length) && h('div', { class: 'row', style: 'gap:12px;margin-top:6px;flex-wrap:wrap' }, sc?.sheet && a(sc.sheet, 'Sheet'), sc?.doc && a(sc.doc, 'Case doc'), chats),
             // Research out with Claude Code: when, its session, and whether the session started
             (() => {
               const r = D.research || GM_getValue(`desk:research:${ent.id}`, null);
