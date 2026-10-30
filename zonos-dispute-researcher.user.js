@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.38.0
+// @version      7.39.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -4116,11 +4116,13 @@
       brokerageWorkOrders(first: $first, after: $after, filter: $filter) { totalCount pageInfo { hasNextPage endCursor } edges { node { ${WO} } } } }`;
     // The same, with each order's history: every claim, resolve, release, wait, note and escalation, who did it and when
     const LIST_HISTORY = LIST_PLAIN.replace(`node { ${WO} }`, `node { ${WO} history { event createdAt actorId actorName assigneeName note } }`);
+    // Closed orders: who closed each one (a user id, or the merchant's organization for an auto-resolve)
+    const LIST_CLOSED = LIST_PLAIN.replace(`node { ${WO} }`, `node { ${WO} resolvedBy }`);
     const PAGE = 100;   // the most the portal returns at once
     // Every order matching a filter. The portal's cursors are offsets ("simple-offset-cursor<n>"), so the
     // pages after the first load side by side; if that ever stops matching the count, it reads them in order.
-    async function workOrders(filter, cap = 3000, { history = false } = {}) {
-      const LIST = history ? LIST_HISTORY : LIST_PLAIN;
+    async function workOrders(filter, cap = 3000, { history = false, closed = false } = {}) {
+      const LIST = history ? LIST_HISTORY : closed ? LIST_CLOSED : LIST_PLAIN;
       const first = (await gql('BrokerageWorkOrders', LIST, { first: PAGE, filter })).brokerageWorkOrders;
       const total = Math.min(first.totalCount || 0, cap);
       const nodes = first.edges.map(e => e.node);
@@ -4263,16 +4265,20 @@
       escalatedTo: n.escalatedTo || '', escalationNote: n.escalationNote || '', resolution: n.resolution || '', detail: n.detail || '', problem: clean(problem).slice(0, 160),
       title: clean(title).slice(0, 120), items, tracking, entryNo, mbol, ref: tracking || entryNo || mbol || sid, sid, url, orgId, customer: '', consignee,
       codes, groupKey: n.groupKey || '', claims,
+      // Resolved, auto-resolved or cancelled (the Advanced View's All work orders tab)
+      closed: n.status !== 'OPEN' && n.status !== 'WAITING', resolutionNote: n.resolutionNote || '', resolvedMs: Date.parse(n.resolvedAt) || 0, resolvedBy: n.resolvedBy || '', resolverName: '',
     };
   }
   // The text a search looks through, built once per row (and again when its customer name arrives)
   const hay = r => r._hay || (r._hay = [r.label, r.status, r.title, r.problem, r.detail, r.tracking, r.entryNo, r.mbol, r.sid, r.id, r.customer, r.consignee,
-    r.assigneeName, r.stream, r.escalatedTo, r.escalationNote, r.claims, ...r.items, ...r.codes].join(' \u0001 ').toLowerCase());
+    r.assigneeName, r.stream, r.escalatedTo, r.escalationNote, r.claims, RESOLUTIONS[r.resolution] || r.resolution, r.resolutionNote, r.resolverName, ...r.items, ...r.codes].join(' \u0001 ').toLowerCase());
 
   // One date formatter for every row (making one per call was the queue's slowest step), and today's start and
   // each row's due day worked out once instead of on every test, sort and render
   const DUE_DATE = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
   function dueText(r) {
+    // A closed order isn't due any more: its due date, and when it was closed
+    if (r.closed) return { text: r.dueMs ? r._dueDate || (r._dueDate = DUE_DATE.format(r.dueMs)) : '—', sub: r.resolvedMs ? `closed ${DUE_DATE.format(r.resolvedMs)}` : '', cls: 'muted' };
     if (!r.dueMs) return { text: '—', cls: 'muted' };
     const date = r._dueDate || (r._dueDate = DUE_DATE.format(r.dueMs));
     const days = Math.floor((today() - dueDay(r)) / DAY);
@@ -4413,7 +4419,8 @@
     { key: 'release', label: 'Release', op: 'BrokerageWorkOrderRelease', verb: 'Released', can: r => !!r.assigneeId },
     { key: 'wait', label: 'Wait', op: 'BrokerageWorkOrderWait', verb: 'Marked waiting', can: r => r.status === 'OPEN', note: 'optional' },
     { key: 'resume', label: 'Resume', op: 'BrokerageWorkOrderResume', verb: 'Resumed', can: r => r.status === 'WAITING', note: 'optional' },
-    { key: 'escalate', label: 'Escalate', op: 'BrokerageWorkOrderEscalate', verb: 'Escalated', can: r => !r.escalatedTo, note: 'required', target: true },
+    // The portal escalates only an order you hold: the unclaimed ones are claimed first, just for this
+    { key: 'escalate', label: 'Escalate', op: 'BrokerageWorkOrderEscalate', verb: 'Escalated', can: r => !r.escalatedTo, note: 'required', target: true, claimFirst: true },
     { key: 'note', label: 'Note', op: 'BrokerageWorkOrderNote', verb: 'Added a note to', can: () => true, note: 'required' },
     { key: 'assign', label: 'Assign', op: 'BrokerageWorkOrderAssign', verb: 'Assigned', can: () => true, assignee: true },
     { key: 'resolve', label: 'Resolve', op: 'BrokerageWorkOrderResolve', verb: 'Resolved', can: r => r.status === 'OPEN' || r.status === 'WAITING', note: 'optional', resolution: true, danger: true },
@@ -4425,19 +4432,23 @@
     { key: 'waiting', label: 'Waiting', test: r => r.status === 'WAITING' },
     { key: 'escalated', label: 'Escalated', test: r => !!r.escalatedTo },
     { key: 'all', label: 'All open', test: () => true },
+    // Every work order, completed and cancelled ones too (those load when the tab is first opened)
+    { key: 'everything', label: 'All work orders', test: () => true, every: true },
   ];
   const DUE = {
-    overdue: { label: 'Overdue', test: r => r.dueMs && dueDay(r) < today() },
-    today: { label: 'Due today', test: r => r.dueMs && dueDay(r) === today() },
-    week: { label: 'Due in 7 days', test: r => r.dueMs && r.dueMs >= today() && r.dueMs < today() + 8 * DAY },
+    overdue: { label: 'Overdue', test: r => !r.closed && r.dueMs && dueDay(r) < today() },
+    today: { label: 'Due today', test: r => !r.closed && r.dueMs && dueDay(r) === today() },
+    week: { label: 'Due in 7 days', test: r => !r.closed && r.dueMs && r.dueMs >= today() && r.dueMs < today() + 8 * DAY },
     none: { label: 'No due date', test: r => !r.dueMs },
   };
+  // Only in Portal+, where the portal's own queue has it too
+  const STREAM_FILTER = { key: 'stream', label: 'Stream', val: r => r.stream ? human2(r.stream) : 'None',
+    hint: "Which CBP filing the problem is on (entry summary, cargo release, PGA…). Only rejected or failed filings have one; everything else is None." };
   const FILTERS = [
     { key: 'type', label: 'Class', val: r => r.label },
     { key: 'customer', label: 'Customer', val: r => r.customer || r.consignee || '(unknown)', searchable: true },
     { key: 'assignee', label: 'Assignee', val: r => r.assigneeName || 'Unclaimed', searchable: true },
-    { key: 'status', label: 'Status', val: r => [r.status === 'WAITING' ? 'Waiting' : 'Open', ...(r.escalatedTo ? ['Escalated'] : [])] },
-    { key: 'stream', label: 'Stream', val: r => r.stream ? human2(r.stream) : 'None' },
+    { key: 'status', label: 'Status', val: r => [r.status === 'WAITING' ? 'Waiting' : r.status === 'OPEN' ? 'Open' : human2(r.status), ...(r.escalatedTo ? ['Escalated'] : [])] },
     { key: 'due', label: 'Due', val: r => Object.entries(DUE).filter(([, d]) => d.test(r)).map(([, d]) => d.label) },
   ];
   function human2(s) { const t = String(s || '').toLowerCase().replace(/_/g, ' '); return t.charAt(0).toUpperCase() + t.slice(1); }
@@ -4472,7 +4483,7 @@
   };
   const filterOf = key => FILTERS.find(f => f.key === key);
   const CLASSIC_FILTERS = [
-    { ...filterOf('type'), label: 'Problem class' }, filterOf('stream'), filterOf('status'), filterOf('customer'),
+    { ...filterOf('type'), label: 'Problem class' }, STREAM_FILTER, filterOf('status'), filterOf('customer'),
     { key: 'created', label: 'Created', val: r => Object.values(CREATED).filter(c => c.test(r)).map(c => c.label) },
     filterOf('due'), filterOf('assignee'),
   ];
@@ -4614,6 +4625,7 @@
       rows: [], me: null, loadedAt: 0, loading: false, error: '', q: '', scope: prefs.scope, cscope: prefs.cscope, filters: prefs.filters || {}, sort: prefs.sort, group: prefs.group,
       auto: prefs.auto, sel: new Set(), anchor: -1, focus: -1, pop: '', popSearch: '', extra: null, extraFor: '', seenAt: GM_getValue(SEEN_KEY, 0), shown: [], limit: 300,
       open: new Set(),   // Portal+: rows with their details showing
+      closed: [], closedAt: 0, closedLoading: false, closedError: '',   // resolved, auto-resolved and cancelled orders (All work orders)
       stack: prefs.stack !== false, stackMsg: '',
       excl: prefs.excl || {},
       cgroup: prefs.cgroup || '', dense: !!prefs.dense,   // Portal+: its grouping, and compact rows   // filters set to Hide: the values picked are left out instead of the only ones shown   // identical disputes shown as one row (with the access code)
@@ -4659,6 +4671,7 @@
         S.loading = false;
         render();
         if (placePending) { placePending = false; restorePlace(); }
+        if (everythingShown()) loadClosed(!quiet);
         // Names the cache didn't have yet come in after the first draw
         const missing = rows.filter(r => r.orgId && !(r.orgId in names)).map(r => r.orgId);
         if (missing.length) {
@@ -4671,6 +4684,35 @@
         S.loading = false;
         render();
       }
+    }
+    // The closed orders, for the All work orders tab: read when it's opened, and again at most every 5 minutes
+    // (or on ↻ Refresh), since there are hundreds and they rarely change
+    const everythingShown = () => skin() === 'tools' && !!SCOPES.find(s => s.key === S.scope)?.every;
+    async function loadClosed(force = false) {
+      if (S.closedLoading || (!force && Date.now() - S.closedAt < 5 * 60000)) return;
+      S.closedLoading = true; S.closedError = '';
+      render();
+      try {
+        const rows = (await portal.workOrders({ status: ['RESOLVED', 'AUTO_RESOLVED', 'CANCELLED'] }, 6000, { closed: true })).map(queueRow);
+        await portal.orgNames(rows.map(r => r.orgId).filter(Boolean));
+        // Who closed it, by the names of people seen holding orders (the portal gives only their id)
+        const people = new Map(S.rows.filter(r => r.assigneeId).map(r => [r.assigneeId, r.assigneeName]));
+        if (S.me?.id) people.set(S.me.id, S.me.name || 'You');
+        for (const r of rows) {
+          r.customer = portal.orgs[r.orgId] || '';
+          r.resolverName = /^organization_/.test(r.resolvedBy) ? 'Automatic' : people.get(r.resolvedBy) || '';
+        }
+        S.closed = rows;
+        S.closedAt = Date.now();
+      } catch (e) { S.closedError = e.message; }
+      S.closedLoading = false;
+      render();
+    }
+    // The orders a tab draws from: the open and waiting ones, plus the closed ones on All work orders
+    function baseRows(scope) {
+      if (!scope?.every) return S.rows;
+      const open = new Set(S.rows.map(r => r.id));
+      return [...S.rows, ...S.closed.filter(r => !open.has(r.id))];
     }
     function setAuto(on) {
       S.auto = on;
@@ -4697,11 +4739,12 @@
       const scope = scopeList().find(s => s.key === S[scopeKey()]) || scopeList()[0];
       const me = S.me?.id;
       const pq = parseQuery(S.q);
-      let rows = S.rows.filter(r => scope.test(r, me));
+      let rows = baseRows(scope).filter(r => scope.test(r, me));
       for (const f of filterList()) {
-        const want = S.filters[f.key];
+        let want = S.filters[f.key];
+        // The Escalated and All work orders tabs show escalated orders, hidden or not
+        if (f.key === 'status' && S.excl.status && (scope.key === 'escalated' || scope.every)) want = want?.filter(v => v !== 'Escalated');
         if (f.key === ignore || !want?.length) continue;
-        if (f.key === 'status' && scope.key === 'escalated' && S.excl.status) continue;   // the Escalated tab shows them, hidden or not
         rows = rows.filter(r => filterVals(f, r).some(v => want.includes(v)) !== !!S.excl[f.key]);
       }
       if (pq.list) {
@@ -4751,7 +4794,7 @@
     const stackOn = () => S.stack && stackAllowed();
     const idsOf = r => [r.id, ...(r._copies || []).map(c => c.id)];
     function stackKey(r) {
-      const k = r.type === 'DUTY_DISPUTE_REVIEW' && shapes.key(r.sid);
+      const k = !r.closed && r.type === 'DUTY_DISPUTE_REVIEW' && shapes.key(r.sid);   // closed orders are never stacked
       return k && !/^(none|err):/.test(k) ? `${k}|${r.assigneeId}|${r.status}|${r.escalatedTo}` : '';
     }
     const copyIds = new Set();   // rows standing behind a ×N row, as last drawn
@@ -4811,7 +4854,7 @@
       const leads = sel.filter(r => !copyIds.has(r.id));
       const toClaim = sel.filter(r => r.status === 'OPEN' && !r.assigneeId);
       const theirs = leads.filter(r => r.assigneeId && r.assigneeId !== me);
-      return { sel, leads, toClaim, theirs, research: leads.filter(r => !theirs.includes(r)), all: leads.length };
+      return { sel, leads, toClaim, theirs, research: leads.filter(r => !theirs.includes(r) && !r.closed), all: leads.length };
     }
     async function claimAndResearch() {
       const me = S.me?.id;
@@ -4891,7 +4934,7 @@
       const all = sortRows(visible());
       const rows = stack(all);
       if (stackOn()) registerStacks(rows); else stackSig = '';
-      fillShapes(all);
+      fillShapes(all.filter(r => !r.closed));
       if (skin() === 'classic') {
         // Grouped: each group's rows together, groups in the order their first row comes
         let ordered = rows;
@@ -4917,17 +4960,20 @@
           h('h1', {}, 'Work queue', h('span', { class: `mode ${mode}`, text: mode.toUpperCase(), title: 'The portal mode every action here goes to' }))),
         h('div', { class: 'top-actions' },
           S.loading ? h('span', { text: 'Loading…' }) : S.loadedAt ? h('span', { text: `Updated ${new Date(S.loadedAt).toLocaleTimeString()}` }) : null,
+          everythingShown() && (S.closedLoading ? h('span', { text: 'Loading completed orders…' })
+            : S.closedError ? h('span', { class: 'err', text: `Completed orders didn't load: ${S.closedError}` }) : null),
           h('label', { title: 'Reloads every minute while nothing is selected' },
             h('input', { type: 'checkbox', checked: S.auto, onchange: e => setAuto(e.target.checked) }), ' Auto-refresh'),
           stackToggle(''),
           researchAllBtn(rows, 'btn'),
-          h('button', { class: 'btn', type: 'button', text: '↻ Refresh', disabled: S.loading, onclick: () => load() }),
+          h('button', { class: 'btn', type: 'button', text: '↻ Refresh', disabled: S.loading || S.closedLoading, onclick: () => load() }),
           viewPicker('btn')));
 
-      const counts = Object.fromEntries(SCOPES.map(s => [s.key, stack(S.rows.filter(r => s.test(r, me)), false).length]));
+      const counts = Object.fromEntries(SCOPES.map(s => [s.key, stack(baseRows(s).filter(r => s.test(r, me)), false).length]));
       const scopes = h('div', { class: 'scopes', role: 'tablist' }, SCOPES.map(s =>
-        h('button', { class: 'scope', type: 'button', role: 'tab', 'aria-selected': String(S.scope === s.key), onclick: () => { S.scope = s.key; S.sel.clear(); S.focus = -1; savePrefs(); render(); } },
-          s.label, h('span', { class: 'count', text: String(counts[s.key]) }))));
+        h('button', { class: 'scope', type: 'button', role: 'tab', 'aria-selected': String(S.scope === s.key), title: s.every ? 'Every work order: open, waiting, resolved, auto-resolved and cancelled' : '',
+          onclick: () => { S.scope = s.key; S.sel.clear(); S.focus = -1; S.limit = 300; savePrefs(); render(); if (s.every) loadClosed(); } },
+          s.label, h('span', { class: 'count', text: s.every && !S.closedAt ? '…' : String(counts[s.key]) }))));
 
       const bar = h('div', { class: 'bar' },
         h('label', { class: 'search' }, h('span', { class: 'muted', text: '⌕' }), searchInput, h('kbd', { text: '/' })),
@@ -4948,7 +4994,8 @@
       const byType = tally(rows, r => r.label);
       const summary = h('div', {},
         h('div', { class: 'summary' },
-          stat(rows.length, `shown of ${S.rows.length} open`, ''),
+          everythingShown() ? stat(rows.length, `shown of ${baseRows({ every: true }).length} work orders`, '') : stat(rows.length, `shown of ${S.rows.length} open`, ''),
+          everythingShown() ? stat(rows.filter(r => r.closed).length, 'closed', '') : null,
           stat(nOver, 'overdue', nOver ? 'err' : '', 'overdue'),
           stat(nToday, 'due today', nToday ? 'warn' : '', 'today'),
           stat(nWeek, 'due in 7 days', '', 'week'),
@@ -5033,8 +5080,8 @@
         pill(scoped.filter(r => S.researched?.[r.sid] || GM_getValue(`desk:research:${r.sid}`, null)).length, 'researched by you', '', ''),
       ].filter(Boolean));
       const bar = h('div', { class: 'cq-bar' },
-        CLASSIC_FILTERS.map(filterButton),
         h('label', { class: 'cq-search' }, h('span', { class: 'muted', text: '⌕' }), searchInput),
+        CLASSIC_FILTERS.map(filterButton),
         h('select', { class: 'cq-view', 'aria-label': 'Group by', onchange: e => { S.cgroup = e.target.value; S.limit = 300; savePrefs(); render(); } },
           Object.entries(GROUPS).map(([k, v]) => h('option', { value: k, text: k ? `Group: ${v}` : 'No grouping', selected: S.cgroup === k }))),
         h('button', { class: `cq-view${S.dense ? ' on' : ''}`, type: 'button', 'aria-pressed': String(S.dense), text: S.dense ? '☰ Compact' : '☰ Comfortable',
@@ -5209,7 +5256,7 @@
       const hiding = !!S.excl[f.key];
       // Same width picked or not: the count shows here, what's picked in the tooltip and the chips
       const btn = h('button', { type: 'button', class: want.length ? 'on' : '', 'aria-expanded': String(S.pop === f.key),
-        title: want.length ? `${f.label}: ${hiding ? 'hiding ' : ''}${want.join(', ')}` : `Filter by ${f.label.toLowerCase()}`,
+        title: want.length ? `${f.label}: ${hiding ? 'hiding ' : ''}${want.join(', ')}` : f.hint || `Filter by ${f.label.toLowerCase()}`,
         text: want.length ? `${f.label} · ${hiding ? `hiding ${want.length}` : want.length} ▾` : `${f.label} ▾`,
         onclick: e => { e.stopPropagation(); S.pop = S.pop === f.key ? '' : f.key; S.popSearch = ''; render(); } });
       const box = h('div', { class: 'filter' }, btn);
@@ -5280,7 +5327,7 @@
             title: `${plan.toClaim.length ? `Claims the ${plan.toClaim.length} nobody has, then s` : 'S'}tarts Claude Code research on ${plan.research.length} (one per ×N stack; ones already researched are skipped)`, onclick: () => claimAndResearch() });
         })() : null,
         !batchUnlocked() ? null : BULK.map(a => {
-          const n = sel.filter(r => a.can(r, S.me?.id)).length;
+          const n = sel.filter(r => (!r.closed || a.key === 'note') && a.can(r, S.me?.id)).length;
           return h('button', { class: `btn small${a.danger ? ' danger' : ''}`, type: 'button', disabled: !n, title: n < sel.length ? `${n} of ${sel.length} can be ${a.verb.toLowerCase()}` : '', text: n < sel.length && n ? `${a.label} (${n})` : a.label, onclick: () => runBulk(a) });
         }),
         h('span', { class: 'sep' }),
@@ -5356,7 +5403,8 @@
         onauxclick: e => { if (e.button === 1) { e.preventDefault(); prepareOpen(r); GM_openInTab(location.origin + r.url, { active: false, insert: true }); } } },
         h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: S.sel.has(r.id), 'aria-label': `Select ${r.label} ${r.ref}`, onclick: e => selectClick(r, i, e) })),
         h('td', {}, h('span', { class: 'badge', text: r.label, title: r.label })),
-        h('td', {}, h('div', { class: 'badges' }, h('span', { class: `badge st-${r.status}`, text: human2(r.status) }), researchPill(r, 'badge'), r.escalatedTo ? h('span', { class: 'badge esc', text: `↑ ${r.escalatedTo === 'ENGINEERING' ? 'Eng' : human2(r.escalatedTo)}`, title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null)),
+        h('td', {}, h('div', { class: 'badges' }, h('span', { class: `badge st-${r.status}`, text: human2(r.status),
+          title: r.closed ? [RESOLUTIONS[r.resolution] || (r.resolution && human2(r.resolution)), r.resolutionNote].filter(Boolean).join(': ') : '' }), researchPill(r, 'badge'), r.escalatedTo ? h('span', { class: 'badge esc', text: `↑ ${r.escalatedTo === 'ENGINEERING' ? 'Eng' : human2(r.escalatedTo)}`, title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null)),
         h('td', {}, h('div', { class: 'title', title: r.items.join(' · ') || r.title }, isNew ? h('span', { class: 'new', title: 'New since your last visit' }) : null,
           r._copies?.length ? h('span', { class: 'badge many', text: `×${r._copies.length + 1}`, title: `${r._copies.length + 1} identical disputes: claim, select or open this one, and what you do is done to all of them` }) : null, r.title),
           r.problem ? h('div', { class: 'sub', title: r.detail, text: r.problem }) : null),
@@ -5366,7 +5414,10 @@
         h('td', {}, h('div', { class: 'clip', title: r.customer || r.consignee || '', text: r.customer || r.consignee || '—' }), r.customer && r.consignee && r.consignee !== r.customer ? h('div', { class: 'sub', title: r.consignee, text: r.consignee }) : null),
         h('td', { class: due.cls }, h('div', { class: 'clip', text: due.text }), due.sub ? h('div', { class: 'sub', style: 'color:inherit', text: due.sub }) : null),
         h('td', { class: 'muted', text: r.createdMs ? ageText(r.createdMs) : '—' }),
-        h('td', {}, h('div', { class: 'clip' + (r.assigneeName ? '' : ' muted'), title: r.assigneeName, text: r.assigneeId && r.assigneeId === S.me?.id ? 'You' : r.assigneeName || '—' })));
+        r.closed
+          ? h('td', {}, h('div', { class: 'clip muted', title: r.resolverName ? `Closed by ${r.resolverName}` : '', text: r.resolvedBy && r.resolvedBy === S.me?.id ? '✓ You' : r.resolverName ? `✓ ${r.resolverName}` : '✓' }),
+            r.resolutionNote ? h('div', { class: 'sub', title: r.resolutionNote, text: r.resolutionNote }) : null)
+          : h('td', {}, h('div', { class: 'clip' + (r.assigneeName ? '' : ' muted'), title: r.assigneeName, text: r.assigneeId && r.assigneeId === S.me?.id ? 'You' : r.assigneeName || '—' })));
       return tr;
     }
     function foot(rows) {
@@ -5546,8 +5597,9 @@
     function runBulk(a) {
       if (!batchUnlocked()) return;
       const sel = selectedRows();
-      const ok = sel.filter(r => a.can(r, S.me?.id));
+      const ok = sel.filter(r => (!r.closed || a.key === 'note') && a.can(r, S.me?.id));   // a closed order only takes a note
       const skipped = sel.length - ok.length;
+      const unclaimed = a.claimFirst ? ok.filter(r => !r.assigneeId) : [];
       const mode = portal.mode();
       const note = a.note ? h('textarea', { 'aria-label': 'Note', placeholder: a.note === 'required' ? 'Required' : 'Optional' }) : null;
       const target = a.target ? h('select', { 'aria-label': 'Escalate to' }, h('option', { value: 'BROKER', text: 'Broker' }), h('option', { value: 'ENGINEERING', text: 'Engineering' })) : null;
@@ -5566,6 +5618,7 @@
           h('h2', { text: `${a.label.replace('…', '')} ${ok.length} order${ok.length === 1 ? '' : 's'}` }),
           h('p', {}, 'In ', h('span', { class: `mode ${mode}`, text: mode.toUpperCase() }), ' mode, through the portal, the same as its own buttons.',
             skipped ? ` ${skipped} selected order${skipped === 1 ? " can't" : "s can't"} be ${a.verb.toLowerCase()} and ${skipped === 1 ? 'is' : 'are'} skipped.` : ''),
+          unclaimed.length ? h('p', { class: 'muted', text: `${unclaimed.length} ${unclaimed.length === 1 ? "isn't" : "aren't"} claimed, so ${unclaimed.length === 1 ? "it's" : "they're"} claimed for you first (the portal ${a.verb.toLowerCase().replace(/ed$/, 'es')} only orders you hold). Claimed just for this: no Google Sheet row, case doc or research.` }) : null,
           h('div', { class: 'list' }, ok.slice(0, 60).map(r => h('div', { text: `${r.label} · ${r.ref} · ${r.customer || r.consignee || ''}` })), ok.length > 60 ? h('div', { text: `…and ${ok.length - 60} more` }) : null),
           target ? [h('label', { class: 'f', text: 'Escalate to' }), target] : null,
           resolution ? [h('label', { class: 'f', text: 'Resolution' }), resolution] : null,
@@ -5583,7 +5636,18 @@
         go.disabled = cancel.disabled = true;
         bar.hidden = false;
         quietSheet(ok.filter(r => copyIds.has(r.id)).flatMap(r => [r.id, r.sid]));   // a stack's copies: only its parent goes in the sheet
-        const res = await portal.act(a.op, ok.map(r => r.id), vars, (d, n) => { bar.firstChild.style.width = `${Math.round(d / n * 100)}%`; });
+        let ids = ok.map(r => r.id);
+        const pre = [];
+        if (unclaimed.length) {
+          // Claimed only to act on: kept out of the Google Sheet (claim and escalation both), no case doc, no research
+          quietSheet(unclaimed.flatMap(r => [r.id, r.sid]), 10 * 60000);
+          const c = await merged.holding(unclaimed.map(r => r.id), () => portal.act('BrokerageWorkOrderClaim', unclaimed.map(r => r.id)));
+          for (const f of c.failed) pre.push({ id: f.id, error: `couldn't claim it first (${f.error})` });
+          const bad = new Set(c.failed.map(f => f.id));
+          ids = ids.filter(id => !bad.has(id));
+        }
+        const res = await portal.act(a.op, ids, vars, (d, n) => { bar.firstChild.style.width = `${Math.round(d / n * 100)}%`; });
+        res.failed.unshift(...pre);
         scrim.remove();
         for (const id of res.done) S.sel.delete(id);
         const byId = new Map(S.rows.map(r => [r.id, r]));
@@ -8120,6 +8184,8 @@
       if (name === 'quote') renderQuote();
       if (name === 'analytics') renderAnalytics();
       if (name === 'settings') checkUpdate();
+      // The view can be changed from the queue's own picker since Settings was drawn
+      if (name === 'settings') { const vs = root.querySelector('select[aria-label="Entry Writer Queue page"]'); if (vs) vs.value = queueView(); }
       if (name === 'dispute') { showResearchIdle(); if (researchStale && state) render(); }
       refreshTools();
       if (name === 'entry') showEntryPage();
