@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.33.0
+// @version      7.34.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
-// @updateURL    https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js
-// @downloadURL  https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js
+// @updateURL    https://gist.githubusercontent.com/kars3n-zonos/9dd13b6c4c3ea4d1d6a876d45002c0a3/raw/zonos-dispute-researcher.user.js
+// @downloadURL  https://gist.githubusercontent.com/kars3n-zonos/9dd13b6c4c3ea4d1d6a876d45002c0a3/raw/zonos-dispute-researcher.user.js
 // @match        https://brokerage.dashboard.zonos.com/*
 // @match        https://claude.ai/*
 // @run-at       document-start
@@ -27,7 +27,7 @@
 // @connect      api.anthropic.com
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
-// @connect      raw.githubusercontent.com
+// @connect      gist.githubusercontent.com
 // @connect      *
 // ==/UserScript==
 
@@ -3085,11 +3085,25 @@
     /* ---- the Sheets edition: the team's Google Sheet (one row per case) and a Google Doc per case for its answers
        and decisions, through the sheet's Apps Script web app (harness/google/OctoberDisputes.gs) */
     // ctx: the case (null for the calls about the whole sheet, like the prompts)
+    // When the sheet is busy (a research run, answers being written to case docs), a call can wait its turn: up to 75
+    // seconds, and the calls that are safe to send twice (reads, and writes that set rather than add) are tried once more
+    const SAFE_AGAIN = ['ping', 'prompts', 'comments', 'researchStatus', 'find', 'claim', 'release', 'status', 'links', 'session'];
+    const sheetBusy = e => /took too long|Lock timeout|couldn't reach script|answered 5\d\d/i.test(e?.message || '');
     async function sheetsCall(action, ctx, extra = {}) {
-      const r = await gmRequest({
-        method: 'POST', url: cfg().sheetsUrl, timeout: 40000, headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        data: JSON.stringify({ secret: cfg().sheetsSecret, action, ...(ctx ? { case: { id: ctx.id, name: ctx.name, type: ctx.kind, dashboard: ctx.url } } : {}), ...extra }),
-      });
+      try { return await sheetsCallOnce(action, ctx, extra); } catch (e) {
+        if (!SAFE_AGAIN.includes(action) || !sheetBusy(e)) throw e;
+        await sleep(3000);
+        return sheetsCallOnce(action, ctx, extra);
+      }
+    }
+    async function sheetsCallOnce(action, ctx, extra) {
+      let r;
+      try {
+        r = await gmRequest({
+          method: 'POST', url: cfg().sheetsUrl, timeout: 75000, headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          data: JSON.stringify({ secret: cfg().sheetsSecret, action, ...(ctx ? { case: { id: ctx.id, name: ctx.name, type: ctx.kind, dashboard: ctx.url } } : {}), ...extra }),
+        });
+      } catch (e) { throw new Error(`Google Sheet: ${e.message} (it's busy; try again in a minute)`); }
       let j = null;
       try { j = JSON.parse(r.responseText); } catch { /* not JSON */ }
       // Comments, prompts and research came with the sheet's 2026-10-30 script: an older one doesn't know them
@@ -3307,7 +3321,8 @@
     /* ---- research for Claude Code: a Notion task with the prompt; the answer comes back on the case page */
     // The case's research so far, anyone's, from the sheet's Research tab (failed ones don't count): in words, or ''
     async function priorResearch(ctx) {
-      const requests = ((await sheetsCall('researchStatus', ctx).catch(() => null))?.requests || []).filter(q => q.status !== 'Failed');
+      // A request still "Waiting" with no session never started (its call timed out, say): it doesn't count
+      const requests = ((await sheetsCall('researchStatus', ctx).catch(() => null))?.requests || []).filter(q => q.status !== 'Failed' && !(q.status === 'Waiting' && !q.session));
       if (!requests.length) return '';
       const running = requests.filter(q => q.status === 'Waiting' || q.status === 'Researching');
       const last = requests[requests.length - 1];
@@ -4448,7 +4463,7 @@
     filterOf('due'), filterOf('assignee'),
   ];
   const CLASSIC_COLS = [
-    { key: 'type', label: 'Class', width: 168 }, { key: 'status', label: 'Status', width: 104 }, { key: 'title', label: 'Problem' },
+    { key: 'type', label: 'Class', width: 168 }, { key: 'status', label: 'Status', width: 132 }, { key: 'title', label: 'Problem' },
     { key: 'ref', label: 'Subject', width: 164 }, { key: 'customer', label: 'Customer', width: 166 }, { key: 'due', label: 'Due', width: 128 },
     { key: 'age', label: 'Age', width: 56 }, { key: 'assignee', label: 'Assignee', width: 180 },
   ].map(c => ({ ...COLS.find(x => x.key === c.key), ...c }));
@@ -4547,8 +4562,13 @@
     .cq.dense .cq-t tr.row td { height: 40px; padding-top: 4px; padding-bottom: 4px; font-size: 13px; }
     .cq.dense .cq-t .cq-small { display: none; }
     .cq.dense .cq-t tr.row td .cq-who .muted { display: none; }
-    .cq-res { margin-left: 4px; color: #7c3aed; background: rgba(124,58,237,.08); border: 1px solid rgba(124,58,237,.45); padding: 2px 7px; }
+    .cq-status { display: flex; align-items: center; gap: 4px; flex-wrap: nowrap; min-width: 0; }
+    .cq-status .cq-pill { flex: 0 1 auto; min-width: 0; }
+    .cq-status .cq-esc { margin-left: 0; }
+    .cq-res { flex: none; display: inline-grid; place-items: center; width: 20px; height: 20px; padding: 0; margin: 0; border-radius: 50%; font-size: 11px; line-height: 1;
+      color: #7c3aed; background: rgba(124,58,237,.08); border: 1px solid rgba(124,58,237,.45); overflow: visible; }
     .cq-res-live { color: #ffffff; background: #7c3aed; border-color: #7c3aed; }
+    .badges .cq-res { width: 18px; height: 18px; font-size: 10px; }
     :host([data-theme="dark"]) .cq-res { color: #c4b5fd; } :host([data-theme="dark"]) .cq-res-live { color: #ffffff; }
     .cq-res-bad { color: var(--err); background: var(--red-bg); border-color: var(--red-line); }
     .cq-many, .badge.many { color: #ffffff; background: #b45309; border-color: #b45309; font-weight: 700; margin-right: 6px; }
@@ -4761,17 +4781,23 @@
     }
     // The bulk bar's Claim & research: claim what nobody has (a ×N row's copies with it, kept out of the sheet),
     // then research every selected row that isn't someone else's, in the background run (Research all's)
-    async function claimAndResearch() {
+    // What the selection needs: who to claim (nobody has them), and which to research (one per ×N stack, not
+    // someone else's)
+    function claimPlan() {
       const me = S.me?.id;
       const sel = selectedRows();
       const leads = sel.filter(r => !copyIds.has(r.id));
       const toClaim = sel.filter(r => r.status === 'OPEN' && !r.assigneeId);
       const theirs = leads.filter(r => r.assigneeId && r.assigneeId !== me);
-      const research = leads.filter(r => !theirs.includes(r));
+      return { sel, leads, toClaim, theirs, research: leads.filter(r => !theirs.includes(r)), all: leads.length };
+    }
+    async function claimAndResearch() {
+      const me = S.me?.id;
+      const { sel, leads, toClaim, theirs, research } = claimPlan();
       const copies = sel.length - leads.length;
       if (!research.length) { toast('Nothing to do: everything selected is claimed by someone else.', true); return; }
-      if (!confirm(`Claim ${toClaim.length} and start Claude Code research on ${research.length}?\n\n`
-        + `${copies ? `The ${copies} identical copies behind ×N rows are claimed with them but not researched separately. ` : ''}${theirs.length ? `${theirs.length} claimed by someone else ${theirs.length === 1 ? 'is' : 'are'} left alone. ` : ''}`
+      if (!confirm(`${toClaim.length ? `Claim ${toClaim.length} and start` : 'Start'} Claude Code research on ${research.length}?\n\n`
+        + `${copies ? `The ${copies} identical copies behind ×N rows ${toClaim.some(r => copyIds.has(r.id)) ? "are claimed with them but " : "are"} not researched separately. ` : ''}${theirs.length ? `${theirs.length} claimed by someone else ${theirs.length === 1 ? 'is' : 'are'} left alone. ` : ''}`
         + `Research starts in background tabs, at most ${perHour()} an hour, and ones already researched (by anyone) are skipped. Keep a queue tab open.\n\nPortal mode: ${portal.mode().toUpperCase()}`)) return;
       if (toClaim.length) {
         quietSheet(toClaim.filter(r => copyIds.has(r.id)).flatMap(r => [r.id, r.sid]));
@@ -5073,9 +5099,9 @@
         h('td', {}, h('button', { class: 'cq-chev', type: 'button', text: '›', 'aria-expanded': String(open), 'aria-label': open ? 'Hide details' : 'Show details',
           onclick: () => { open ? S.open.delete(r.id) : S.open.add(r.id); render(); } })),
         h('td', {}, h('span', { class: 'cq-pill cq-class', text: r.label, title: r.label })),
-        h('td', { style: 'white-space:nowrap' }, h('span', { class: `cq-pill cq-st-${r.status}`, text: human2(r.status) }),
+        h('td', {}, h('div', { class: 'cq-status' }, h('span', { class: `cq-pill cq-st-${r.status}`, text: human2(r.status) }),
           r.escalatedTo ? h('span', { class: 'cq-pill cq-esc', text: '↑', title: `Escalated to ${human2(r.escalatedTo)}${r.escalationNote ? `: ${r.escalationNote}` : ''}` }) : null,
-          researchPill(r)),
+          researchPill(r))),
         h('td', {},
           h('div', { class: 'cq-line' }, r.createdMs > S.seenAt ? h('span', { class: 'new', title: 'New since your last visit' }) : null, many,
             h('a', { href: r.url, title: r.items.join(' · ') || r.title, onclick: e => openRow(r, e) }, title)),
@@ -5209,8 +5235,15 @@
       return h('div', { class: 'bulk', role: 'toolbar', 'aria-label': 'Bulk actions' },
         h('span', { class: 'sel-n', text: `${sel.length} selected` }),
         batchUnlocked() ? null : h('span', { class: 'muted', style: 'font-size:12px', text: 'Acting on many at once needs the access code (Tools ⚙ Settings).' }),
-        batchUnlocked() && desk.researchOn() ? h('button', { class: 'btn small primary', type: 'button', text: 'Claim & research',
-          title: "Claims the selected orders that nobody has, and starts Claude Code research on each (one per ×N stack; ones already researched are skipped)", onclick: () => claimAndResearch() }) : null,
+        batchUnlocked() && desk.researchOn() ? (() => {
+          const plan = claimPlan();
+          if (!plan.research.length) return h('button', { class: 'btn small', type: 'button', text: 'Research', disabled: true, title: 'Everything selected is claimed by someone else' });
+          const text = !plan.toClaim.length ? `Research ${plan.research.length}`
+            : plan.toClaim.length === plan.all && plan.research.length === plan.all ? `Claim & research ${plan.all}`
+              : `Claim ${plan.toClaim.length} & research ${plan.research.length}`;
+          return h('button', { class: 'btn small primary', type: 'button', text,
+            title: `${plan.toClaim.length ? `Claims the ${plan.toClaim.length} nobody has, then s` : 'S'}tarts Claude Code research on ${plan.research.length} (one per ×N stack; ones already researched are skipped)`, onclick: () => claimAndResearch() });
+        })() : null,
         !batchUnlocked() ? null : BULK.map(a => {
           const n = sel.filter(r => a.can(r, S.me?.id)).length;
           return h('button', { class: `btn small${a.danger ? ' danger' : ''}`, type: 'button', disabled: !n, title: n < sel.length ? `${n} of ${sel.length} can be ${a.verb.toLowerCase()}` : '', text: n < sel.length && n ? `${a.label} (${n})` : a.label, onclick: () => runBulk(a) });
@@ -6748,6 +6781,12 @@
           it.state = 'waiting';
           j.waitUntil = Date.now() + (r.retryAfter ? r.retryAfter * 1000 : 15 * 60000);
           j.note = `The routine's hourly limit was reached: carrying on at ${new Date(j.waitUntil).toLocaleTimeString()}.`;
+        } else if (r && !r.session && /Google Sheet: .*(took too long|Lock timeout|couldn't reach|answered 5\d\d)|it's busy/i.test(r.error || '') && (it.tries || 0) < 2) {
+          // The sheet was busy: back in line, a pause, then one at a time for 10 minutes
+          Object.assign(it, { state: 'waiting', tries: (it.tries || 0) + 1 });
+          j.waitUntil = Date.now() + 45000;
+          j.slowUntil = Date.now() + 10 * 60000;
+          j.note = `The Google Sheet is busy: carrying on one at a time at ${new Date(j.waitUntil).toLocaleTimeString()}.`;
         } else if (r?.skipped) Object.assign(it, { state: 'skipped', why: r.error || 'already researched' });
         else if (r) Object.assign(it, { state: r.session ? 'started' : 'failed', session: r.session || '', why: r.error || '' });
         else Object.assign(it, { state: 'failed', why: t.handle.closed ? 'its tab was closed before it finished' : "its page didn't finish in time" });
@@ -6766,7 +6805,7 @@
       if (!j.paused && Date.now() >= (j.waitUntil || 0)) {
         if (j.waitUntil) { j.waitUntil = 0; j.note = ''; }
         if (portal.mode() !== j.mode) { j.paused = true; j.note = `The portal is in ${portal.mode().toUpperCase()} mode now, but this was started in ${j.mode.toUpperCase()} mode: paused.`; }
-        while (!j.paused && tabs.size < BULK_TABS && tabs.size < fireRoom()) {
+        while (!j.paused && tabs.size < ((j.slowUntil || 0) > Date.now() ? 1 : BULK_TABS) && tabs.size < fireRoom()) {
           const i = j.items.findIndex(x => x.state === 'waiting');
           if (i < 0) break;
           j.items[i].state = 'running';
@@ -7453,7 +7492,7 @@
     // Update: opens this script's own install link (the main one or the Sheets copy, whichever is installed), where
     // Tampermonkey offers the newest version
     const updateUrl = (typeof GM_info !== 'undefined' && (GM_info.script?.downloadURL || GM_info.script?.updateURL))
-      || 'https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js';
+      || 'https://gist.githubusercontent.com/kars3n-zonos/9dd13b6c4c3ea4d1d6a876d45002c0a3/raw/zonos-dispute-researcher.user.js';
     // It checks GitHub when Settings opens (at most every 15 minutes): green when this is the newest version, orange
     // when there's a newer one. Clicking always opens the install page, which checks for itself.
     const myVersion = (typeof GM_info !== 'undefined' && GM_info.script?.version) || '';

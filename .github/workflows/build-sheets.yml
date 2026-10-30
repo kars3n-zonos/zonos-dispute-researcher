@@ -1,5 +1,7 @@
 # Builds the second copy of the script (zonos-dispute-desk-sheets.user.js, its own name and update address) from
 # zonos-dispute-researcher.user.js on every push that changes either script or the build, and commits it if it changed.
+# Then both are published to the secret gist that Tampermonkey installs and updates from (the repo is private, so its
+# own raw links don't work for Tampermonkey). That needs the GIST_TOKEN secret: a token with only the "gist" scope.
 # Edit only zonos-dispute-researcher.user.js.
 name: Build the Sheets copy
 
@@ -42,3 +44,18 @@ jobs:
           git add zonos-dispute-desk-sheets.user.js
           git commit -m "v$version: Sheets copy built from the main script"
           git push
+
+      - name: Publish to the gist
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: 9dd13b6c4c3ea4d1d6a876d45002c0a3
+        run: |
+          if [ -z "$GIST_TOKEN" ]; then
+            echo "No GIST_TOKEN secret: the gist wasn't updated (publish it by hand, or add the secret)."
+            exit 0
+          fi
+          jq -n --rawfile a zonos-dispute-researcher.user.js --rawfile b zonos-dispute-desk-sheets.user.js \
+            '{files: {"zonos-dispute-researcher.user.js": {content: $a}, "zonos-dispute-desk-sheets.user.js": {content: $b}}}' > gist.json
+          curl -fsS -X PATCH -H "Authorization: Bearer $GIST_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/gists/$GIST_ID" --data @gist.json -o /dev/null
+          echo "Published $(grep -m1 -oP '^// @version\s+\K\S+' zonos-dispute-researcher.user.js) to the gist."

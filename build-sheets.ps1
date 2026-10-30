@@ -1,7 +1,7 @@
 # Builds the second copy of the Tools script, zonos-dispute-desk-sheets.user.js, from zonos-dispute-researcher.user.js
 # (the only one to edit). Since 7.17.0 both are the Google Sheet edition: this copy only keeps its own name and update
 # address, so people who installed "Zonos Dispute Desk (Sheets)" keep getting updates. It holds no keys, so it can be
-# published; it updates itself from the public repo.
+# published; it updates itself from the secret gist (the repo is private), which the GitHub Action keeps up to date.
 #
 # The GitHub Action (.github/workflows/build-sheets.yml) runs this on every push to main, so nobody has to run it by
 # hand. It reads and writes only the two scripts in this folder, so it runs the same anywhere (pwsh on Mac/Linux too).
@@ -12,7 +12,7 @@ param([string]$Here = $PSScriptRoot)
 
 $src = Join-Path $Here 'zonos-dispute-researcher.user.js'
 $out = Join-Path $Here 'zonos-dispute-desk-sheets.user.js'
-$raw = 'https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-desk-sheets.user.js'
+$raw = 'https://gist.githubusercontent.com/kars3n-zonos/9dd13b6c4c3ea4d1d6a876d45002c0a3/raw/zonos-dispute-desk-sheets.user.js'
 
 $code = [IO.File]::ReadAllText($src, [Text.Encoding]::UTF8)
 if ($code -notmatch "(?m)^  const EDITION = 'sheets';") { throw "The script isn't the Sheets edition (its EDITION line should say 'sheets')." }

@@ -9,7 +9,8 @@ A Tampermonkey script for the Zonos broker portal (brokerage.dashboard.zonos.com
 1. Install [Tampermonkey](https://www.tampermonkey.net/) in Chrome.
 2. Go to `chrome://extensions`, open Tampermonkey's **Details**, and turn on **Allow User Scripts**. On older Chrome versions, turn on **Developer mode** instead.
 3. Open the install link and click **Install** (or **Update**, if you have the old Dispute Researcher):
-   **https://raw.githubusercontent.com/kars3n-zonos/zonos-dispute-researcher/main/zonos-dispute-researcher.user.js**
+   **https://gist.githubusercontent.com/kars3n-zonos/9dd13b6c4c3ea4d1d6a876d45002c0a3/raw/zonos-dispute-researcher.user.js**
+   (A secret link: share it only with people who use Tools. This repo is private; the link keeps working for Tampermonkey.)
    (If you installed "Zonos Dispute Desk (Sheets)" from `zonos-dispute-desk-sheets.user.js`, keep it: since 7.17.0 it's the same script. Install only one of the two.)
 4. When Tampermonkey asks to allow a connection, choose **Always allow domain**.
 5. Under Settings (⚙) > Back up or move your setup, paste the setup block from Karsen and press **Import**. It connects you to the team's Google Sheet.
@@ -19,7 +20,7 @@ Updates install automatically: Tampermonkey checks this repo about once a day. T
 Cases are tracked in the team's **Google Sheet** (since 7.17.0): one row per case, a Google Doc per case, and Comments, Prompts and Research tabs. Notion tracking is retired; its code is still in the script but off.
 
 For the maintainer:
-- Edit only `zonos-dispute-researcher.user.js`. On every push to `main`, a GitHub Action runs `build-sheets.ps1` and commits `zonos-dispute-desk-sheets.user.js`, the same script under its own name and update address.
+- Edit only `zonos-dispute-researcher.user.js`. On every push to `main`, a GitHub Action runs `build-sheets.ps1`, commits `zonos-dispute-desk-sheets.user.js` (the same script under its own name and update address), and publishes both to the secret gist Tampermonkey installs and updates from (needs the `GIST_TOKEN` secret, a token with only the "gist" scope).
 - Raise `@version` with every change pushed to `main`, or Tampermonkey won't install it.
 - The sheet's web app is `OctoberDisputes.gs` (kept outside this repo, since it holds the sheet's secret). After changing it: Deploy > Manage deployments > edit > Version: New version > Deploy.
 
