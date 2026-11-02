@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.58.0
+// @version      7.59.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3237,10 +3237,13 @@
 
     // The request goes in the sheet's Research tab, and the cloud session is told how to read it and
     // send its answer back, with that one request's own token (never the sheet's secret)
-    // A Google Sheets cell holds 50,000 characters. A prompt longer than the sheet's 49,000 has its longest reference
-    // text shortened (Chapter 99 heading wording, product descriptions from the merchant's site, long questionnaire
-    // answers and notes), never the instructions or the reply template. Past that, it says so.
+    // A Google Sheets cell holds 50,000 characters. Since the sheet script of 2026-11-02.2 a longer prompt is split
+    // across its hidden "Prompt parts" tab and put back together for the session, so it goes whole (up to 600,000).
+    // An older sheet script refuses it: then the prompt has its longest reference text shortened (Chapter 99 heading
+    // wording, product descriptions from the merchant's site, long questionnaire answers and notes), never the
+    // instructions or the reply template, and is sent again. Past that, it says so.
     const SHEET_PROMPT_MAX = 48500;
+    const SHEET_PROMPT_LONG_MAX = 600000;
     function fitForSheet(prompt) {
       if (prompt.length <= SHEET_PROMPT_MAX) return prompt;
       const clip = (l, n) => (l.length > n ? `${l.slice(0, n)}… (cut to fit the sheet)` : l);
@@ -3255,16 +3258,21 @@
         out = out.split('\n').map(step).join('\n');
         if (out.length <= SHEET_PROMPT_MAX) return out;
       }
-      throw new Error(`This research prompt is ${out.length.toLocaleString()} characters even shortened, more than a Google Sheet cell holds (49,000). Untick some lines and research them in two goes.`);
+      throw new Error(`This research prompt is ${out.length.toLocaleString()} characters even shortened, more than one Google Sheet cell holds (49,000), and the team sheet's script is an older one that can't split it. Ask Karsen to deploy the new version of the sheet script (Deploy > Manage deployments > New version), or untick some lines and research them in two goes.`);
     }
     async function queueSheetResearch(ctx, { prompt, docs, lines, label, openTab, what }) {
       const ent = D.ent;
-      prompt = fitForSheet(prompt);
+      if (prompt.length > SHEET_PROMPT_LONG_MAX) throw new Error(`This research prompt is ${prompt.length.toLocaleString()} characters, more than the sheet takes (${SHEET_PROMPT_LONG_MAX.toLocaleString()}). Untick some lines and research them in two goes.`);
       const who = GM_getValue(AUTHOR_KEY, '') || (await portalName()) || '';
-      const r = await sheetsCall('research', ctx, { request: {
-        prompt, lines, what, who, label: `${label}${testMode() ? ' [test mode]' : ''}`,
+      const ask = p => sheetsCall('research', ctx, { request: {
+        prompt: p, lines, what, who, label: `${label}${testMode() ? ' [test mode]' : ''}`,
         docs: docs.map(x => ({ name: x.name, url: /^https?:/.test(x.url || '') ? x.url : '' })),
       } });
+      // Whole first; an older sheet script that refuses a prompt longer than one cell gets it shortened
+      const r = await ask(prompt).catch(e => {
+        if (prompt.length > SHEET_PROMPT_MAX && /longer than a sheet cell/i.test(e.message || '')) return ask(fitForSheet(prompt));
+        throw e;
+      });
       const research = { at: Date.now(), what, requestId: r.requestId };
       const f = await fireResearch({ openTab, text: sheetResearchText(r.requestId, r.token) });
       if (f.session) noteResearched(ent?.id, 'Claude Code');
@@ -6070,7 +6078,18 @@
     const records = () => { const v = GM_getValue(MERGED_KEY, null) || {}; return v.lead ? { [v.lead]: v } : v; };
     const record = lead => records()[lead] || null;
     const byKey = key => Object.values(records()).find(m => m.key === key) || null;
-    const recordOn = id => (id ? Object.values(records()).find(m => m.lead === id || m.copies.some(c => c.id === id)) || null : null);
+    // The dispute on this page, `p` = { sid, wo }: the portal opens a dispute at /duty-disputes/<id>, then moves to its
+    // work order's address (/entry-writer-queue/DUTY_DISPUTE_REVIEW/<work order id>), so either one finds its record
+    const isLead = (m, p) => (!!p.sid && m.lead === p.sid) || (!!p.wo && String(m.leadWo ?? '') === p.wo);
+    const isCopy = (m, p) => m.copies.some(c => (!!p.sid && c.id === p.sid) || (!!p.wo && String(c.wo ?? '') === p.wo));
+    const recordHere = p => (p.sid || p.wo ? Object.values(records()).find(m => isLead(m, p) || isCopy(m, p)) || null : null);
+    function pageHere() {
+      const wm = WORK_ORDER_PATH.exec(location.pathname);
+      return {
+        sid: (location.pathname.match(/^\/duty-disputes\/([^/?#]+)/) || [])[1] || disputeIdHere(),
+        wo: wm?.[1] === 'DUTY_DISPUTE_REVIEW' ? decodeURIComponent(wm[2]) : '',
+      };
+    }
     const put = m => { const all = records(); all[m.lead] = m; GM_setValue(MERGED_KEY, all); };
     // Saved only while it's still worked as one (stopping it in another tab wins)
     const keep = m => { if (record(m.lead)) put(m); };
@@ -6278,6 +6297,7 @@
     // ---- the bar at the bottom of the page: on a dispute worked as one, on its copies, and while copying
     const BAR_CSS = `
       :host { all: initial; --bg:#ffffff; --fg:#18181b; --muted:#71717a; --line:#e4e4e7; --soft:#f4f4f5; --accent:#b45309; --accent-fg:#ffffff; --warn:#b45309; --err:#b91c1c; }
+      :host([hidden]) { display: none; }
       :host([data-theme="dark"]) { --bg:#18181b; --fg:#f4f4f5; --muted:#a1a1aa; --line:#3f3f46; --soft:#27272a; --accent:#f59e0b; --accent-fg:#111111; --warn:#fbbf24; --err:#f87171; }
       .bar { position: fixed; z-index: 2147482990; left: 50%; bottom: 16px; transform: translateX(-50%); width: min(620px, calc(100vw - 32px)); max-height: 50vh; overflow-y: auto;
         font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-left: 4px solid var(--accent);
@@ -6292,8 +6312,9 @@
     function say(m, text) { R.msgs[m.lead] = text; draw(); }
     function draw() {
       const all = batchUnlocked() ? records() : {};
-      const id = (location.pathname.match(/^\/duty-disputes\/([^/?#]+)/) || [])[1] || '';
-      const m = recordOn(id) && all[recordOn(id).lead] ? recordOn(id) : (R.job && all[R.job.lead]) || Object.values(all).find(x => x.pending) || null;
+      const p = pageHere();
+      const here = recordHere(p);
+      const m = here && all[here.lead] ? here : (R.job && all[R.job.lead]) || Object.values(all).find(x => x.pending) || null;
       if (!m) { if (host) host.hidden = true; return; }
       if (!host) {
         host = h('div', { id: 'zt-merged-host' });
@@ -6303,8 +6324,8 @@
       if (!host.isConnected) document.body.append(host);
       host.hidden = false;
       host.dataset.theme = pageIsDark() ? 'dark' : 'light';
-      const onLead = id === m.lead;
-      const onCopy = !onLead && m.copies.some(c => c.id === id);
+      const onLead = isLead(m, p);
+      const onCopy = !onLead && isCopy(m, p);
       const busy = R.job?.lead === m.lead;
       const msg = R.msgs[m.lead] || '';
       const all1 = m.copies.length + 1;
