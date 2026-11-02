@@ -40,6 +40,7 @@ For the maintainer:
 ## What's in it
 
 - **Research:** builds a research prompt written for the dispute or the order's problem class.
+  - Dispute prompts for both claude.ai and Claude Code include the initial AI verdict, reasons and suggested fix behind the **Automated - denied / accepted** hover tags. These carry substantially more weight than most context, while Claude still completes normal research, verifies the reasoning and explains any disagreement (since 7.62.0).
   - **Open in claude.ai** fills a claude.ai chat with the prompt and attaches the order's documents and images. Nothing is sent until you press Enter.
   - **Copy prompt** copies it instead.
   - **Claude's answer** shows one plain sentence first ("It is out of scope because …"), then the latest full answer. Only the latest answer is kept.
