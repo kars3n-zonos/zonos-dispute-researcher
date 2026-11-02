@@ -29,7 +29,6 @@ For the maintainer:
 - **The button:** an orange **Tools** button in the sidebar above References. On a window too narrow for the sidebar, press `\`.
 - **Fresh install:** nothing else on the portal changes until you turn it on in Settings.
 - **Quick research** (off until ticked under Settings > Panel and pages): on dispute and order pages, a **Research** button above Tools claims the order and starts research in one click: in Claude Code if it's set up for you, otherwise in claude.ai, with the chat opening in a new tab. Its progress shows above the button, and Tools opens once it's started.
-- **Normal | Advanced** (off until ticked under Settings > Panel and pages): above Tools on dispute and order pages, flips between the usual pages and the Advanced ones in one click: on orders, the At a glance card and the Jump to bar; on disputes, a bar to jump between items (each with its decisions pending, or no claims), the HS code details and claimless items folded, and Normal opening again whatever it folded; on both, the reorganized Research tab.
 - **Research again:** if a case was already researched (by anyone; the Google Sheet's Research tab says), the Research buttons ask before starting another session, and bulk runs skip it.
 - **`\` key:** opens and closes it.
 - **Where it opens:** as an overlay beside the button. Drag the edge away from the button to resize it. The ◫ button docks it side by side with the page, and ⧉ floats it again.
@@ -41,7 +40,6 @@ For the maintainer:
 ## What's in it
 
 - **Research:** builds a research prompt written for the dispute or the order's problem class.
-  - **Reorganized** (Settings > Panel and pages; off to start with, the tab is as before), top to bottom: the case (who holds it, its sheet row, chat links), the order (its question, **What's wrong** with CBP's message and a plain-English line under it, the page's choices, and its HS codes, each opening in Entry Assistant), Claude's answer, then three folded extras: **Write the answer yourself**, **Links** (Front, Slack, AI chat) and **Comments** (open when there are some). Each fold says what's in it and stays open or shut as you left it.
   - **Open in claude.ai** fills a claude.ai chat with the prompt and attaches the order's documents and images. Nothing is sent until you press Enter.
   - **Copy prompt** copies it instead.
   - **Claude's answer** shows one plain sentence first ("It is out of scope because …"), then the latest full answer. Only the latest answer is kept.
@@ -81,9 +79,6 @@ Every section folds open:
   - the Tools button (bubble or sidebar)
   - the Advanced View
   - easier-to-read order pages (labeled details, CBP messages in plain English)
-  - order pages: on Entry Writer Queue orders (not dispute reviews), an **At a glance** card at the top (who holds it and when it's due, tracking, entry, master bill, route, port, carrier, arrival, declared value, parties, the items with their codes, and the answer saved in Tools), a **Jump to** bar that stays at the top (folded sections open when you jump to them), Parties, Status history, empty Handling units and an unassessed Landed cost folded when the order opens
-  - the Research tab, reorganized (see Research above)
-  - a **Normal | Advanced** switch above Tools on dispute and order pages: Advanced turns on the At a glance order pages and the reorganized Research tab together, Normal turns them off
   - hiding escalated orders in the work queue (on to start with)
   - hiding the portal's own Classify / Quote rail
   - denied-party "Listed on" links that open the official list (and copy the name) instead of a Google search
