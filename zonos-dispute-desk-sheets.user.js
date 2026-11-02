@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.62.0
+// @version      7.63.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1663,6 +1663,7 @@
       '- Every specific thing the merchant says (numbers, materials, use, origin) gets checked against their own website, images and documents.',
     ],
     researchFirst: "**Research before you reply, every time.** Search the web and open the pages you find: run every search under \"Required searches\" and do every step under \"How to research\", then check you didn't skip one. None of that goes in the reply. Don't fill in the template from this prompt or from memory: everything here is the merchant's side or the entry as filed, and it's what you're checking. If you can't search the web in this chat, don't answer; reply only: \"I can't search the web in this chat. Turn on web search and send this again.\"",
+    govOnly: "**Government sources: .gov only.** When you look for proof, or cite or rely on any government entity (CBP, USTR, the USITC, the Federal Register, Commerce, a foreign customs authority, any agency), search only .gov sites: add `site:.gov` to those searches, and open and cite only .gov pages for them. A government rule, ruling, rate or notice quoted on a non-.gov page (news, a law firm, a broker's blog, a trade site) isn't proof: find it on the .gov page or say you couldn't. Research on the merchant and the product itself isn't limited to .gov.",
     docs: DOCS_STEP,
     claimText: CLAIM_TEXT_STEP,
     searches: "Run every Required search for each line, then follow up: open the best results (the manufacturer's page, the merchant's listing, marketplace listings), and search again for any new model, part or brand names you found there or in the images. Try variations: with and without dashes or spaces, and partial numbers. Don't stop at the first result.",
@@ -1706,7 +1707,8 @@
   const DP = k => P(`dispute.${k}`, DISPUTE_TEXT[k]);
   const DPL = k => PL(`dispute.${k}`, DISPUTE_TEXT[k]);
 
-  function buildPrompt(d, s, attachedNames) {
+  // forClaudeAi: the prompt goes to claude.ai (Open in claude.ai, Copy prompt), so it gets the .gov-only rule
+  function buildPrompt(d, s, attachedNames, forClaudeAi = false) {
     const L = [];
     // Facts shared across the lines, each said once (see factLines)
     const shownFacts = { lists: [], questions: new Set(), calcNote: false };
@@ -1723,6 +1725,7 @@
     L.push(DP('brief'));
     L.push('', 'How I handle disputes:', ...DPL('rules'));
     L.push('', DP('researchFirst'));
+    if (forClaudeAi) L.push('', DP('govOnly'));
     L.push(...automatedReviewLines(d));
 
     L.push('', '## Merchant', `- Name: ${d.org || 'unknown'}`);
@@ -2479,6 +2482,7 @@
   const ORDER_TEXT = {
     rules: ORDER_RULES,
     researchFirst: "**Research before you reply, every time.** Search the web and open the pages you find: do every step under \"How to research\", then check you didn't skip one. None of that goes in the reply. Don't fill in the template from this prompt or from memory: the page below is what you're checking. If you can't search the web in this chat, don't answer; reply only: \"I can't search the web in this chat. Turn on web search and send this again.\"",
+    govOnly: "**Government sources: .gov only.** When you look for proof, or cite or rely on any government entity (CBP, USTR, the USITC, the Federal Register, Commerce, a foreign customs authority, any agency), search only .gov sites: add `site:.gov` to those searches, and open and cite only .gov pages for them. A government rule, ruling, rate or notice quoted on a non-.gov page (news, a law firm, a broker's blog, a trade site) isn't proof: find it on the .gov page or say you couldn't. Research on the merchant and the product itself isn't limited to .gov.",
     skill: ORDER_SKILL_STEP,
     calculator: "Use your research to answer every open duty calculator question (they're also under What to find): yes, no or can't tell, each with its source (the listing, a document, a photo, the questionnaire, the manufacturer), in the reply's Duty calculator answers block, copying each question as written there. Then give the Chapter 99 codes that apply, from each question's \"If yes\" code and the duties listed. If you can call the Entry Assistant API (the entry-assistant skill in claude.ai, or `python3 worker.py calc` in a Claude Code session), send the calculator the same line with your answers by question id and use the codes it returns.",
     redFlags: "Collect every red flag: anything on the page or in your research that contradicts the entry or itself, or that's missing when it should be there.",
@@ -2514,6 +2518,7 @@
     add('dispute.brief', D, 'Brief', DISPUTE_TEXT.brief, 'The opening paragraph of every dispute prompt.');
     add('dispute.rules', D, 'How I handle disputes', DISPUTE_TEXT.rules, 'The rules under "How I handle disputes:".');
     add('dispute.researchFirst', D, 'Research before you reply', DISPUTE_TEXT.researchFirst, 'The paragraph after the rules.');
+    add('dispute.govOnly', D, 'Government sources: .gov only', DISPUTE_TEXT.govOnly, 'After "Research before you reply", in claude.ai prompts only (Open in claude.ai, Copy prompt), not Claude Code.');
     for (const [k, name, when] of [
       ['docs', 'Step: attached documents', 'when files are attached'],
       ['claimText', "Step: the merchant's claim text", 'when the merchant gave a reason'],
@@ -2553,6 +2558,7 @@
     const Q = 'Entry Writer Queue';
     add('order.rules', Q, 'How I work these', ORDER_TEXT.rules, 'The rules under "How I work these:" in every queue order prompt (a class\'s own rules follow them).');
     add('order.researchFirst', Q, 'Research before you reply', ORDER_TEXT.researchFirst, 'The paragraph after the rules.');
+    add('order.govOnly', Q, 'Government sources: .gov only', ORDER_TEXT.govOnly, 'After "Research before you reply", in claude.ai prompts only (Open in claude.ai, Copy prompt), not Claude Code.');
     add('order.skill', Q, 'Step: entry-assistant skill', ORDER_TEXT.skill, 'A "How to research" step after the class\'s own steps.');
     add('order.calculator', Q, 'Step: duty calculator questions', ORDER_TEXT.calculator, 'A "How to research" step, when the duty calculator ran on a code.');
     add('order.redFlags', Q, 'Step: red flags', ORDER_TEXT.redFlags, 'A "How to research" step.');
@@ -2569,7 +2575,7 @@
     return out;
   }
 
-  function buildWorkOrderPrompt(d, s) {
+  function buildWorkOrderPrompt(d, s, forClaudeAi = false) {
     const g = guideText(d.type);
     const facts = Object.values(s.facts || {});
     const hasCalc = facts.some(f => f.data?.calc?.some(c => !c.error));
@@ -2578,6 +2584,7 @@
     L.push(`I'm a customs broker at Zonos working the Entry Writer Queue, on an order in the "${g.label}" class. ${g.goal} Do the fact-finding I'd otherwise do by hand, catch anything that doesn't add up, and end with a decision I can act on.`);
     L.push('', 'How I work these:', ...OPL('rules'), ...(g.rules || []));
     L.push('', OP('researchFirst'));
+    if (forClaudeAi) L.push('', OP('govOnly'));
     L.push(...automatedReviewLines(d));
     L.push('', '## The order', `- Problem class: ${g.label}`);
     if (d.question) L.push(`- The page asks: ${d.question}`);
@@ -9114,7 +9121,7 @@
       if (!items.length) throw new Error('Tick at least one line to research.');
       return withAutomatedReviews({ ...d, items });
     }
-    const promptFor = (d, names) => (d.kind === 'workOrder' ? buildWorkOrderPrompt(d, state) : buildPrompt(d, state, names));
+    const promptFor = (d, names, forClaudeAi = false) => (d.kind === 'workOrder' ? buildWorkOrderPrompt(d, state, forClaudeAi) : buildPrompt(d, state, names, forClaudeAi));
     const copyNote = note => {
       GM_setClipboard(note, 'text');
       setStatus(`Note copied. Paste it into the note box on the page: "${note}"`, 'ok');
@@ -9182,7 +9189,7 @@
       await waitForFacts();
       const d = await freshData();
       const names = selectedDocs(d).map(doc => doc.name);
-      GM_setClipboard(promptFor(d, names), 'text');
+      GM_setClipboard(promptFor(d, names, true), 'text');
       markSent(d.disputeId, d.items);
       render();
       const warning = lookupWarning();
@@ -9213,7 +9220,7 @@
           skipped.push(`${doc.name} (${e.message})`);
         }
       }
-      const prompt = promptFor(d, files.map(f => f.name));
+      const prompt = promptFor(d, files.map(f => f.name), true);
       const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
       const lines = d.items.map(i => i.line);
       GM_setValue(HANDOFF_PREFIX + id, { id, createdAt: Date.now(), disputeId: d.disputeId, lines, prompt, files });
