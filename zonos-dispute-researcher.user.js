@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.59.0
+// @version      7.61.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3965,8 +3965,12 @@
     .cq-note b { color: var(--fg); font-weight: 500; }
     .cq-bulk { position: sticky; top: 0; z-index: 5; margin-top: 12px; }
     .cq .bulk { border-color: var(--line); background: var(--bg); box-shadow: 0 4px 14px rgba(0,0,0,.08); }
-    .cq-table { margin-top: 10px; overflow-x: auto; }
-    table.cq-t { min-width: 1150px; }
+    /* The list is its own scroll box, both ways, sized by fitBox() to fill the window below the filters: the column
+       headers stay pinned and the sideways scrollbar is always on screen, so a half-width window scrolls instead of
+       cutting columns off. It's a size container, so what sits inside can be as wide as the box (100cqw). */
+    .cq-table { margin-top: 10px; overflow: auto; overscroll-behavior: contain; container: cqbox / inline-size; }
+    .cq-table > div { position: sticky; left: 0; }
+    table.cq-t { min-width: 1400px; }
     .cq-t th { height: 44px; padding: 0 12px; font-size: 13.5px; font-weight: 500; color: var(--muted); border-bottom: 1px solid var(--line); background: var(--bg); z-index: 2; vertical-align: middle; }
     .cq-t th.sortable:hover { color: var(--fg); }
     .cq-t th .arrow { color: var(--fg); }
@@ -3997,7 +4001,11 @@
     .cq-chev { background: none; border: 0; color: var(--muted); width: 24px; height: 24px; border-radius: 4px; font-size: 16px; line-height: 1; transition: transform .12s; }
     .cq-chev:hover { background: var(--soft); color: var(--fg); }
     .cq-chev[aria-expanded="true"] { transform: rotate(90deg); }
-    .cq-t tr.cq-detail td { background: var(--soft); padding: 12px 16px 14px 84px; }
+    .cq-t tr.cq-detail td { background: var(--soft); padding: 0; overflow: visible; }
+    .cq-t tr.cq-group td { overflow: visible; }
+    .cq-detail-in { position: sticky; left: 0; width: 100cqw; max-width: 100%; padding: 12px 16px 14px 84px; }
+    @container cqbox (max-width: 900px) { .cq-detail-in { padding-left: 20px; } }
+    .cq-gl { position: sticky; left: 12px; display: inline-flex; align-items: center; white-space: nowrap; }
     .cq-dl { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px 24px; margin: 0; font-size: 13px; }
     .cq-dl dt { font-size: 12px; color: var(--muted); }
     .cq-dl dd { margin: 2px 0 0; overflow-wrap: anywhere; }
@@ -4021,9 +4029,16 @@
     .cq-toggle.bad.on { border-color: var(--err); }
     .cq-eschid { display: inline-flex; align-items: center; height: 28px; font-size: 12.5px; color: var(--muted); cursor: help; }
     .cq-view.on { border-color: var(--fg); }
-    .cq .cq-table { overflow: visible; }
     .cq-t thead th { position: sticky; top: 0; z-index: 3; }
-    .cq.has-sel .cq-t thead th { top: 52px; }
+    /* Half-width windows: the toolbar reflows instead of squeezing (the list scrolls sideways, above) */
+    .cq { container: cq / inline-size; min-width: 0; }
+    @container cq (max-width: 1000px) {
+      .cq-search { flex: 1 1 100%; min-width: 0; }
+      .cq-clear { margin-left: 0; }
+      .cq-tabs { gap: 0 16px; }
+      .cq h1 { font-size: 20px; margin-top: 6px; }
+      .cq-tabs, .cq-bar { margin-top: 12px; }
+    }
     .cq-t tr.row:hover td { background: var(--soft); }
     .cq-t tr.row.sel:hover td { background: var(--sel); }
     .cq-t tr.cq-group td { background: var(--tint); padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
@@ -4403,10 +4418,33 @@
       return h('select', { class: cls, 'aria-label': 'Queue view', title: 'Which queue this page shows (also under Tools ⚙︎ Settings)', onchange: e => setQueueView(e.target.value) },
         Object.entries(QUEUE_VIEWS).map(([k, v]) => h('option', { value: k, text: `View: ${v}`, selected: queueView() === k })));
     }
-    // More rows come in as you scroll near the bottom, instead of pages of 50
-    const moreObserver = new IntersectionObserver(es => {
-      if (es.some(e => e.isIntersecting) && S.shown.length > S.limit) { S.limit += 200; render(); }
-    }, { rootMargin: '800px 0px' });
+    // More rows come in as you scroll near the bottom of the list's box, instead of pages of 50 (watched from the box,
+    // which is new each time the list is drawn)
+    let moreObserver = null;
+    const watchMore = box => {
+      moreObserver?.disconnect();
+      const sentinel = box?.querySelector('.cq-sentinel');
+      if (!sentinel) return;
+      moreObserver = new IntersectionObserver(es => {
+        if (es.some(e => e.isIntersecting) && S.shown.length > S.limit) { S.limit += 200; render(); }
+      }, { root: box, rootMargin: '800px 0px' });
+      moreObserver.observe(sentinel);
+    };
+    // The list's box fills the window from where it starts down to the bottom, so the page itself barely scrolls and
+    // the box's headers and sideways scrollbar stay in view (at least 360px tall, so a short window still shows rows)
+    const listBox = () => wrap.querySelector('.cq-table');
+    function fitBox() {
+      const box = listBox();
+      if (!box || !host.isConnected) return;
+      const sc = scroller();
+      const top = box.getBoundingClientRect().top + (sc.scrollTop || 0);
+      let max = Math.max(360, Math.floor(innerHeight - top - 16));
+      box.style.maxHeight = `${max}px`;
+      // Whatever the portal puts below (its padding) would still scroll the page a little: taken off the box
+      const over = sc.scrollHeight - sc.clientHeight;
+      if (over > 0 && over < 120 && max - over >= 360) box.style.maxHeight = `${max - over}px`;
+    }
+    window.addEventListener('resize', () => { if (host.isConnected) fitBox(); });
     const sortText = () => {
       const s = S.sort[0];
       if (!s) return 'nearest due first';
@@ -4470,10 +4508,14 @@
           : searching() ? ['Searching ', h('b', { text: 'every work order' }), `, open, waiting and closed, whatever tab is open${S.closedLoading ? ' (loading the closed ones…)' : ''}. Filters you set still apply. Clear the search to see the tab again.`]
           : ['Showing every ', h('b', { text: 'Open' }), ' and ', h('b', { text: 'Waiting' }), ' order in one list. Click a column to sort; Ctrl-click a row for a new tab; Shift-click checkboxes to select a range.']);
       drawRun();
+      // The list is drawn again on every change: its box keeps where it was scrolled to, both ways
+      const was = listBox();
+      const at = was ? { y: was.scrollTop, x: was.scrollLeft } : null;
       wrap.replaceChildren(...[top, tabs, stats, bar, note, runBar, S.sel.size && h('div', { class: 'cq-bulk' }, bulkBar()), classicTable(rows)].filter(Boolean));
-      moreObserver.disconnect();
-      const sentinel = wrap.querySelector('.cq-sentinel');
-      if (sentinel) moreObserver.observe(sentinel);
+      const box = listBox();
+      fitBox();
+      if (box && at) { box.scrollTop = at.y; box.scrollLeft = at.x; }
+      watchMore(box);
       if (S.pop) { const p = root.querySelector('.pop input[type=search]'); if (p) p.focus(); }
       if (focusEl) searchInput.focus();
     }
@@ -4505,8 +4547,8 @@
             body.push(h('tr', { class: 'cq-group' },
               h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: on, 'aria-label': `Select all in ${g}`,
                 onchange: e => { for (const x of members) for (const id of idsOf(x)) e.target.checked ? S.sel.add(id) : S.sel.delete(id); render(); } })),
-              h('td', { colspan: String(CLASSIC_COLS.length + 1) }, h('b', { text: g }), h('span', { class: 'cq-n', text: String(members.length) }),
-                all > members.length ? h('span', { class: 'muted', style: 'font-size:12px;margin-left:6px', text: `${all} with identical copies` }) : null)));
+              h('td', { colspan: String(CLASSIC_COLS.length + 1) }, h('span', { class: 'cq-gl' }, h('b', { text: g }), h('span', { class: 'cq-n', text: String(members.length) }),
+                all > members.length ? h('span', { class: 'muted', style: 'font-size:12px;margin-left:6px', text: `${all} with identical copies` }) : null))));
           }
         }
         body.push(classicRow(r, i));
@@ -4597,7 +4639,7 @@
         ['Assignee', r.assigneeId ? `${r.assigneeName || 'Someone'}${r.claimedAt ? `, claimed ${when(Date.parse(r.claimedAt))}` : ''}` : 'Unclaimed'],
         ['Claims', r.claims], ['Work order id', r.id],
       ].filter(([, v]) => v);
-      return h('tr', { class: 'cq-detail' }, h('td', { colspan: String(CLASSIC_COLS.length + 2) },
+      return h('tr', { class: 'cq-detail' }, h('td', { colspan: String(CLASSIC_COLS.length + 2) }, h('div', { class: 'cq-detail-in' },
         h('dl', { class: 'cq-dl' }, fields.map(([k, v]) => h('div', {}, h('dt', { text: k }), h('dd', { text: String(v) })))),
         r._copies?.length ? h('div', { class: 'cq-pre' }, h('b', { text: `${r._copies.length} identical copies, done with this one: ` }),
           r._copies.slice(0, 60).map(c => c.ref).join(' · '), r._copies.length > 60 ? ` …and ${r._copies.length - 60} more` : '') : null,
@@ -4608,7 +4650,7 @@
           h('a', { class: 'cq-btn dark', href: r.url, text: `Open ${r.type === 'DUTY_DISPUTE_REVIEW' ? 'dispute' : 'order'} ↗`, onclick: e => openRow(r, e) }),
           h('button', { class: 'cq-btn', type: 'button', text: 'Open in a new tab', onclick: () => prepareOpen(r) || GM_openInTab(location.origin + r.url, { active: false, insert: true }) }),
           h('button', { class: 'cq-btn', type: 'button', text: 'Copy link', onclick: () => copy(location.origin + r.url, 'Link copied.') }),
-          r.tracking || r.entryNo ? h('button', { class: 'cq-btn', type: 'button', text: `Copy ${r.tracking ? 'tracking' : 'entry'}`, onclick: () => copy(r.tracking || r.entryNo, `Copied ${r.tracking || r.entryNo}`) }) : null)));
+          r.tracking || r.entryNo ? h('button', { class: 'cq-btn', type: 'button', text: `Copy ${r.tracking ? 'tracking' : 'entry'}`, onclick: () => copy(r.tracking || r.entryNo, `Copied ${r.tracking || r.entryNo}`) }) : null))));
     }
     // One click, like the portal's own Claim (through the same request); the row updates at once
     // A stacked row claims all of its identical copies with it
@@ -4783,7 +4825,8 @@
       return document.scrollingElement || document.documentElement;
     };
     function rememberPlace() {
-      try { sessionStorage.setItem(PLACE_KEY, JSON.stringify({ y: scroller().scrollTop, limit: S.limit, at: Date.now() })); } catch { /* no storage */ }
+      const box = listBox();
+      try { sessionStorage.setItem(PLACE_KEY, JSON.stringify({ y: scroller().scrollTop, by: box?.scrollTop || 0, bx: box?.scrollLeft || 0, limit: S.limit, at: Date.now() })); } catch { /* no storage */ }
     }
     function restorePlace() {
       let p = null;
@@ -4792,7 +4835,12 @@
       S.limit = Math.max(S.limit, p.limit || 0);
       render();
       // The portal's router scrolls to the top after a page change, so this is set again a moment later
-      const go = () => { scroller().scrollTop = p.y; };
+      const go = () => {
+        scroller().scrollTop = p.y;
+        fitBox();
+        const box = listBox();
+        if (box) { box.scrollTop = p.by || 0; box.scrollLeft = p.bx || 0; }
+      };
       requestAnimationFrame(go);
       setTimeout(go, 350);
     }
@@ -6098,6 +6146,11 @@
     const jobs = [];
     const held = new Set();   // work orders being claimed from the queue: their replies aren't copied again
     let host = null, box = null, lastPath = '';
+    // The bar can be minimized to a small pill in the bottom-left corner, so it doesn't cover the page's own buttons.
+    // Kept on this computer, so it stays out of the way from page to page until it's shown again.
+    const MIN_KEY = 'zt:merged:min';
+    const barMin = () => !!GM_getValue(MIN_KEY, false);
+    const setBarMin = on => { GM_setValue(MIN_KEY, !!on); draw(); };
 
     // Batch work's button: asks first
     function start(g) {
@@ -6308,7 +6361,13 @@
       button { font: inherit; cursor: pointer; background: transparent; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; }
       button:hover { background: var(--soft); } button.primary { background: var(--accent); color: var(--accent-fg); border: 0; font-weight: 600; }
       button:disabled { opacity: .55; cursor: default; }
-      a { color: inherit; } summary { cursor: pointer; color: var(--muted); margin-top: 6px; } ul { margin: 4px 0 0; padding-left: 18px; }`;
+      a { color: inherit; } summary { cursor: pointer; color: var(--muted); margin-top: 6px; } ul { margin: 4px 0 0; padding-left: 18px; }
+      .head { display: flex; align-items: flex-start; gap: 8px; } .head > div { flex: 1; min-width: 0; }
+      button.icon { flex: none; border: 0; padding: 0 6px; font-size: 16px; line-height: 20px; color: var(--muted); } button.icon:hover { color: var(--fg); }
+      .bar.min { left: 16px; transform: none; width: auto; max-width: min(460px, calc(100vw - 32px)); padding: 6px 8px 6px 10px; border-radius: 999px; overflow: hidden; }
+      .min-row { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+      .min-row .t { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+      .min-row button { padding: 2px 10px; }`;
     function say(m, text) { R.msgs[m.lead] = text; draw(); }
     function draw() {
       const all = batchUnlocked() ? records() : {};
@@ -6332,8 +6391,21 @@
       const skipped = m.copies.filter(c => m.results[c.id]?.state === 'skipped');
       const btn = (text, onclick, cls = '') => h('button', { type: 'button', class: cls, text, onclick });
       const lead = h('a', { href: m.leadUrl, text: m.leadRef });
+      // Minimized: one small line with what's happening, and Cancel while a Submit / Resolve counts down
+      if (barMin()) {
+        box.className = 'bar min';
+        box.replaceChildren(h('div', { class: 'min-row' },
+          h('span', { class: 'n', text: `×${all1}` }),
+          h('span', { class: `t${/no longer|isn't|mode, but|nothing was|failed/i.test(msg) ? ' err' : ''}`, title: msg || 'Identical disputes, worked as one', text: msg || 'worked as one' }),
+          busy && R.counting ? btn('Cancel', () => { R.cancel = true; }, 'primary') : null,
+          h('button', { type: 'button', class: 'icon', text: '▴', title: 'Show the bar', 'aria-label': 'Show the worked-as-one bar', onclick: () => setBarMin(false) })));
+        return;
+      }
+      box.className = 'bar';
       box.replaceChildren(...[
-        h('div', {}, h('span', { class: 'n', text: `×${all1}` }), h('b', { text: 'identical disputes, worked as one' }), h('span', { class: 'muted', text: ` · ${m.customer} · ${m.mode.toUpperCase()}` })),
+        h('div', { class: 'head' },
+          h('div', {}, h('span', { class: 'n', text: `×${all1}` }), h('b', { text: 'identical disputes, worked as one' }), h('span', { class: 'muted', text: ` · ${m.customer} · ${m.mode.toUpperCase()}` })),
+          h('button', { type: 'button', class: 'icon', text: '–', title: 'Minimize (it keeps working; shows in the bottom-left corner)', 'aria-label': 'Minimize the worked-as-one bar', onclick: () => setBarMin(true) })),
         onCopy ? h('p', { class: 'warn' }, `This dispute is one of the ${all1} worked as one through `, lead, '. Work that one: what you do there is done here too.')
           : onLead ? h('p', { text: `Work it here as usual: claim, release, mark waiting, resume, escalate, notes, decisions and Submit are each done to the other ${m.copies.length} too. Submit and Resolve do the others after 5 seconds.` })
             : h('p', {}, 'Copying from ', lead, ' to its identical copies.'),
