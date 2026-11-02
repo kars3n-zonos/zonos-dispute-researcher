@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.55.0
+// @version      7.56.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -155,9 +155,10 @@
   // and ids under Settings (the cog in Tools); they're kept in Tampermonkey storage on that computer. Every part is
   // optional: what isn't set up is left out of the panel instead of failing.
   const CONFIG_KEY = 'zt:config';
-  // A private team copy can fill this in with the team's Entry Assistant token, notes server and sheet. The shared
-  // file leaves it empty, so it holds no keys.
-  // Anything set under Settings still wins; a blank setting falls back to the team's.
+  // The team's built-in values. This file leaves it empty, so the repo holds no keys; the copy published to the team's
+  // install link gets the team sheet's address and secret here (the GitHub Action fills this line from the repo's
+  // secrets). Keep the line exactly as it is.
+  // The team sheet, when built in, is always the one used; anything else set under Settings still wins over the team's.
   const TEAM = {};
   // Cases are tracked in the team's Google Sheet: one row per case with a Google Doc of its answers and decisions, plus
   // its comments, prompts and Claude Code research
@@ -169,9 +170,11 @@
     notesUrl: TEAM.notesUrl || '',                           // shared answers server
     sheetsUrl: TEAM.sheetsUrl || '', sheetsSecret: TEAM.sheetsSecret || '',   // the team sheet's web app
   };
+  const teamSheet = () => !!(TEAM.sheetsUrl && TEAM.sheetsSecret);
   const cfg = () => {
     const c = { ...CONFIG_DEFAULTS, ...GM_getValue(CONFIG_KEY, {}) };
     for (const k of Object.keys(CONFIG_DEFAULTS)) if (!c[k]) c[k] = CONFIG_DEFAULTS[k];
+    if (teamSheet()) { c.sheetsUrl = TEAM.sheetsUrl; c.sheetsSecret = TEAM.sheetsSecret; }   // one sheet for everyone
     return c;
   };
   const setCfg = patch => GM_setValue(CONFIG_KEY, { ...GM_getValue(CONFIG_KEY, {}), ...patch });
@@ -3520,29 +3523,6 @@
           return { lines, mode, charged, entryDate: d10(cm?.consolidation?.arrivalDate), currency: lines[0]?.currency || o?.currencyCode || '' };
         } catch { return {}; }
       },
-      // An Entry Writer Queue order at a glance, from the portal's own data: who holds it, the shipment, the parties and
-      // the items. null when it isn't an order page or the portal hasn't sent its data yet.
-      glance: () => {
-        try {
-          const ent = currentEntity();
-          if (!ent || ent.type === 'DUTY_DISPUTE') return null;
-          const { wo, cm, en } = dataFor(ent);
-          if (!wo && !cm) return null;
-          const c = cm?.consolidation || {};
-          const party = re => (cm?.consignmentParties || []).find(p => re.test(p.partyType || ''));
-          const who = p => p && { name: [p.companyName, [p.firstName, p.lastName].filter(Boolean).join(' ')].filter(x => clean(x || '').replace(/^[.\-\s]+$/, '')).join(' · '),
-            place: [p.locality || p.city, p.administrativeAreaCode || p.state, p.countryCode].filter(Boolean).join(', ') };
-          return {
-            kind: kindOf(ent.type), status: wo?.status || '', due: wo?.dueDate || '', holder: wo?.assigneeName || '', escalatedTo: wo?.escalatedTo || '',
-            tracking: wo?.consignment?.trackingNumber || cm?.trackingNumber || '', entryNo: wo?.entry?.entryNumber || en?.entryNumber || cm?.entry?.entryNumber || '',
-            port: c.portOfEntryCode || '', carrier: c.carrierCode || '', mode: human(c.transportationMode || ''), arrival: d10(c.arrivalDate), mbol: c.masterBillNumber || '',
-            shipFrom: cm?.shipFromCountry || '', declared: cm ? money(cm.declaredValue, cm.currencyCode) : '',
-            consignee: who(party(/CONSIGNEE/i)), shipper: who(party(/SHIPPER|EXPORTER|SELLER/i)),
-            items: (cm?.consignmentItems || []).slice(0, 12).map(it => ({ d: clean(it.description || it.name || ''), hs: it.hsCode || '', coo: it.countryOfOrigin || '', q: it.quantity, v: money(it.amount, it.currencyCode) })),
-            moreItems: Math.max(0, (cm?.consignmentItems || []).length - 12),
-          };
-        } catch { return null; }
-      },
       portalItems: () => { try { const e = D.ent || currentEntity(); return e ? caseContext(e).facts.filter(f => /^Item \d+:/.test(f)) : []; } catch { return []; } },
       debug: () => ({ caseContext, currentEntity, captured, describe, entityFromWorkOrder, screenings, D }),
     };
@@ -5578,15 +5558,6 @@
   // lines become a labeled grid (blank values left out, countries named), and every all-caps CBP message gets a
   // plain-English line under it. The portal's own text is never changed; it's hidden or added to.
   const READABLE_KEY = 'zt:readable';
-  const GLANCE_KEY = 'zt:orderGlance';          // order pages: At a glance, the Jump to bar, long sections folded
-  const TIDY_RESEARCH_KEY = 'zt:tidyResearch';  // the Research tab: what's wrong first, the extras folded at the bottom
-  const VIEW_SWITCH_KEY = 'zt:viewSwitch';      // a Normal | Advanced switch above Tools that sets both of those
-  const advancedView = () => GM_getValue(GLANCE_KEY, false) && GM_getValue(TIDY_RESEARCH_KEY, false);
-  function setAdvancedView(on) {
-    GM_setValue(GLANCE_KEY, on);
-    GM_setValue(TIDY_RESEARCH_KEY, on);
-    if (on) orderGlance(); else undoGlance();
-  }
   const ABBR = {
     DESC: 'description', MERCH: 'merchandise', INV: 'invoice', QTY: 'quantity', REQ: 'required', REQD: 'required', MISS: 'missing',
     INVLD: 'invalid', NO: 'number', NBR: 'number', NUM: 'number', ET: 'entry type', HTS: 'HTS', TARIFF: 'tariff', ORIG: 'origin', CTRY: 'country',
@@ -5658,188 +5629,6 @@
       existing?.remove();
       el.append(h('span', { class: 'zt-plain', text: plain }));
     }
-  }
-  // ---- An Entry Writer Queue order page, tidier (with "Tidier order pages"): an "At a glance" card at the top, a bar that
-  // sticks to the top to jump between the page's sections, and the long, rarely needed sections folded when the page
-  // opens (with the page's own fold arrows: nothing on the page is changed)
-  const GLANCE_CSS = `
-    :host { all: initial; display: block; --bg:#ffffff; --fg:#09090b; --muted:#71717a; --line:#e4e4e7; --soft:#f4f4f5; --blue:#0066cc; --err:#dc2626; --warn:#b45309; }
-    :host([data-theme="dark"]) { --bg:#09090b; --fg:#fafafa; --muted:#a1a1aa; --line:#27272a; --soft:#18181b; --blue:#2997ff; --err:#f87171; --warn:#fbbf24; }
-    :host(#zt-jump) { background: var(--bg); }
-    * { box-sizing: border-box; }
-    .g { font: 13px/1.45 Inter, -apple-system, "Segoe UI", sans-serif; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin: 0 0 14px; }
-    .top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-    .kicker { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
-    .who { font-size: 12.5px; color: var(--muted); }
-    .who b { color: var(--fg); font-weight: 600; }
-    .who .late { color: var(--err); font-weight: 600; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px 18px; margin-top: 10px; }
-    .grid dt { font-size: 11px; color: var(--muted); }
-    .grid dd { margin: 1px 0 0; font-size: 13px; overflow-wrap: anywhere; }
-    .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
-    table { width: 100%; margin-top: 12px; border-collapse: collapse; font-size: 12.5px; }
-    th { text-align: left; font-size: 11px; font-weight: 600; color: var(--muted); padding: 0 8px 4px 0; border-bottom: 1px solid var(--line); }
-    td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
-    td.num, th.num { text-align: right; white-space: nowrap; }
-    .more { margin-top: 6px; font-size: 12px; color: var(--muted); }
-    .answer { margin-top: 12px; padding: 9px 12px; border-radius: 9px; background: var(--soft); font-size: 13px; }
-    .answer small { display: block; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
-    .bar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 0; background: var(--bg); border-bottom: 1px solid var(--line); font: 12.5px/1.2 Inter, -apple-system, "Segoe UI", sans-serif; }
-    .bar span { color: var(--muted); align-self: center; margin-right: 2px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
-    .bar button { border: 1px solid var(--line); background: var(--bg); color: var(--fg); border-radius: 999px; padding: 4px 11px; font: inherit; cursor: pointer; }
-    .bar button:hover { border-color: var(--blue); color: var(--blue); }
-    .bar button i { font-style: normal; color: var(--muted); margin-left: 4px; }
-    .bar button.folded { color: var(--muted); border-style: dashed; }`;
-  const glanceHost = (id, sticky) => {
-    let el = document.getElementById(id);
-    if (!el) {
-      el = document.createElement('div');
-      el.id = id;
-      el.attachShadow({ mode: 'open' }).append(h('style', { text: GLANCE_CSS }), h('div', { class: 'in' }));
-      if (sticky) el.style.cssText = 'position:sticky;top:0;z-index:20;margin:0 0 12px';
-    }
-    el.dataset.theme = pageIsDarkSoon() ? 'dark' : 'light';
-    return el;
-  };
-  // The page's own sections: the fold arrows with a heading (Documents, Parties, Items, Status history…)
-  const pageSections = main => [...main.querySelectorAll('button[aria-expanded]')].filter(b => {
-    const t = clean(b.textContent);
-    return t && (t.length < 40 || / · \d{4}/.test(t)) && !b.closest('[role="dialog"], nav, header') && !/\([A-Z]{2}\)$/.test(t) && !b.getAttribute('aria-haspopup') && b.getAttribute('role') !== 'combobox';
-  });
-  // A dispute page's folds: each item, its questionnaires ("USMCA certification of origin 4 changed"), its HS code
-  // details ("Order item — …") and Notes. The bar has the items and Notes.
-  const disputeFold = t => (/^Order item — /.test(t) ? 'details' : /\d+ changed$|unchanged$/i.test(t) ? 'questionnaire' : /^(Notes|Audit trail)/i.test(t) ? 'section' : 'item');
-  const disputeSections = main => [...main.querySelectorAll('button[aria-expanded]')].filter(b => !b.closest('[role="dialog"], nav, header') && !b.getAttribute('aria-haspopup')
-    && ['item', 'section'].includes(disputeFold(clean(b.textContent))));
-  let glanceSig = '';
-  let glanceFolded = '';
-  // What Advanced folded, by page and label. The portal remembers what's folded, so it's opened again by Normal, or
-  // the next time the page opens without Advanced.
-  const GLANCE_FOLDS_KEY = 'zt:glanceFolds';
-  function noteFolded(label) {
-    const all = GM_getValue(GLANCE_FOLDS_KEY, {});
-    const k = location.pathname;
-    all[k] = [...new Set([...(all[k] || []), label])];
-    const keys = Object.keys(all);
-    for (const old of keys.slice(0, Math.max(0, keys.length - 500))) delete all[old];
-    GM_setValue(GLANCE_FOLDS_KEY, all);
-  }
-  let foldsRestored = '';
-  function restoreFolds(now = false) {
-    const k = location.pathname;
-    if (!now && foldsRestored === k) return;
-    const btns = [...document.querySelectorAll('main button[aria-expanded]')];
-    if (!btns.length) return;   // not drawn yet
-    foldsRestored = k;
-    const all = GM_getValue(GLANCE_FOLDS_KEY, {});
-    if (!all[k]) return;
-    for (const b of btns) if (b.getAttribute('aria-expanded') === 'false' && all[k].includes(clean(b.textContent))) b.click();
-    delete all[k];
-    GM_setValue(GLANCE_FOLDS_KEY, all);
-  }
-  function orderGlance() {
-    const main = document.querySelector('main');
-    if (!main || !WORK_ORDER_PATH.test(location.pathname)) { undoGlance(); return; }
-    // A dispute review has its own summary cards on the page: no At a glance card, and its bar jumps between items
-    const isDispute = /^\/entry-writer-queue\/DUTY_DISPUTE/.test(location.pathname);
-    const g0 = isDispute ? null : desk.glance();
-    const g = g0 && (g0.tracking || g0.entryNo || g0.items.length) ? g0 : null;
-    const secs = isDispute ? disputeSections(main) : pageSections(main);
-    if (!g && !secs.length) return;
-    const page = main.firstElementChild;
-    if (!page) return;
-    const card = glanceHost('zt-glance');
-    const bar = glanceHost('zt-jump', true);
-    // An answer saved for this order in Tools (its one sentence)
-    const wo = WORK_ORDER_PATH.exec(location.pathname);
-    const saved = wo ? visibleAnswers(loadNotes(`wo_${caseIdOf(decodeURIComponent(wo[2]))}`))[0] : null;
-    const said = saved && finalSentence(saved.text);
-    const sig = JSON.stringify([g, secs.map(b => [clean(b.textContent), b.getAttribute('aria-expanded')]), said, card.dataset.theme]);
-    if (sig !== glanceSig || !card.isConnected || !bar.isConnected) {
-      glanceSig = sig;
-      if (g) {
-        const due = g.due ? Date.parse(g.due) : 0;
-        const late = due && due < Date.now();
-        const fact = (k, v, mono) => (v ? h('div', {}, h('dt', { text: k }), h('dd', { class: mono ? 'mono' : '', text: v })) : null);
-        card.shadowRoot.querySelector('.in').replaceChildren(h('div', { class: 'g' },
-          h('div', { class: 'top' },
-            h('span', { class: 'kicker', text: `At a glance · ${g.kind}` }),
-            h('span', { class: 'who' },
-              g.holder ? ['Held by ', h('b', { text: g.holder })] : 'Unclaimed',
-              due ? [' · due ', h('span', { class: late ? 'late' : '', text: `${new Date(due).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}${late ? ` (${ageText(due)} overdue)` : ''}` })] : null,
-              g.escalatedTo ? ` · escalated to ${human2(g.escalatedTo)}` : null,
-              g.status === 'WAITING' ? ' · waiting' : null)),
-          h('dl', { class: 'grid' },
-            fact('Tracking', g.tracking, true), fact('Entry', g.entryNo, true), fact('Master bill', g.mbol, true),
-            fact('Ship-from → US', g.shipFrom ? `${regionName(g.shipFrom)} → United States` : ''), fact('Port of entry', g.port, true),
-            fact('Carrier · mode', [g.carrier, g.mode].filter(Boolean).join(' · ')), fact('Arrival', g.arrival), fact('Declared value', g.declared),
-            fact('Consignee', g.consignee && [g.consignee.name, g.consignee.place].filter(Boolean).join(' · ')),
-            fact('Shipper', g.shipper && [g.shipper.name, g.shipper.place].filter(Boolean).join(' · '))),
-          g.items.length ? h('table', {},
-            h('thead', {}, h('tr', {}, h('th', { text: `Items (${g.items.length + g.moreItems})` }), h('th', { text: 'HS code' }), h('th', { text: 'Origin' }), h('th', { class: 'num', text: 'Qty' }), h('th', { class: 'num', text: 'Value' }))),
-            h('tbody', {}, g.items.map(it => h('tr', {}, h('td', { text: it.d || '—' }), h('td', { class: 'mono', text: tidyCode(it.hs) || it.hs || '—' }),
-              h('td', { text: it.coo ? regionName(it.coo) : '—' }), h('td', { class: 'num', text: it.q ?? '—' }), h('td', { class: 'num', text: it.v || '—' }))))) : null,
-          g.moreItems ? h('p', { class: 'more', text: `…and ${g.moreItems} more on the page.` }) : null,
-          said ? h('div', { class: 'answer' }, h('small', { text: `Researched · ${shortDate(saved.createdAt)}` }), said) : null));
-      } else card.shadowRoot.querySelector('.in').replaceChildren();
-      // One chip per section; items with their own fold ("thread · 5204.20.0000") are one Items chip, to the first
-      const chips = [];
-      for (const b of secs) {
-        let t = clean(b.textContent);
-        if (t.length % 2 === 0 && t.slice(0, t.length / 2) === t.slice(t.length / 2)) t = t.slice(0, t.length / 2);   // "ConsigneeConsignee"
-        const st = t.match(/^(.+?)(\d+) decisions? pending|^(.+?)(No changes claimed)/);
-        if (st) {
-          chips.push({ b, name: (st[1] || st[3]).trim().slice(0, 34) + ((st[1] || st[3]).trim().length > 34 ? '…' : ''), n: st[2] ? `${st[2]} pending` : 'no claims' });
-        } else if (/ · /.test(t)) {
-          const it = chips.find(c => c.items);
-          if (it) it.n = String(+it.n + 1); else chips.push({ b, name: 'Items', n: '1', items: true });
-        } else {
-          const n = (t.match(/(\d+)$/) || [])[1];
-          chips.push({ b, name: n ? t.slice(0, -n.length).trim() : t, n });
-        }
-      }
-      bar.shadowRoot.querySelector('.in').replaceChildren(chips.length ? h('div', { class: 'bar' }, h('span', { text: 'Jump to' }),
-        chips.map(({ b, name, n }) => {
-          const open = b.getAttribute('aria-expanded') === 'true';
-          return h('button', { type: 'button', class: open ? '' : 'folded', title: open ? `Go to ${name}` : `${name} is folded: open it and go there`,
-            onclick: () => { if (b.getAttribute('aria-expanded') === 'false') b.click(); setTimeout(() => b.scrollIntoView({ block: 'start', behavior: 'smooth' }), 60); } },
-            name, n ? h('i', { text: n }) : null);
-        })) : '');
-      // Stuck at the very top of the scrolling area, over its top padding, so nothing shows through above it
-      let sc = main;
-      while (sc && !/auto|scroll/.test(getComputedStyle(sc).overflowY)) sc = sc.parentElement;
-      const pt = sc ? parseFloat(getComputedStyle(sc).paddingTop) || 0 : 0;
-      bar.style.top = `-${pt}px`;
-      bar.style.paddingTop = `${pt}px`;
-      bar.style.marginTop = `-${pt}px`;
-      if (card.parentElement !== page || page.firstElementChild !== card) page.prepend(card);
-      if (bar.previousElementSibling !== card) card.after(bar);
-    }
-    // The long, rarely needed sections start folded, once each time an order opens
-    if (isDispute && glanceFolded !== location.pathname && secs.length) {
-      glanceFolded = location.pathname;
-      for (const b of main.querySelectorAll('button[aria-expanded="true"]')) {
-        const t = clean(b.textContent);
-        if (disputeFold(t) === 'details' || (disputeFold(t) === 'item' && /No changes claimed/.test(t))) { b.click(); noteFolded(t); }
-      }
-    }
-    if (!isDispute && glanceFolded !== location.pathname && secs.length) {
-      glanceFolded = location.pathname;
-      for (const b of secs) {
-        const t = clean(b.textContent);
-        const box = b.closest('section, [class*="rounded"]') || b.parentElement;
-        const fold = /^(Parties|Status history)/i.test(t) || (/^Handling units\s*0$/i.test(t))
-          || (/^Landed cost/i.test(t) && /not yet assessed/i.test(box?.textContent || '') && !/\$\d/.test((box?.textContent || '').replace(/Landed cost est\.\s*—/, '')));
-        if (fold && b.getAttribute('aria-expanded') === 'true') { b.click(); noteFolded(t); }
-      }
-    }
-  }
-  function undoGlance() {
-    document.getElementById('zt-glance')?.remove();
-    document.getElementById('zt-jump')?.remove();
-    restoreFolds(true);
-    glanceFolded = '';
-    glanceSig = '';
   }
   function undoReadable() {
     for (const g of document.querySelectorAll('.zt-meta, .zt-plain')) g.remove();
@@ -7097,18 +6886,6 @@
     .order-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
     .order-q { margin: 0 0 4px; font-weight: 600; }
     .order-links { margin-top: 8px; display: grid; gap: 4px; }
-    .rt > .section + .section { padding-top: 14px; border-top: 1px solid var(--line); }
-    .rt-sub { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
-    .rt-problem { margin-top: 8px; padding: 8px 10px; border-radius: 7px; background: rgba(220,38,38,.07); border: 1px solid rgba(220,38,38,.25); }
-    .rt-line { margin-top: 4px; font-size: 12.5px; overflow-wrap: anywhere; }
-    .rt-line small { display: block; font-size: 11.5px; color: var(--muted); }
-    .rt-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; }
-    .rt-chips .rt-sub { margin-right: 2px; }
-    .chip.rt-code { cursor: pointer; font-family: ui-monospace, Consolas, monospace; color: var(--accent); border-color: currentColor; background: none; }
-    .rt-extras .rt-fold { margin-bottom: 6px; }
-    .rt-fold > summary { gap: 8px; }
-    .rt-fold > summary::after { margin-left: 0; }
-    .rt-meta { margin-left: auto; font-size: 11.5px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--muted); }
     .reply-ready summary { cursor: pointer; font-size: 12px; color: var(--muted); }
     .answer-card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
     .answer-card.theirs { border-left: 3px solid var(--accent); }
@@ -7363,14 +7140,6 @@
       class: 'flex w-full items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors',
       style: 'border-color:#f59e0b;color:#ffffff;background:#d97706;font-weight:600;cursor:pointer;margin-bottom:6px',
       onclick: () => quickResearch() }, h('span', { 'aria-hidden': 'true', text: '✦' }), h('span', { text: 'Research' }));
-    // Normal | Advanced, on dispute and order pages when turned on under Settings > Panel and pages
-    const viewBtn = (adv, label, title) => h('button', { type: 'button', 'data-adv': String(adv), title,
-      style: 'flex:1;padding:5px 0;border:0;font:600 12.5px system-ui,sans-serif;cursor:pointer;background:transparent;color:#b45309',
-      onclick: () => { setAdvancedView(adv); placeQuick(); if (state && !panel.hidden) render(); } }, label);
-    const sideView = h('div', { id: 'zt-side-view', role: 'group', 'aria-label': 'Page view',
-      style: 'display:none;margin-bottom:6px;border:1px solid #f59e0b;border-radius:6px;overflow:hidden' },
-      viewBtn(false, 'Normal', "The portal's pages and the Research tab as they usually are"),
-      viewBtn(true, 'Advanced', "An At a glance summary and a Jump to bar on order pages, and the Research tab with what's wrong first"));
     const sideStatus = h('div', { id: 'zt-side-status', role: 'status', hidden: true, style: 'font-size:12px;line-height:1.35;margin:0 2px 6px;color:#b45309' });
     let quickBusy = false;
     let quietOpen = false;   // open() reads the page without showing the panel
@@ -7442,16 +7211,8 @@
       const title = quickTitle();
       sideQuick.hidden = !show;
       if (sideQuick.title !== title) sideQuick.title = title;
-      sideView.style.display = isCasePage() && GM_getValue(VIEW_SWITCH_KEY, false) ? 'flex' : 'none';
-      const adv = advancedView();
-      for (const b of sideView.children) {
-        const on = (b.dataset.adv === 'true') === adv;
-        b.setAttribute('aria-pressed', String(on));
-        b.style.background = on ? '#f59e0b' : 'transparent';
-        b.style.color = on ? '#ffffff' : '#b45309';
-      }
     }
-    const sideWrap = h('div', { class: 'px-2 pb-2', id: 'zt-side-wrap' }, sideStatus, sideView, sideQuick, sideBtn);
+    const sideWrap = h('div', { class: 'px-2 pb-2', id: 'zt-side-wrap' }, sideStatus, sideQuick, sideBtn);
     // (runs every second: when the button is already in place by References, nothing is looked for)
     let refHolder = null;
     function placeLauncher() {
@@ -7787,10 +7548,17 @@
         h('div', { class: 'row' }, entryUrlInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, tokenInput, btn('Save', saveEntry), btn('Test', () => testConnection())),
         tokenNote),
-      group('Google Sheet', "Each case you claim gets a row in the team sheet and its own Google Doc with the answers, decisions and comments. The sheet also holds the team's research prompts and the Claude Code research requests. Both values come in the setup block from Karsen.",
-        h('div', { class: 'row' }, sheetsUrlInput),
-        h('div', { class: 'row', style: 'margin-top:6px' }, sheetsSecretInput, btn('Save and test', saveSheets)),
-        sheetsNote),
+      teamSheet()
+        ? group('Google Sheet', "Each case you claim gets a row in the team sheet and its own Google Doc with the answers, decisions and comments. The sheet also holds the team's research prompts and the Claude Code research requests. It's built into this copy: nothing to set up.",
+          h('div', { class: 'row', style: 'margin-top:6px' }, btn('Test', async () => {
+            say(sheetsNote, 'Testing…');
+            try { say(sheetsNote, `Connected to the team sheet (version ${await desk.sheetsPing()}).`, 'ok'); } catch (err) { say(sheetsNote, err.message, 'err'); }
+          })),
+          sheetsNote)
+        : group('Google Sheet', "Each case you claim gets a row in the team sheet and its own Google Doc with the answers, decisions and comments. The sheet also holds the team's research prompts and the Claude Code research requests. Both values come in the setup block from Karsen.",
+          h('div', { class: 'row' }, sheetsUrlInput),
+          h('div', { class: 'row', style: 'margin-top:6px' }, sheetsSecretInput, btn('Save and test', saveSheets)),
+          sheetsNote),
       group('Prompts', `The research prompts' fixed text (the brief, rules, research steps, claim checks, reply rules and each queue class's guide), editable by the team in the Prompts tab of the Google Sheet. The parts built from the case itself stay as they are.`,
         h('div', { class: 'row', style: 'margin-top:6px' }, btn('Set up Prompts', () => setUpPrompts()), btn('Refresh', () => refreshPrompts())),
         (showPromptsInfo(), promptsNote)),
@@ -8495,9 +8263,6 @@
       check('Hide escalated orders in the work queue (they still show on its Escalated and All work orders tabs, and in a search)', hideEscalated(), on => { GM_setValue(HIDE_ESC_KEY, on); queueCtl?.refreshView(); }),
       check("Quote tab: use my duty calculator (Entry Assistant) instead of the portal's quoter, filled in from the order, with its questions to answer", dutyCalcOn(), on => { GM_setValue(DUTY_CALC_KEY, on); refreshTools(); }),
       check('Easier-to-read order pages (labeled details, CBP messages in plain English)', GM_getValue(READABLE_KEY, false), on => { GM_setValue(READABLE_KEY, on); if (on) makeReadable(); else undoReadable(); }),
-      check('Order pages: an "At a glance" summary at the top, a bar to jump between sections, and long sections folded', GM_getValue(GLANCE_KEY, false), on => { GM_setValue(GLANCE_KEY, on); if (on) orderGlance(); else undoGlance(); }),
-      check("Research tab, reorganized: what's wrong with the order first, then the answer, with Links, Comments and writing the answer yourself folded at the bottom", GM_getValue(TIDY_RESEARCH_KEY, false), on => { GM_setValue(TIDY_RESEARCH_KEY, on); refreshTools(); }),
-      check('A Normal | Advanced switch above Tools on dispute and order pages (Advanced turns on both of the two above; Normal turns them off)', GM_getValue(VIEW_SWITCH_KEY, false), on => { GM_setValue(VIEW_SWITCH_KEY, on); placeLauncher(); }),
       check("Hide the portal's own Classify / Quote rail", GM_getValue(HIDE_RAIL_KEY, false), on => { GM_setValue(HIDE_RAIL_KEY, on); refreshTools(); }),
       check('Denied-party reviews: "Listed on" opens the official list (and copies the name) instead of a Google search', GM_getValue(LIST_LINKS_KEY, false), on => { GM_setValue(LIST_LINKS_KEY, on); fixListLinks(); }),
       check("Clicking an HS code on the page opens it in the Entry Assistant tab (off: the portal's own References window)", GM_getValue(ENTRY_CLICKS_KEY, false), on => GM_setValue(ENTRY_CLICKS_KEY, on)),
@@ -9308,43 +9073,17 @@
       const latest = isOrder && answers.find(a => decisionOf(a.text));
       const latestDecision = latest && decisionOf(latest.text);
       const latestNote = latest && noteOf(latest.text);
-      const tidy = GM_getValue(TIDY_RESEARCH_KEY, false);
-      rest.className = tidy ? 'rt' : '';
-      // What's wrong with the order, from the portal's data (its rejections, else its detail), in plain English too
-      const problems = isOrder && tidy ? (() => {
-        const facts = desk.caseFacts();
-        const rej = facts.filter(l => /^Rejection: /.test(l)).map(l => l.replace(/^Rejection: /, ''));
-        // The detail's own lines, without the tracking number and the item list (they're elsewhere)
-        const det = facts.filter(l => /^Detail: /.test(l)).map(l => l.replace(/^Detail: /, '')).join('\n').split('\n').map(clean)
-          .filter(l => l && !/^(Tracking\b|Items:?$|- )/.test(l));
-        return [...new Set([...rej, ...(rej.length ? [] : det.slice(0, 3))])].slice(0, 4);
-      })() : [];
-      // Without a CBP rejection, the page's own one-line problem leads ("Quote blocked on an AD/CVD case…")
-      const leadLine = isOrder && tidy && d.summary && !problems.some(t => /^\d{2,3}\b/.test(t)) ? d.summary : '';
-      const plainOf = t => { const m = t.replace(/\s*\(CBP [^)]*\)$/, '').match(/(?:^|\s)(\d{2,3})\s*[—–-]?\s*([A-Z0-9][A-Z0-9/&().,' -]{6,})/); return m && m[2].replace(/[^A-Z]/g, '').length >= 8 ? plainEnglish(m[2].trim()) : ''; };
       const orderSection = isOrder && h('div', { class: 'section' },
-        h('p', { class: 'label', text: tidy ? `The order · ${d.label}` : d.label }),
-        !tidy ? h('div', { class: 'order-card' },
+        h('p', { class: 'label', text: d.label }),
+        h('div', { class: 'order-card' },
           d.question && h('p', { class: 'order-q', text: d.question }),
           d.summary && h('p', { class: 'hint', style: 'margin:0', text: d.summary }),
           d.choices.length > 0 && h('p', { class: 'hint', text: `Choices on the page: ${d.choices.map(c => c.label).join(' · ')}` }),
           latestDecision && h('p', { class: 'verdict', style: 'margin-top:8px', text: `Decision: ${latestDecision.decision} · ${latest.author} · ${shortDate(latest.createdAt)}` }),
-          latestNote && noteLink(`Copy the ${guideFor(d.type).note.toLowerCase()}`, () => copyNote(latestNote))) : null,
-        !tidy && (d.pair.length === 2 || d.codes.length > 0) && h('div', { class: 'order-links' },
+          latestNote && noteLink(`Copy the ${guideFor(d.type).note.toLowerCase()}`, () => copyNote(latestNote))),
+        (d.pair.length === 2 || d.codes.length > 0) && h('div', { class: 'order-links' },
           d.pair.length === 2 && h('div', {}, noteLink(`Compare ${d.pair[0]} with ${d.pair[1]} in Entry Assistant`, () => showEntry({ codes: d.pair, from: d.pairFrom }))),
           d.codes.slice(0, 4).map(c => h('div', {}, noteLink(`Look up ${c.code}${c.from ? ` (made in ${regionName(c.from)})` : ''} in Entry Assistant`, () => showEntry({ codes: [c.code], from: c.from }))))),
-        tidy && h('div', { class: 'order-card' },
-          d.question && h('p', { class: 'order-q', text: d.question }),
-          leadLine && h('p', { style: 'margin:6px 0 0;font-size:13px', text: leadLine }),
-          problems.length > 0 && h('div', { class: 'rt-problem' },
-            h('p', { class: 'rt-sub', text: "What's wrong" }),
-            problems.map(t => h('div', { class: 'rt-line' }, h('span', { text: t }), plainOf(t) ? h('small', { text: plainOf(t) }) : null))),
-          d.choices.length > 0 && h('div', { class: 'rt-chips' }, h('span', { class: 'rt-sub', text: 'On the page:' }), d.choices.map(c => h('span', { class: 'chip', text: c.label, title: c.hint || '' }))),
-          latestDecision && h('p', { class: 'verdict', style: 'margin-top:8px', text: `Decision: ${latestDecision.decision} · ${latest.author} · ${shortDate(latest.createdAt)}` }),
-          latestNote && noteLink(`Copy the ${guideFor(d.type).note.toLowerCase()}`, () => copyNote(latestNote)),
-          (d.pair.length === 2 || d.codes.length > 0) && h('div', { class: 'rt-chips' }, h('span', { class: 'rt-sub', text: 'Codes:' }),
-            d.pair.length === 2 && h('button', { class: 'chip rt-code', type: 'button', text: `${d.pair[0]} vs ${d.pair[1]}`, title: 'Compare in Entry Assistant', onclick: () => showEntry({ codes: d.pair, from: d.pairFrom }) }),
-            d.codes.slice(0, 6).map(c => h('button', { class: 'chip rt-code', type: 'button', text: `${c.code}${c.from ? ` · ${c.from}` : ''}`, title: `Look up ${c.code}${c.from ? ` (made in ${regionName(c.from)})` : ''} in Entry Assistant`, onclick: () => showEntry({ codes: [c.code], from: c.from }) })))),
         !d.hasShipper && /HS_CODE|VALUE|DENIED/.test(d.type) && h('p', { class: 'hint', text: 'Open Parties and Items on the page before you send, so Claude gets the shipper and every line.' }),
         !WORK_ORDER_GUIDES[d.type] && h('p', { class: 'hint warn', text: `No research guide for ${d.label} yet, so Claude gets the page with a general brief.` }));
       const tokenHint = !entryToken() && h('p', { class: 'hint warn' },
@@ -9378,15 +9117,8 @@
       for (const [el, v] of [[frontIn, known.front], [slackIn, known.slack], [chatIn, known.chat || GM_getValue(CHAT_URL_PREFIX + d.disputeId, '')]]) {
         if (v && !el.value && root.activeElement !== el) el.value = v;   // what's known, without overwriting your typing
       }
-      // Folded extras at the bottom, each saying what's in it; open or shut is remembered
-      const FOLDS_KEY = 'zt:researchFolds';
-      const folds = GM_getValue(FOLDS_KEY, {});
-      const fold = (key, title, meta, openByDefault, ...kids) => h('details', { class: 'group setting rt-fold', open: folds[key] ?? openByDefault,
-        ontoggle: e => { const all = GM_getValue(FOLDS_KEY, {}); all[key] = e.currentTarget.open; GM_setValue(FOLDS_KEY, all); } },
-        h('summary', {}, h('span', { class: 'label', style: 'margin:0', text: title }), meta ? h('span', { class: 'rt-meta', text: meta }) : null),
-        h('div', { class: 'setting-body' }, kids));
-      const linksSection = h('div', { class: tidy ? '' : 'section' },
-        !tidy && h('p', { class: 'label', text: 'Links' }),
+      const linksSection = h('div', { class: 'section' },
+        h('p', { class: 'label', text: 'Links' }),
         h('div', { class: 'row' }, frontIn),
         h('div', { class: 'row', style: 'margin-top:6px' }, slackIn),
         h('div', { class: 'row', style: 'margin-top:6px' }, chatIn),
@@ -9421,11 +9153,10 @@
         s.commentNote = h('p', { class: 'hint' });
       }
       const list = comments?.list || [];
-      const commentSection = h('div', { class: tidy ? '' : 'section' },
-        tidy ? desk.tracking() && h('div', { class: 'row', style: 'justify-content:flex-end' }, noteLink('Refresh', () => desk.loadComments()))
-          : h('div', { class: 'row', style: 'align-items:baseline' },
-            h('p', { class: 'label', style: 'margin:0', text: `Comments${list.length ? ` (${list.length})` : ''}` }),
-            desk.tracking() && h('span', { style: 'margin-left:auto' }, noteLink('Refresh', () => desk.loadComments()))),
+      const commentSection = h('div', { class: 'section' },
+        h('div', { class: 'row', style: 'align-items:baseline' },
+          h('p', { class: 'label', style: 'margin:0', text: `Comments${list.length ? ` (${list.length})` : ''}` }),
+          desk.tracking() && h('span', { style: 'margin-left:auto' }, noteLink('Refresh', () => desk.loadComments()))),
         comments?.state === 'loading' ? h('p', { class: 'hint', text: 'Loading the comments on this case…' })
           : comments?.state === 'error' ? h('p', { class: 'hint err', text: `Couldn't read the comments: ${comments.error}` })
           : comments?.state === 'off' ? h('p', { class: 'hint', text: 'Set up the Google Sheet (Settings) to see and post comments on the case.' })
@@ -9449,8 +9180,8 @@
         setStatus(desk.tracking() && !desk.dryRun() ? `Saved to ${trackedIn}.` : `Saved on this computer (${desk.tracking() ? 'test mode' : `${trackedIn} isn't set up`}).`, 'ok');
         render();
       };
-      const detailsSection = h('div', { class: tidy ? '' : 'section' },
-        !tidy && h('p', { class: 'label', text: 'The answer we found' }),
+      const detailsSection = h('div', { class: 'section' },
+        h('p', { class: 'label', text: 'The answer we found' }),
         foundIn,
         h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'secondary', type: 'button', text: 'Save', onclick: () => run(saveDetails) })),
         h('p', { class: 'hint', text: !desk.tracking() ? 'Saved on this computer.'
@@ -9458,18 +9189,12 @@
 
       desk.setPageData(d);
       const deskCard = desk.card(noteLink);
-      const linkCount = [frontIn, slackIn, chatIn].filter(i => clean(i.value)).length;
-      const extras = tidy && h('div', { class: 'section rt-extras' },
-        fold('found', 'Write the answer yourself', 'saved to the case with your name', false, detailsSection),
-        fold('links', 'Links', linkCount ? `${linkCount} of 3 saved` : 'Front, Slack, AI chat', false, linksSection),
-        fold('comments', 'Comments', comments?.state === 'loading' ? 'loading…' : list.length ? `${list.length} comment${list.length === 1 ? '' : 's'}` : 'none yet', list.length > 0, commentSection));
       if (isOrder) {
-        rest.replaceChildren(...(tidy ? [deskCard, orderSection, answerSection, tokenHint, extras]
-          : [deskCard, linksSection, commentSection, orderSection, answerSection, detailsSection, tokenHint]).filter(Boolean));
+        rest.replaceChildren(...[deskCard, linksSection, commentSection, orderSection, answerSection, detailsSection, tokenHint].filter(Boolean));
       } else rest.replaceChildren(...[
         deskCard,
-        !tidy && linksSection,
-        !tidy && commentSection,
+        linksSection,
+        commentSection,
         h('div', { class: 'section' },
           h('p', { class: 'label', text: 'Lines to research' }),
           inDispute.length > 0
@@ -9487,9 +9212,8 @@
         docsBlock,
         valueHint,
         answerSection,
-        !tidy && detailsSection,
+        detailsSection,
         tokenHint,
-        extras,
       ].filter(Boolean));
 
       body.scrollTop = scroll;
@@ -9697,8 +9421,6 @@
     const onRoute = () => {
       ui?.keepAttached();
       if (GM_getValue(READABLE_KEY, false)) makeReadable();
-      if (GM_getValue(GLANCE_KEY, false)) orderGlance();
-      else if (isCasePage()) restoreFolds();
       fixListLinks();
       showPrograms();
       if (onQueuePage()) { queue = queue || createQueue(); queue.mount(); }
