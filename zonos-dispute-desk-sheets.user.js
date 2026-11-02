@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.57.0
-// @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue (search everything, sorting, filters, summaries, saved views, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
+// @version      7.58.0
+// @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
 // @updateURL    https://gist.githubusercontent.com/kars3n-zonos/9dd13b6c4c3ea4d1d6a876d45002c0a3/raw/zonos-dispute-desk-sheets.user.js
@@ -1530,12 +1530,16 @@
   ];
   const OTHER_CHECK = 'What evidence supports or contradicts it?';
   const CHAPTER_99_CHECK = "The merchant's code is a Chapter 99 provision, which adds a duty on top of a regular code rather than replacing it. Work out what the merchant actually means (for example, steel rather than aluminum) and whether the evidence supports that.";
+  // A free trade agreement claim (USMCA and the like): no formal certification needed, plain questions instead
+  const FTA_CLAIM = /free[s-]*trade|fta|usmca|cusma|t-mec|nafta|korus|cafta|preferential|preference program|originating good|qualifw* (for|under) (the )?(agreement|treaty)/i;
+  const FTA_CHECK = "The merchant is claiming a free trade agreement (USMCA or another). We don't need a formal certification or certificate of origin for it: don't deny it, or ask, for the lack of one. Work out from the documents, images and research whether the goods likely qualify: where they were made, what they're made from, and where those materials came from. Anything still unproven gets asked in plain English under Ask the merchant for, for example \"Where is this made, and are its main materials made there too?\" or \"Was it made in Canada, or only shipped from there?\"";
   const SECTION_232_CHECK = "Does Section 232 really not apply, or apply only the way the merchant says? That turns on whether the item is a steel, aluminum or copper article or derivative covered for its HTS code, how much of it is that metal, and where the metal was melted and poured (steel) or smelted and cast (aluminum). Look for documents that prove it: a mill certificate, a manufacturer's statement, or an invoice that breaks out the metal's value. The merchant saying so is not proof.";
 
   function checkFor(claim, item) {
     const { field } = claim;
     const hs = item.fields.find(f => /^hs code$/i.test(f.label));
     if (/hs code/i.test(field) && isChapter99(hsCodeIn(hs?.claimed))) return P('check.chapter99', CHAPTER_99_CHECK);
+    if (FTA_CLAIM.test(`${field} ${claim.reason || ''}`)) return P('check.fta', FTA_CHECK);
     if (disputeKinds(item).s232 && (/tariff|exempt|exclusion|chapter 99|232/i.test(field) || /232|alumin|steel|copper/i.test(claim.reason || ''))) return P('check.section232', SECTION_232_CHECK);
     const c = CLAIM_CHECKS.find(([re]) => re.test(field));
     return c ? P(`check.${c[2]}`, c[1]) : P('check.other', OTHER_CHECK);
@@ -1653,7 +1657,8 @@
   const DISPUTE_TEXT = {
     brief: "I'm a customs broker at Zonos handling a duty dispute. Do the fact-finding I'd otherwise do by hand: find out everything that matters about the item and the seller, catch anything that doesn't add up, and work out what proof is still missing. The merchant's claim is context, not the outline: check every fact in it, but research whatever matters for the duty, even if they didn't mention it.",
     rules: [
-      '- The merchant has to prove their claim. Every red flag is a reason to ask them for more.',
+      '- The merchant has to prove their claim. Find and list every red flag, but resolve only the claim: the verdict, the asks, the portal text and the email answer what the merchant claimed, and red flags stay with me unless I say to raise them.',
+      "- For a free trade agreement claim (USMCA or another), we don't need a formal certification of origin. Ask what we still need to know in plain English instead.",
       '- When proof is missing, the higher-duty option stands, especially for tariffs (Section 232, Section 301, the Russia aluminum rate). A tariff stays until documents show it doesn\'t apply.',
       '- Every specific thing the merchant says (numbers, materials, use, origin) gets checked against their own website, images and documents.',
     ],
@@ -1687,14 +1692,15 @@
       "- Keep it short: one line per bullet, no paragraphs, no greeting, no recap of the dispute. Write only the final reply: no progress notes, no list of the steps or searches, and no mention of the Entry Assistant API or the skill.",
       '- Put HTS and Chapter 99 codes in backticks, and link a source for every fact.',
       "- Red flags come first: anything that doesn't add up, from the documents, the claim text, the website or your research, each with its source. Nothing is too small: a document dated years before the order, goods shipping from a different country than the stated origin, a template with blanks left in, an email domain that doesn't match the website, a spec that contradicts the claim, a promised document that isn't attached.",
-      "- Under Ask the merchant for, list the specific documents or facts that would settle what's still unproven, each with what it would prove. For example: a mill certificate or supplier declaration naming the countries where the aluminum was smelted and cast; a bill of materials with each component's origin and cost; the latest supplier invoice; a spec sheet showing the output. Only what the merchant can actually provide. Settle classification questions yourself.",
+      "- Under Ask the merchant for, list the specific documents or facts that would settle what's still unproven, each with what it would prove. Only what's needed to resolve their claim: don't ask about a red flag unless I say to. For a free trade agreement claim, never ask for a certification of origin: ask plain questions, such as where it's made and where its main materials come from. For example: a mill certificate or supplier declaration naming the countries where the aluminum was smelted and cast; a bill of materials with each component's origin and cost; the latest supplier invoice; a spec sheet showing the output. Only what the merchant can actually provide. Settle classification questions yourself.",
       "- The verdict must carry its proof. Don't just say what the item \"clearly\" is: say what shows it (which photo, document or listing, with its link) and which rule it meets or fails (the HTS heading or subheading text, the origin rule, the Section 232 heading). One or two sentences on one line.",
       `  An example of the level of proof wanted (not of the content): "The merchant's claim is somewhat substantiated because the item is a finished microphone, not a part: the merchant's own listing ([link]) sells it as a complete USB condenser mic and photo 2 shows it assembled with its cable, so heading 8518 is right but their subheading (parts of microphones) is not; it belongs with complete microphones in 8518.10."`,
+      "- The Bottom line, Final answer, Reasoning and Verdict answer the merchant's claim. They can rest on what your research found, but don't turn a red flag into a new issue there; the Red flags list is where those go.",
       "- Every line gets a verdict: never \"waiting\" or \"needs more info\" as the answer. If proof is missing, decide on what's there (without proof the higher-duty option stands), and put what would change it under Ask the merchant for.",
     ],
     email: [
       '- End the whole reply (once, after the last block) with this line on its own: "Would you like me to draft an email?"',
-      '- If I say yes, write a short, friendly email to the merchant contact: what the charge or code depends on, the requests as a numbered list, what happens once you have them, and the order number at the end. For example: "Hey Matt, I\'m looking at your dispute for the Section 232 duties. This charge depends on where the aluminum was smelted and cast, so we can remedy it once we have evidence that neither happened in Russia. Please send: 1. … Once we have these, we\'ll review the charge and recalculate the landed cost."',
+      '- If I say yes, write a short, friendly email to the merchant contact: what the charge or code depends on, the requests as a numbered list (only what resolves their claim: no red flags unless I ask for them), what happens once you have them, and the order number at the end. For example: "Hey Matt, I\'m looking at your dispute for the Section 232 duties. This charge depends on where the aluminum was smelted and cast, so we can remedy it once we have evidence that neither happened in Russia. Please send: 1. … Once we have these, we\'ll review the charge and recalculate the landed cost."',
     ],
   };
   const DP = k => P(`dispute.${k}`, DISPUTE_TEXT[k]);
@@ -1837,7 +1843,7 @@
     L.push('', '## Reply',
       `Fill in this template${items.length > 1 ? ', one block per line, in this order' : ''}:`,
       ...DPL('replyRules'),
-      `- After the last block, under **For the portal**, give the text I'll paste for each line in this reply, one line per box the decision asks for (${(() => { const f = textFieldsOn(document.querySelector('main')); return f.length ? f.join(', ') : 'the decision note'; })()}): "Line N · <box>: <text>", plain text, one sentence up to one short paragraph, stating the decision and why. Only the lines in this request.`,
+      `- After the last block, under **For the portal**, give the text I'll paste for each line in this reply, one line per box the decision asks for (${(() => { const f = textFieldsOn(document.querySelector('main')); return f.length ? f.join(', ') : 'the decision note'; })()}): "Line N · <box>: <text>", plain text, one sentence up to one short paragraph, stating the decision and why. It answers the merchant's claim only: no red flags. Only the lines in this request.`,
       ...DPL('email'));
     L.push(`- Start the whole reply with ${FINAL_LABEL} (once, before the first block): ${finalStyle('DUTY_DISPUTE')}`, REASON_RULE, '', `${FINAL_LABEL} <one sentence>`, `${REASON_LABEL} <one sentence>`);
     items.forEach((item, i) => L.push('', ...replyBlock(item, s, { platformUnknown: platformUnknown && i === 0 })));
@@ -2535,6 +2541,7 @@
     const C = 'Claim checks';
     for (const [, text, k, name] of CLAIM_CHECKS) add(`check.${k}`, C, name, text, `The "Check:" after a ${name.toLowerCase()} claim in dispute prompts.`);
     add('check.chapter99', C, 'Chapter 99 code', CHAPTER_99_CHECK, "The check when the merchant's code is a Chapter 99 provision.");
+    add('check.fta', C, 'Free trade agreement', FTA_CHECK, 'The check when the claim names a free trade agreement (USMCA, FTA, preferential).');
     add('check.section232', C, 'Section 232', SECTION_232_CHECK, 'The check for a Section 232 claim.');
     add('check.other', C, 'Any other claim', OTHER_CHECK, 'The check for a claim on any other field.');
     const F = 'Final answer';
@@ -3671,16 +3678,14 @@
   /* ------------------------------------------------- dashboard: the work queue */
 
   const QUEUE_PATH = '/entry-writer-queue';
-  // Which queue the Entry Writer Queue page shows: the portal's own (the default), Portal+ (the portal's look,
-  // without its limits) or the Tools queue (dense, with summaries and saved views)
+  // Which queue the Entry Writer Queue page shows: the portal's own (the default) or Portal+ (the portal's look,
+  // without its limits). The Advanced View is gone (7.58.0): anyone who had it gets Portal+.
   const QUEUE_VIEW_KEY = 'zt:queueView';
-  const QUEUE_LAST_KEY = 'zt:queueViewLast';   // the last of ours used, for the switch on the portal's own queue
-  const QUEUE_VIEWS = { portal: 'Default Portal', classic: 'Portal+', tools: 'Advanced View' };
-  const queueView = () => { const v = GM_getValue(QUEUE_VIEW_KEY, 'portal'); return v in QUEUE_VIEWS ? v : 'portal'; };
+  const QUEUE_VIEWS = { portal: 'Default Portal', classic: 'Portal+' };
+  const queueView = () => { const v = GM_getValue(QUEUE_VIEW_KEY, 'portal'); return v === 'tools' ? 'classic' : v in QUEUE_VIEWS ? v : 'portal'; };
   const toolsQueueOn = () => queueView() !== 'portal';
   function setQueueView(v) {
     GM_setValue(QUEUE_VIEW_KEY, v);
-    if (v !== 'portal') GM_setValue(QUEUE_LAST_KEY, v);
     queueCtl?.refreshView();
   }
   let queueCtl = null;   // set once the queue exists, so Tools can switch views
@@ -3688,7 +3693,7 @@
   const NAV_KEY = 'zt:queue:nav';        // the queue as last shown: the order of Prev / Next and each order's summary
   const NAV_AT_KEY = 'zt:queue:navAt';   // when NAV_KEY was last written (cheap to read, to know when to re-read it)
   const PREFS_KEY = 'zt:queue:prefs';
-  // Escalated orders are left out of the queue's tabs (not the Escalated and All work orders tabs, or a search)
+  // Escalated orders are left out of the queue's tabs (not a search)
   const HIDE_ESC_KEY = 'zt:queue:hideEscalated';
   const hideEscalated = () => GM_getValue(HIDE_ESC_KEY, true);
   const SEEN_KEY = 'zt:queue:seenAt';
@@ -3741,7 +3746,7 @@
       codes, groupKey: n.groupKey || '', claims,
       // A duty dispute's own status: Resolution failed means it was submitted but the portal couldn't finish resolving it
       resFailed: n.subject?.status === 'RESOLUTION_FAILED',
-      // Resolved, auto-resolved or cancelled (the Advanced View's All work orders tab)
+      // Resolved, auto-resolved or cancelled (found by a search)
       closed: n.status !== 'OPEN' && n.status !== 'WAITING', resolutionNote: n.resolutionNote || '', resolvedMs: Date.parse(n.resolvedAt) || 0, resolvedBy: n.resolvedBy || '', resolverName: '',
     };
   }
@@ -3781,26 +3786,13 @@
     button:disabled { opacity: .5; cursor: default; }
     button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible, tr:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
     a { color: inherit; text-decoration: none; }
-    .top { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-    .eyebrow { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
-    h1 { margin: 2px 0 0; font-size: 24px; line-height: 1.2; }
     .mode { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; vertical-align: middle; border: 1px solid currentColor; }
     .mode.live { color: var(--ok); } .mode.test { color: var(--warn); }
-    .top-actions { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; flex-wrap: wrap; }
     .btn { background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; }
     .btn:hover { background: var(--soft); }
     .btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; }
     .btn.danger { color: var(--err); border-color: currentColor; }
     .btn.small { padding: 2px 8px; font-size: 12px; }
-    .scopes { display: flex; gap: 2px; margin-top: 14px; border-bottom: 1px solid var(--line); overflow-x: auto; }
-    .scope { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px; font-weight: 600; color: var(--muted); white-space: nowrap; }
-    .scope:hover { color: var(--fg); }
-    .scope[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
-    .count { display: inline-block; min-width: 20px; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--soft); font-size: 11px; text-align: center; }
-    .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
-    .search { flex: 1 1 340px; display: flex; align-items: center; gap: 6px; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; }
-    .search input { flex: 1; min-width: 0; border: 0; background: transparent; padding: 8px 0; outline: none; }
-    .search kbd { font: 11px ui-monospace, Consolas, monospace; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
     .filter { position: relative; }
     .filter > button { background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; white-space: nowrap; width: 112px; text-align: left; overflow: hidden; text-overflow: ellipsis; }
     .filter > button.on { border-color: var(--accent); color: var(--accent); }
@@ -3815,57 +3807,28 @@
     .pop.hiding label input:checked + span { text-decoration: line-through; color: var(--muted); }
     .pop .pop-actions { display: flex; justify-content: space-between; padding: 4px 6px 0; border-top: 1px solid var(--line); margin-top: 4px; }
     .linkish { background: none; border: 0; padding: 0; color: var(--accent); font-size: 12px; }
-    .summary { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-    .stat { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: transparent; text-align: left; min-width: 112px; }
-    .stat:hover { background: var(--soft); }
-    .stat.on { border-color: var(--accent); }
-    .stat b { display: block; font-size: 18px; line-height: 1.2; }
-    .stat span { font-size: 11px; color: var(--muted); }
-    .stat.err b { color: var(--err); } .stat.warn b { color: var(--warn); }
-    .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-    .chip { border: 1px solid var(--line); background: transparent; border-radius: 999px; padding: 1px 9px; font-size: 12px; color: var(--muted); }
-    .chip:hover { color: var(--fg); }
-    .chip.on { color: var(--accent); border-color: var(--accent); }
-    .views { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; font-size: 12px; color: var(--muted); }
-    .actionbar { height: 44px; margin-top: 12px; display: flex; align-items: center; }
-    .actionbar > * { flex: 1; min-width: 0; }
     .bulk { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; overflow-x: auto; white-space: nowrap; padding: 6px 10px; border: 1px solid var(--accent); border-radius: 8px; background: var(--tint); }
     .bulk .sel-n { font-weight: 700; margin-right: 6px; }
     .bulk > * { flex: none; }
     .bulk .sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
-    .tablewrap { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; }
     table { width: 100%; min-width: 1180px; border-collapse: collapse; table-layout: fixed; }
     th { position: sticky; top: 0; background: var(--bg); text-align: left; font-size: 12px; font-weight: 600; color: var(--muted); padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; user-select: none; }
     th.sortable { cursor: pointer; }
     th.sortable:hover { color: var(--fg); }
     th .arrow { color: var(--accent); margin-left: 3px; font-size: 11px; }
     td { padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; overflow: hidden; }
-    tr.row td { height: 52px; }
-    .clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     tr.row { cursor: pointer; }
     tr.row:hover td { background: var(--soft); }
     tr.row.sel td { background: var(--sel); }
     tr.row.focus td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
-    tr.group td { background: var(--soft); font-weight: 600; font-size: 12px; padding: 6px 10px; }
     td.cb, th.cb { padding-right: 0; }
     td.cb input, th.cb input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
-    .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; border: 1px solid var(--line); white-space: nowrap; }
-    .st-OPEN { color: #60a5fa; border-color: currentColor; } .st-WAITING { color: var(--warn); border-color: currentColor; }
-    .st-RESOLVED, .st-AUTO_RESOLVED { color: var(--ok); border-color: currentColor; } .st-CANCELLED { color: var(--muted); }
-    .esc { color: var(--err); border-color: currentColor; }
-    .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .sub { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .ref { display: flex; align-items: baseline; min-width: 0; font: 12px ui-monospace, Consolas, monospace; white-space: nowrap; }
-    .ref a { overflow: hidden; text-overflow: ellipsis; }
-    .badges { display: flex; flex-wrap: nowrap; gap: 4px; white-space: nowrap; }
-    .badge { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
     .copy { visibility: hidden; background: none; border: 0; color: var(--muted); padding: 0 4px; font-size: 12px; }
     tr.row:hover .copy { visibility: visible; }
     .copy:hover { color: var(--accent); }
     .new { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 6px; vertical-align: middle; }
     .muted { color: var(--muted); } .err { color: var(--err); } .warn { color: var(--warn); } .ok { color: var(--ok); }
     .empty { padding: 28px; text-align: center; color: var(--muted); }
-    .foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 2px; font-size: 12px; color: var(--muted); }
     .toast { position: fixed; z-index: 2147483002; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: min(720px, 90vw); background: var(--fg); color: var(--bg); padding: 10px 14px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.35); white-space: pre-wrap; }
     .toast.err { background: var(--err); color: #fff; }
     .scrim { position: fixed; inset: 0; z-index: 2147483001; background: rgba(0,0,0,.45); display: grid; place-items: center; padding: 16px; }
@@ -3879,8 +3842,6 @@
     .dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
     .progress { height: 4px; background: var(--soft); border-radius: 2px; overflow: hidden; margin-top: 10px; }
     .progress > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
-    .keys { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .keys kbd { font: 11px ui-monospace, Consolas, monospace; border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
   `;
 
   // Who can do what to an order. The portal still has the final say; a refusal is reported per order.
@@ -3903,22 +3864,13 @@
     { key: 'resolve', label: 'Resolve', op: 'BrokerageWorkOrderResolve', verb: 'Resolved', can: r => (r.status === 'OPEN' || r.status === 'WAITING') && r.type !== 'DUTY_DISPUTE_REVIEW', note: 'optional', resolution: true, danger: true },
   ];
 
-  const SCOPES = [
-    { key: 'mine', label: 'Mine', test: (r, me) => !!me && r.assigneeId === me },
-    { key: 'unclaimed', label: 'Unclaimed', test: r => r.status === 'OPEN' && !r.assigneeId },
-    { key: 'waiting', label: 'Waiting', test: r => r.status === 'WAITING' },
-    { key: 'escalated', label: 'Escalated', test: r => !!r.escalatedTo },
-    { key: 'all', label: 'All open', test: () => true },
-    // Every work order, completed and cancelled ones too (those load when the tab is first opened)
-    { key: 'everything', label: 'All work orders', test: () => true, every: true },
-  ];
   const DUE = {
     overdue: { label: 'Overdue', test: r => !r.closed && r.dueMs && dueDay(r) < today() },
     today: { label: 'Due today', test: r => !r.closed && r.dueMs && dueDay(r) === today() },
     week: { label: 'Due in 7 days', test: r => !r.closed && r.dueMs && r.dueMs >= today() && r.dueMs < today() + 8 * DAY },
     none: { label: 'No due date', test: r => !r.dueMs },
   };
-  // Only in Portal+, where the portal's own queue has it too
+  // The portal's own queue has it too
   const STREAM_FILTER = { key: 'stream', label: 'Stream', val: r => r.stream ? human2(r.stream) : 'None',
     hint: "Which CBP filing the problem is on (entry summary, cargo release, PGA…). Only rejected or failed filings have one; everything else is None." };
   const FILTERS = [
@@ -3929,7 +3881,7 @@
     { key: 'due', label: 'Due', val: r => Object.entries(DUE).filter(([, d]) => d.test(r)).map(([, d]) => d.label) },
   ];
   function human2(s) { const t = String(s || '').toLowerCase().replace(/_/g, ' '); return t.charAt(0).toUpperCase() + t.slice(1); }
-  // Fixed widths (Item / problem takes the rest), so sorting, filtering or searching never moves a column
+  // Each column's sort value (Portal+'s columns, CLASSIC_COLS, add their own labels and widths)
   const COLS = [
     { key: 'type', label: 'Class', width: 160, val: r => r.label },
     { key: 'status', label: 'Status', width: 150, val: r => `${r.status}${r.escalatedTo ? '!' : ''}` },
@@ -4060,7 +4012,6 @@
     .cq-toggle.bad .n { color: var(--err); font-weight: 600; }
     .cq-toggle.bad.on { border-color: var(--err); }
     .cq-eschid { display: inline-flex; align-items: center; height: 28px; font-size: 12.5px; color: var(--muted); cursor: help; }
-    .q .cq-stats { margin-top: 8px; }
     .cq-view.on { border-color: var(--fg); }
     .cq .cq-table { overflow: visible; }
     .cq-t thead th { position: sticky; top: 0; z-index: 3; }
@@ -4072,8 +4023,8 @@
     .cq.dense .cq-t tr.row td { height: 40px; padding-top: 4px; padding-bottom: 4px; font-size: 13px; }
     .cq.dense .cq-t .cq-small { display: none; }
     .cq.dense .cq-t tr.row td .cq-who .muted { display: none; }
-    .cq-status, .q .badges { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; white-space: nowrap; }
-    .cq-status > .cq-pill, .q .badges > .badge { flex: none; max-width: none; overflow: visible; }
+    .cq-status { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; white-space: nowrap; }
+    .cq-status > .cq-pill { flex: none; max-width: none; overflow: visible; }
     .sf-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 11px; font-weight: 600; line-height: 1.3; }
     .sf { white-space: nowrap; cursor: default; }
     .sf-bad { color: var(--err); }
@@ -4087,11 +4038,10 @@
     .cq-res { flex: none; display: inline-grid; place-items: center; width: 20px; height: 20px; padding: 0; margin: 0; border-radius: 50%; font-size: 11px; line-height: 1;
       color: #7c3aed; background: rgba(124,58,237,.08); border: 1px solid rgba(124,58,237,.45); overflow: visible; }
     .cq-res-live { color: #ffffff; background: #7c3aed; border-color: #7c3aed; }
-    .badges .cq-res { width: 18px; height: 18px; font-size: 10px; }
     :host([data-theme="dark"]) .cq-res { color: #c4b5fd; } :host([data-theme="dark"]) .cq-res-live { color: #ffffff; }
     .cq-res-bad { color: var(--err); background: var(--red-bg); border-color: var(--red-line); }
-    .cq-many, .badge.many { color: #ffffff; background: #b45309; border-color: #b45309; font-weight: 700; margin-right: 6px; }
-    :host([data-theme="dark"]) .cq-many, :host([data-theme="dark"]) .badge.many { color: #111111; background: #f59e0b; border-color: #f59e0b; }
+    .cq-many { color: #ffffff; background: #b45309; border-color: #b45309; font-weight: 700; margin-right: 6px; }
+    :host([data-theme="dark"]) .cq-many { color: #111111; background: #f59e0b; border-color: #f59e0b; }
     .runbar { margin-top: 12px; padding: 10px 14px; border: 1px solid var(--line); border-left: 4px solid #b45309; border-radius: 8px; font-size: 13px; }
     .runbar-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .runbar ul { margin: 4px 0 0; padding-left: 18px; } .runbar summary { cursor: pointer; color: var(--muted); margin-top: 6px; } .runbar a { color: inherit; }
@@ -4102,10 +4052,7 @@
     const host = h('div', { id: 'zt-queue-host' });
     const root = host.attachShadow({ mode: 'open' });
     for (const type of ['keydown', 'keyup', 'keypress']) host.addEventListener(type, e => e.stopPropagation());
-    // Two looks over the same data: 'tools' (the Tools queue) and 'classic' (Portal+). Each keeps its own tab;
-    // search, filters and sort are shared
-    const skin = () => (queueView() === 'classic' ? 'classic' : 'tools');
-    const defaults = { scope: 'mine', cscope: 'mine', filters: {}, sort: [{ key: 'due', dir: 1 }], group: '', views: [], auto: true, stack: true };
+    const defaults = { cscope: 'mine', filters: {}, sort: [{ key: 'due', dir: 1 }], auto: true, stack: true };
     const prefs = { ...defaults, ...GM_getValue(PREFS_KEY, {}) };
     // Hiding escalated orders was the Status filter set to Hide Escalated; it's its own switch in Settings now. Once,
     // whatever each person had carries over, and Escalated comes out of the filter.
@@ -4121,24 +4068,21 @@
       prefs.escSetting = true;
       GM_setValue(PREFS_KEY, prefs);
     }
-    const savePrefs = () => GM_setValue(PREFS_KEY, { scope: S.scope, cscope: S.cscope, filters: S.filters, sort: S.sort, group: S.group, views: prefs.views, auto: S.auto, stack: S.stack, excl: S.excl, cgroup: S.cgroup, dense: S.dense, resOnly: S.resOnly, escSetting: true });
+    const savePrefs = () => GM_setValue(PREFS_KEY, { cscope: S.cscope, filters: S.filters, sort: S.sort, auto: S.auto, stack: S.stack, excl: S.excl, cgroup: S.cgroup, dense: S.dense, resOnly: S.resOnly, escSetting: true });
     const S = {
-      rows: [], me: null, loadedAt: 0, loading: false, error: '', q: '', scope: prefs.scope, cscope: prefs.cscope, filters: prefs.filters || {}, sort: prefs.sort, group: prefs.group,
+      rows: [], me: null, loadedAt: 0, loading: false, error: '', q: '', cscope: prefs.cscope, filters: prefs.filters || {}, sort: prefs.sort,
       auto: prefs.auto, sel: new Set(), anchor: -1, focus: -1, pop: '', popSearch: '', extra: null, extraFor: '', seenAt: GM_getValue(SEEN_KEY, 0), shown: [], limit: 300,
       open: new Set(),   // Portal+: rows with their details showing
-      closed: [], closedAt: 0, closedLoading: false, closedError: '',   // resolved, auto-resolved and cancelled orders (All work orders)
+      closed: [], closedAt: 0, closedLoading: false, closedError: '',   // resolved, auto-resolved and cancelled orders (for a search)
       stack: prefs.stack !== false, stackMsg: '',
       excl: prefs.excl || {},
       resOnly: !!prefs.resOnly,   // "Only resolution failed": its own switch
-      cgroup: prefs.cgroup || '', dense: !!prefs.dense,   // Portal+: its grouping, and compact rows   // filters set to Hide: the values picked are left out instead of the only ones shown   // identical disputes shown as one row (with the access code)
+      cgroup: prefs.cgroup || '', dense: !!prefs.dense,   // its grouping, and compact rows
     };
     let autoTimer = null;
     // Follows the portal's light / dark switch as soon as it's flipped, without redrawing the list
     new MutationObserver(() => { if (host.isConnected) host.dataset.theme = pageIsDark() ? 'dark' : 'light'; })
       .observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
-    const scopeList = () => (skin() === 'classic' ? CLASSIC_SCOPES : SCOPES);
-    const scopeKey = () => (skin() === 'classic' ? 'cscope' : 'scope');
-    const filterList = () => (skin() === 'classic' ? CLASSIC_FILTERS : FILTERS);
 
     const wrap = h('div', { class: 'q' });
     root.append(h('style', { text: QUEUE_CSS + CLASSIC_CSS }), wrap);
@@ -4173,7 +4117,7 @@
         S.loading = false;
         render();
         if (placePending) { placePending = false; restorePlace(); }
-        if (everythingShown() || searching()) loadClosed(!quiet);
+        if (searching()) loadClosed(!quiet);
         // Names the cache didn't have yet come in after the first draw
         const missing = rows.filter(r => r.orgId && !(r.orgId in names)).map(r => r.orgId);
         if (missing.length) {
@@ -4187,10 +4131,8 @@
         render();
       }
     }
-    // The closed orders, for the All work orders tab: read when it's opened, and again at most every 5 minutes
-    // (or on ↻ Refresh), since there are hundreds and they rarely change
-    const everythingShown = () => skin() === 'tools' && !!SCOPES.find(s => s.key === S.scope)?.every;
-    // A search looks through every work order, whatever tab is open (the closed ones load the first time)
+    // A search looks through every work order, whatever tab is open: the closed ones are read the first time, and
+    // again at most every 5 minutes (or on ↻ Refresh), since there are hundreds and they rarely change
     const searching = () => !!clean(S.q);
     async function loadClosed(force = false) {
       if (S.closedLoading || (!force && Date.now() - S.closedAt < 5 * 60000)) return;
@@ -4212,7 +4154,7 @@
       S.closedLoading = false;
       render();
     }
-    // The orders a tab draws from: the open and waiting ones, plus the closed ones on All work orders
+    // The orders a tab draws from: the open and waiting ones, plus the closed ones for a search
     function baseRows(scope) {
       if (!scope?.every) return S.rows;
       const open = new Set(S.rows.map(r => r.id));
@@ -4241,20 +4183,20 @@
     function filterVals(f, r) { const v = f.val(r); return Array.isArray(v) ? v : [v]; }
     function visible({ ignore = '' } = {}) {
       const ign = [].concat(ignore);
-      const scope = scopeList().find(s => s.key === S[scopeKey()]) || scopeList()[0];
+      const scope = CLASSIC_SCOPES.find(s => s.key === S.cscope) || CLASSIC_SCOPES[0];
       const me = S.me?.id;
       const pq = parseQuery(S.q);
       // A search: every work order, whatever the tab (the filters you set still apply)
       const all = searching();
       let rows = all ? baseRows({ every: true }) : baseRows(scope).filter(r => scope.test(r, me));
-      for (const f of filterList()) {
+      for (const f of CLASSIC_FILTERS) {
         let want = S.filters[f.key];
-        // The Escalated and All work orders tabs, and a search, show escalated orders, hidden or not
-        if (f.key === 'status' && S.excl.status && (all || scope.key === 'escalated' || scope.every)) want = want?.filter(v => v !== 'Escalated');
+        // A search shows escalated orders, hidden or not
+        if (f.key === 'status' && S.excl.status && all) want = want?.filter(v => v !== 'Escalated');
         if (ign.includes(f.key) || !want?.length) continue;
         rows = rows.filter(r => filterVals(f, r).some(v => want.includes(v)) !== !!S.excl[f.key]);
       }
-      if (!ign.includes('esc') && hideEscalated() && !all && scope.key !== 'escalated' && !scope.every) rows = rows.filter(r => !r.escalatedTo);
+      if (!ign.includes('esc') && hideEscalated() && !all) rows = rows.filter(r => !r.escalatedTo);
       if (S.resOnly && !ign.includes('resOnly')) rows = rows.filter(r => r.resFailed);
       if (pq.list) {
         const found = new Set();
@@ -4288,7 +4230,7 @@
       });
       return decorated.map(d => d.r);
     }
-    function groupOf(r, by = S.group) {
+    function groupOf(r, by = S.cgroup) {
       if (by === 'customer') return r.customer || r.consignee || '(unknown customer)';
       if (by === 'type') return r.label;
       if (by === 'assignee') return r.assigneeName || 'Unclaimed';
@@ -4437,92 +4379,18 @@
     // ---- drawing
     function render() {
       host.dataset.theme = pageIsDarkSoon() ? 'dark' : 'light';
-      host.dataset.skin = skin();
-      const me = S.me?.id;
+      host.dataset.skin = 'classic';
       S.researched = GM_getValue(RESEARCHED_KEY, {});
       const all = sortRows(visible());
       const rows = stack(all);
       if (stackOn()) registerStacks(rows); else stackSig = '';
       fillShapes(all.filter(r => !r.closed));
-      if (skin() === 'classic') {
-        // Grouped: each group's rows together, groups in the order their first row comes
-        let ordered = rows;
-        if (S.cgroup) { const g = new Map(); for (const r of rows) { const k = groupOf(r, S.cgroup); if (!g.has(k)) g.set(k, []); g.get(k).push(r); } ordered = [...g.values()].flat(); }
-        S.shown = ordered; saveNav(ordered); renderClassic(ordered); return;
-      }
-      moreObserver.disconnect();
-      searchInput.placeholder = 'Search anything: tracking, entry, master bill, customer, item, HS code, note… (paste a list to match many)';
-      wrap.className = 'q';
+      // Grouped: each group's rows together, groups in the order their first row comes
       let ordered = rows;
-      const groups = new Map();
-      if (S.group) {
-        for (const r of rows) { const g = groupOf(r); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(r); }
-        ordered = [...groups.values()].flat();
-      }
-      S.shown = ordered;
-      saveNav(ordered);
-      const focusEl = root.activeElement === searchInput;
-
-      const mode = portal.mode();
-      const top = h('div', { class: 'top' },
-        h('div', {},
-          h('h1', {}, 'Work queue', h('span', { class: `mode ${mode}`, text: mode.toUpperCase(), title: 'The portal mode every action here goes to' }))),
-        h('div', { class: 'top-actions' },
-          S.loading ? h('span', { text: 'Loading…' }) : S.loadedAt ? h('span', { text: `Updated ${new Date(S.loadedAt).toLocaleTimeString()}` }) : null,
-          everythingShown() && (S.closedLoading ? h('span', { text: 'Loading completed orders…' })
-            : S.closedError ? h('span', { class: 'err', text: `Completed orders didn't load: ${S.closedError}` }) : null),
-          h('label', { title: 'Reloads every minute while nothing is selected' },
-            h('input', { type: 'checkbox', checked: S.auto, onchange: e => setAuto(e.target.checked) }), ' Auto-refresh'),
-          stackToggle(''),
-          researchAllBtn(rows, 'btn'),
-          h('button', { class: 'btn', type: 'button', text: '↻ Refresh', disabled: S.loading || S.closedLoading, onclick: () => load() }),
-          viewPicker('btn')));
-
-      const counts = Object.fromEntries(SCOPES.map(s => [s.key, stack(baseRows(s).filter(r => s.test(r, me)), false).length]));
-      const scopes = h('div', { class: 'scopes', role: 'tablist' }, SCOPES.map(s =>
-        h('button', { class: 'scope', type: 'button', role: 'tab', 'aria-selected': String(S.scope === s.key), title: s.every ? 'Every work order: open, waiting, resolved, auto-resolved and cancelled' : '',
-          onclick: () => { S.scope = s.key; S.sel.clear(); S.focus = -1; S.limit = 300; savePrefs(); render(); if (s.every) loadClosed(); } },
-          s.label, h('span', { class: 'count', text: s.every && !S.closedAt ? '…' : String(counts[s.key]) }))));
-
-      const bar = h('div', { class: 'bar' },
-        h('label', { class: 'search' }, h('span', { class: 'muted', text: '⌕' }), searchInput, h('kbd', { text: '/' })),
-        FILTERS.map(filterButton),
-        h('select', { class: 'btn', style: 'width:150px', 'aria-label': 'Group by', onchange: e => { S.group = e.target.value; savePrefs(); render(); } },
-          Object.entries(GROUPS).map(([k, v]) => h('option', { value: k, text: k ? `Group: ${v}` : v, selected: S.group === k }))),
-        // Always there (hidden when there's nothing to clear), so turning a filter on moves nothing
-        h('button', { class: 'linkish', type: 'button', text: 'Clear all', style: `width:56px;visibility:${Object.values(S.filters).some(v => v?.length) || S.q ? 'visible' : 'hidden'}`, onclick: () => { S.filters = {}; S.excl = {}; S.q = ''; searchInput.value = ''; savePrefs(); render(); } }));
-
-      // Summary: what's in front of you, each number a one-click filter
-      const scoped = visible({ ignore: 'due' });
-      const nOver = scoped.filter(DUE.overdue.test).length;
-      const nToday = scoped.filter(DUE.today.test).length;
-      const nWeek = scoped.filter(DUE.week.test).length;
-      const dueOn = k => (S.filters.due || []).includes(DUE[k].label);
-      const stat = (n, label, cls, key) => h('button', { class: `stat ${cls}${key && dueOn(key) ? ' on' : ''}`, type: 'button', title: key ? `Show only: ${DUE[key].label}` : '', onclick: key ? () => toggleFilter('due', DUE[key].label, true) : null },
-        h('b', { text: String(n) }), h('span', { text: label }));
-      const byType = tally(rows, r => r.label);
-      const summary = h('div', {},
-        h('div', { class: 'summary' },
-          everythingShown() ? stat(rows.length, `shown of ${baseRows({ every: true }).length} work orders`, '') : stat(rows.length, `shown of ${S.rows.length} open`, ''),
-          everythingShown() ? stat(rows.filter(r => r.closed).length, 'closed', '') : null,
-          stat(nOver, 'overdue', nOver ? 'err' : '', 'overdue'),
-          stat(nToday, 'due today', nToday ? 'warn' : '', 'today'),
-          stat(nWeek, 'due in 7 days', '', 'week'),
-          stat(rows.filter(r => r.status === 'WAITING').length, 'waiting', ''),
-          stat(rows.filter(r => r.escalatedTo).length, 'escalated', ''),
-          stat(rows.filter(r => r.createdMs > S.seenAt).length, 'new since last visit', '')),
-        searching() ? h('p', { class: 'muted', style: 'font-size:12px;margin:8px 0 0', text: `Searching every work order, open, waiting and closed, whatever tab is open${S.closedLoading ? ' (loading the closed ones…)' : ''}. Filters you set still apply.` }) : null,
-        h('div', { class: 'cq-stats' }, viewToggles()),
-        h('div', { class: 'chips' }, h('span', { class: 'muted', style: 'font-size:12px', text: 'Classes:' }), byType.length ? byType.slice(0, 10).map(([k, n]) => chip('type', k, n)) : h('span', { class: 'muted', style: 'font-size:12px', text: 'none' })),
-        viewsBar());
-
-      drawRun();
-      wrap.replaceChildren(top, scopes, bar, summary, runBar, h('div', { class: 'actionbar' }, bulkBar()), table(ordered, groups), foot(ordered));
-      if (S.pop) { const p = root.querySelector('.pop input[type=search]'); if (p) p.focus(); }
-      if (focusEl) { searchInput.focus(); }
+      if (S.cgroup) { const g = new Map(); for (const r of rows) { const k = groupOf(r, S.cgroup); if (!g.has(k)) g.set(k, []); g.get(k).push(r); } ordered = [...g.values()].flat(); }
+      S.shown = ordered; saveNav(ordered); renderClassic(ordered);
     }
-    // ---- Portal+ (the 'classic' skin)
-    // Which queue this page shows, from either of ours
+    // Which queue this page shows: the portal's own, or Portal+
     function viewPicker(cls) {
       return h('select', { class: cls, 'aria-label': 'Queue view', title: 'Which queue this page shows (also under Tools ⚙︎ Settings)', onchange: e => setQueueView(e.target.value) },
         Object.entries(QUEUE_VIEWS).map(([k, v]) => h('option', { value: k, text: `View: ${v}`, selected: queueView() === k })));
@@ -4753,11 +4621,7 @@
       for (const r of rows) { const k = fn(r); m.set(k, (m.get(k) || 0) + 1); }
       return [...m.entries()].sort((a, b) => b[1] - a[1]);
     }
-    function chip(key, val, n) {
-      const on = (S.filters[key] || []).includes(val);
-      return h('button', { class: `chip${on ? ' on' : ''}`, type: 'button', onclick: () => toggleFilter(key, val, true), text: `${val} · ${n}` });
-    }
-    // `only`: a chip or summary number, which always means "show only this"
+    // `only`: a due count, which always means "show only this"
     function toggleFilter(key, val, only = false) {
       const cur = S.filters[key] || [];
       if (only && S.excl[key]) S.excl = { ...S.excl, [key]: false };
@@ -4775,7 +4639,7 @@
       const box = (on, text, n, title, onchange, extra = '') => h('label', { class: `cq-toggle${on ? ' on' : ''}${extra}`, title },
         h('input', { type: 'checkbox', checked: on, onchange: e => onchange(e.target.checked) }), text, h('span', { class: 'n', text: String(n) }));
       return [
-        nEsc > 0 ? h('span', { class: 'cq-eschid', title: 'Escalated orders are hidden here. They show on the Escalated and All work orders tabs and in a search. To show them everywhere, untick "Hide escalated orders" under Tools > Settings > Panel and pages.',
+        nEsc > 0 ? h('span', { class: 'cq-eschid', title: 'Escalated orders are hidden here. They show in a search. To show them everywhere, untick "Hide escalated orders" under Tools > Settings > Panel and pages.',
           text: `${nEsc} escalated hidden` }) : null,
         resAll.length || S.resOnly ? box(S.resOnly, 'Only resolution failed', resShown.length,
           `${S.resOnly ? 'Showing only' : 'Tick to show only'} the disputes whose resolution failed (submitted, but the portal couldn't finish resolving them).${resAll.length > resShown.length ? ` ${resAll.length - resShown.length} more are escalated, so hidden (Hide escalated orders, in Settings).` : ''}`,
@@ -4813,34 +4677,8 @@
       }
       return box;
     }
-    function viewsBar() {
-      const views = prefs.views || [];
-      return h('div', { class: 'views' },
-        h('span', { text: 'Saved views:' }),
-        views.map((v, i) => h('span', {},
-          h('button', { class: 'chip', type: 'button', text: v.name, title: 'Apply this view', onclick: () => applyView(v) }),
-          h('button', { class: 'linkish', type: 'button', text: '×', title: `Delete "${v.name}"`, 'aria-label': `Delete view ${v.name}`, onclick: () => { prefs.views.splice(i, 1); savePrefs(); render(); } }))),
-        h('button', { class: 'linkish', type: 'button', text: '+ Save current view', onclick: saveView }));
-    }
-    function saveView() {
-      const name = prompt('Name this view (scope, search, filters, sort and grouping are saved):');
-      if (!name) return;
-      prefs.views = [...(prefs.views || []).filter(v => v.name !== name), { name: clean(name), scope: S.scope, q: S.q, filters: S.filters, excl: S.excl, sort: S.sort, group: S.group }];
-      savePrefs();
-      render();
-    }
-    function applyView(v) {
-      Object.assign(S, { scope: v.scope, q: v.q || '', filters: v.filters || {}, excl: v.excl || {}, sort: v.sort || defaults.sort, group: v.group || '' });
-      searchInput.value = S.q;
-      S.sel.clear();
-      savePrefs();
-      render();
-    }
-
     function bulkBar() {
-      if (!S.sel.size) return h('div', { class: 'keys' },
-        'Keys: ', h('kbd', { text: '/' }), ' search · ', h('kbd', { text: 'j' }), ' ', h('kbd', { text: 'k' }), ' move · ', h('kbd', { text: 'x' }), ' select · ',
-        h('kbd', { text: 'Shift' }), '+click range · ', h('kbd', { text: 'Enter' }), ' open · ', h('kbd', { text: 'o' }), ' new tab · ', h('kbd', { text: 'Esc' }), ' clear · Shift-click a column to sort by two');
+      if (!S.sel.size) return null;
       const sel = selectedRows();
       return h('div', { class: 'bulk', role: 'toolbar', 'aria-label': 'Bulk actions' },
         h('span', { class: 'sel-n', text: `${sel.length} selected` }),
@@ -4876,46 +4714,11 @@
     }
     const selectedRows = () => S.rows.filter(r => S.sel.has(r.id));
 
-    function table(rows, groups = new Map()) {
-      if (S.error) return h('div', { class: 'tablewrap' }, h('div', { class: 'empty err' }, `Couldn't load the queue: ${S.error} `, h('button', { class: 'btn small', type: 'button', text: 'Try again', onclick: () => load() })));
-      if (!S.loadedAt && S.loading) return h('div', { class: 'tablewrap' }, h('div', { class: 'empty', text: 'Loading every open and waiting order…' }));
-      const shown = rows.slice(0, S.limit);
-      const allSel = rows.length > 0 && rows.every(r => S.sel.has(r.id));
-      const head = h('tr', {},
-        h('th', { class: 'cb' }, h('input', { type: 'checkbox', 'aria-label': 'Select every order shown', checked: allSel,
-          onchange: e => { for (const r of rows) for (const id of idsOf(r)) e.target.checked ? S.sel.add(id) : S.sel.delete(id); render(); } })),
-        COLS.map(c => {
-          const i = S.sort.findIndex(s => s.key === c.key);
-          const arrow = i < 0 ? '' : `${S.sort[i].dir > 0 ? '▲' : '▼'}${S.sort.length > 1 ? i + 1 : ''}`;
-          return h('th', { class: 'sortable', 'aria-sort': i < 0 ? 'none' : S.sort[i].dir > 0 ? 'ascending' : 'descending', title: 'Click to sort, Shift-click to add a second sort',
-            onclick: e => sortBy(c.key, e.shiftKey) }, c.label, arrow ? h('span', { class: 'arrow', text: arrow }) : null);
-        }));
-      const body = [];
-      let lastGroup = null;
-      shown.forEach((r, i) => {
-        if (S.group) {
-          const g = groupOf(r);
-          if (g !== lastGroup) {
-            lastGroup = g;
-            const members = groups.get(g) || rows.filter(x => groupOf(x) === g);
-            const on = members.every(x => S.sel.has(x.id));
-            body.push(h('tr', { class: 'group' }, h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: on, 'aria-label': `Select all in ${g}`,
-              onchange: e => { for (const x of members) for (const id of idsOf(x)) e.target.checked ? S.sel.add(id) : S.sel.delete(id); render(); } })),
-              h('td', { colspan: String(COLS.length), text: `${g} · ${members.length}` })));
-          }
-        }
-        body.push(rowEl(r, i));
-      });
-      return h('div', { class: 'tablewrap' },
-        h('table', {}, h('colgroup', {}, h('col', { style: 'width:40px' }), COLS.map(c => h('col', { style: c.width ? 'width:' + c.width + 'px' : '' }))),
-          h('thead', {}, head), h('tbody', {}, body)),
-        rows.length ? null : h('div', { class: 'empty' }, emptyMessage()));
-    }
     function emptyMessage() {
       if (!S.loadedAt) return 'Nothing loaded yet.';
       const q = clean(S.q);
       const kids = [h('p', { text: q ? `Nothing open matches "${q}" here.` : 'Nothing here.' })];
-      if (q && S[scopeKey()] !== 'all') kids.push(h('button', { class: 'btn small', type: 'button', text: 'Search all open orders', onclick: () => { S[scopeKey()] = 'all'; render(); } }));
+      if (q && S.cscope !== 'all') kids.push(h('button', { class: 'btn small', type: 'button', text: 'Search all open orders', onclick: () => { S.cscope = 'all'; render(); } }));
       if (q && !/\s/.test(q)) {
         if (S.extraFor === q && S.extra) {
           kids.push(S.extra.length ? h('div', { style: 'text-align:left;margin-top:10px' }, h('p', { class: 'muted', text: 'Found in the portal (any status):' }),
@@ -4932,38 +4735,6 @@
       }
       return kids;
     }
-    function rowEl(r, i) {
-      const due = dueText(r);
-      const isNew = r.createdMs > S.seenAt;
-      const tr = h('tr', { class: `row${S.sel.has(r.id) ? ' sel' : ''}${S.focus === i ? ' focus' : ''}`, tabindex: '-1', 'data-i': String(i),
-        onclick: e => { if (e.target.closest('input,button,a')) return; openRow(r, e); },
-        onauxclick: e => { if (e.button === 1) { e.preventDefault(); prepareOpen(r); GM_openInTab(location.origin + r.url, { active: false, insert: true }); } } },
-        h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: S.sel.has(r.id), 'aria-label': `Select ${r.label} ${r.ref}`, onclick: e => selectClick(r, i, e) })),
-        h('td', {}, h('span', { class: 'badge', text: r.label, title: r.label })),
-        h('td', {}, h('div', { class: 'badges' }, h('span', { class: `badge st-${r.status}`, text: human2(r.status),
-          title: r.closed ? [RESOLUTIONS[r.resolution] || (r.resolution && human2(r.resolution)), r.resolutionNote].filter(Boolean).join(': ') : '' }), statusFlags(r))),
-        h('td', {}, h('div', { class: 'title', title: r.items.join(' · ') || r.title }, isNew ? h('span', { class: 'new', title: 'New since your last visit' }) : null,
-          r._copies?.length ? h('span', { class: 'badge many', text: `×${r._copies.length + 1}`, title: `${r._copies.length + 1} identical disputes: claim, select or open this one, and what you do is done to all of them` }) : null, r.title),
-          r.problem ? h('div', { class: 'sub', title: r.detail, text: r.problem }) : null),
-        h('td', {}, h('span', { class: 'ref' }, h('a', { href: r.url, onclick: e => openRow(r, e) }, r.ref)),
-          h('button', { class: 'copy', type: 'button', title: 'Copy', 'aria-label': `Copy ${r.ref}`, text: '⧉', onclick: () => copy(r.ref, `Copied ${r.ref}`) }),
-          r.entryNo && r.tracking ? h('div', { class: 'sub', text: `Entry ${r.entryNo}`, title: r.entryNo }) : r.mbol && r.ref !== r.mbol ? h('div', { class: 'sub', text: `MBOL ${r.mbol}`, title: r.mbol }) : null),
-        h('td', {}, h('div', { class: 'clip', title: r.customer || r.consignee || '', text: r.customer || r.consignee || '—' }), r.customer && r.consignee && r.consignee !== r.customer ? h('div', { class: 'sub', title: r.consignee, text: r.consignee }) : null),
-        h('td', { class: due.cls }, h('div', { class: 'clip', text: due.text }), due.sub ? h('div', { class: 'sub', style: 'color:inherit', text: due.sub }) : null),
-        h('td', { class: 'muted', text: r.createdMs ? ageText(r.createdMs) : '—' }),
-        r.closed
-          ? h('td', {}, h('div', { class: 'clip muted', title: r.resolverName ? `Closed by ${r.resolverName}` : '', text: r.resolvedBy && r.resolvedBy === S.me?.id ? '✓ You' : r.resolverName ? `✓ ${r.resolverName}` : '✓' }),
-            r.resolutionNote ? h('div', { class: 'sub', title: r.resolutionNote, text: r.resolutionNote }) : null)
-          : h('td', {}, h('div', { class: 'clip' + (r.assigneeName ? '' : ' muted'), title: r.assigneeName, text: r.assigneeId && r.assigneeId === S.me?.id ? 'You' : r.assigneeName || '—' })));
-      return tr;
-    }
-    function foot(rows) {
-      return h('div', { class: 'foot' },
-        h('span', { text: `${Math.min(rows.length, S.limit)} of ${rows.length} shown${S.missing?.length ? ` · not found: ${S.missing.join(', ')}` : ''}` }),
-        rows.length > S.limit ? h('button', { class: 'btn small', type: 'button', text: `Show ${Math.min(300, rows.length - S.limit)} more`, onclick: () => { S.limit += 300; render(); } }) : null,
-        S.missing?.length ? h('button', { class: 'btn small', type: 'button', text: 'Copy not found', onclick: () => copy(S.missing.join('\n'), 'Copied.') }) : null);
-    }
-
     // ---- interaction
     function sortBy(key, add) {
       const i = S.sort.findIndex(s => s.key === key);
@@ -5446,42 +5217,18 @@
       GM_setValue(NAV_AT_KEY, at);
     }
 
-    // ---- showing it in place of the portal's own queue. The portal's queue is the default; Portal+ and the Tools
-    // queue are choices (the view picker on each, or Tools ⚙︎ Settings), remembered on this computer.
+    // ---- showing it in place of the portal's own queue. The portal's queue is the default; Portal+ is a choice
+    // (its view picker, or Tools ⚙︎ Settings), remembered on this computer.
     const native = () => [...(document.querySelector('main')?.children || [])].find(el => el !== host);
     // After the view changed: ours shows (in the look picked) or the portal's own comes back
     function refreshView() {
       if (toolsQueueOn()) { mount(); S.limit = 300; render(); } else unmount();
     }
     let started = false;
-    // On the portal's own queue, a switch to ours sits by its "Updated … ↻" (to whichever of ours was used last).
-    // It lives in the page, so it's put back whenever the portal redraws.
-    const lastView = () => (GM_getValue(QUEUE_LAST_KEY, 'classic') === 'tools' ? 'tools' : 'classic');
-    const switchBtn = h('button', { id: 'zt-queue-switch', type: 'button',
-      style: 'margin-left:8px;padding:4px 10px;border-radius:6px;border:1px solid #f59e0b;background:rgba(245,158,11,.10);color:#f59e0b;font:600 12.5px system-ui,sans-serif;cursor:pointer',
-      onclick: () => setQueueView(lastView()) });
-    // No longer put on the portal's own queue: a fresh install leaves that page as it is (the view is picked in Tools >
-    // Settings, or with the picker on Portal+ and the Advanced View)
-    function placeSwitch() {
-      switchBtn.remove();
-      if (switchBtn) return;
-      const label = `⚡ ${QUEUE_VIEWS[lastView()]}`;
-      if (switchBtn.textContent !== label) {
-        switchBtn.textContent = label;
-        switchBtn.title = lastView() === 'tools' ? 'Switch to the Tools queue (search everything, filters, bulk actions)'
-          : 'Switch to Portal+: this queue as you know it, in one sortable list, with search on anything, one-click claim and bulk actions';
-      }
-      const main = document.querySelector('main');
-      if (!main || (switchBtn.isConnected && main.contains(switchBtn))) return;   // already there: nothing to look for
-      // Small divs only (cheap test first), so the big wrappers' text is never read
-      const updated = [...main.querySelectorAll('div')].find(e => e.children.length < 4 && e.textContent.length < 60 && /^Updated\s/.test(e.textContent.trim()));
-      if (updated && switchBtn.parentElement !== updated) updated.append(switchBtn);
-    }
     function mount() {
       const main = document.querySelector('main');
       if (!main || !onQueuePage()) return;
-      if (!toolsQueueOn()) { unmount(); placeSwitch(); return; }
-      switchBtn.remove();
+      if (!toolsQueueOn()) { unmount(); return; }
       const nat = native();
       if (nat && nat.style.display !== 'none') nat.style.display = 'none';
       if (host.parentElement !== main || main.firstElementChild !== host) main.prepend(host);
@@ -5497,7 +5244,6 @@
       }
     }
     function unmount() {
-      if (!onQueuePage()) switchBtn.remove();
       if (!host.isConnected) return;
       const nat = native();
       if (nat) nat.style.display = '';
@@ -7467,7 +7213,7 @@
     } });
     const stackRow = h('label', { class: 'row', style: 'align-items:flex-start;gap:8px;cursor:pointer', hidden: true }, stackBox,
       h('span', {}, h('b', { text: 'Stack identical disputes in the queue' }), h('span', { class: 'hint', style: 'display:block;margin:0',
-        text: 'Portal+ and the Advanced View show exact duplicates (same company, assignee and status; the same lines, claims and questionnaire answers) as one row with ×N. Whatever you do on that one (claim, waiting, notes, decisions, Submit) is done to all of them.' })));
+        text: 'Portal+ shows exact duplicates (same company, assignee and status; the same lines, claims and questionnaire answers) as one row with ×N. Whatever you do on that one (claim, waiting, notes, decisions, Submit) is done to all of them.' })));
     const researchAllBox = h('input', { type: 'checkbox', checked: GM_getValue(RESEARCH_ALL_KEY, false) === true, onchange: e => {
       GM_setValue(RESEARCH_ALL_KEY, e.target.checked);
       if (!e.target.checked && bulk.job()) bulk.pause(true);
@@ -7475,7 +7221,7 @@
     } });
     const researchAllRow = h('label', { class: 'row', style: 'align-items:flex-start;gap:8px;cursor:pointer', hidden: true }, researchAllBox,
       h('span', {}, h('b', { text: 'Research all shown, in the queue' }), h('span', { class: 'hint', style: 'display:block;margin:0',
-        text: 'A button in Portal+ and the Advanced View that starts Claude Code research on every order the list shows (one per ×N stack), at most 28 an hour per routine (add more routines under Claude Code research to go faster). Each one is a cloud session on your usage credits.' })));
+        text: 'A button in Portal+ that starts Claude Code research on every order the list shows (one per ×N stack), at most 28 an hour per routine (add more routines under Claude Code research to go faster). Each one is a cloud session on your usage credits.' })));
     const accessGroup = group('Access code', 'Some features are only for the people given a code. Type it here to turn them on for this computer. Bulk actions in the queue (selecting many orders and acting on them) also need it.',
       h('div', { class: 'row' }, codeInput, btn('Unlock', () => unlock()), btn('Lock', () => lock())),
       codeNote, stackRow, researchAllRow);
@@ -7598,7 +7344,7 @@
       entryBlockedLink);
 
     // ---- the Tools tab and the strip above every tab: the portal's Classify / Quote, and Prev / Next through
-    // the queue as you last left it in the Tools queue
+    // the queue as you last left it in Portal+
     const HIDE_RAIL_KEY = 'zt:hideRail';
     // ---- Classify and Quote, built into the panel so they work on every portal page. They send the same
     // requests as the portal's own Classify and Quote boxes (ClassificationsCalculate, ItemQuoteLandedCost).
@@ -8258,9 +8004,8 @@
       h('label', { class: 'frow', style: 'margin-bottom:6px' }, h('span', { class: 'flabel', text: 'Entry Writer Queue page' }),
         h('select', { class: 'field', 'aria-label': 'Entry Writer Queue page', onchange: e => setQueueView(e.target.value) },
           h('option', { value: 'portal', text: "Default Portal: the portal's own queue", selected: queueView() === 'portal' }),
-          h('option', { value: 'classic', text: 'Portal+: the portal\'s queue in one sortable list, with search, one-click claim and bulk actions', selected: queueView() === 'classic' }),
-          h('option', { value: 'tools', text: 'Advanced View: dense, with summaries, grouping and saved views', selected: queueView() === 'tools' }))),
-      check('Hide escalated orders in the work queue (they still show on its Escalated and All work orders tabs, and in a search)', hideEscalated(), on => { GM_setValue(HIDE_ESC_KEY, on); queueCtl?.refreshView(); }),
+          h('option', { value: 'classic', text: 'Portal+: the portal\'s queue in one sortable list, with search, one-click claim and bulk actions', selected: queueView() === 'classic' }))),
+      check('Hide escalated orders in Portal+ (they still show in a search)', hideEscalated(), on => { GM_setValue(HIDE_ESC_KEY, on); queueCtl?.refreshView(); }),
       check("Quote tab: use my duty calculator (Entry Assistant) instead of the portal's quoter, filled in from the order, with its questions to answer", dutyCalcOn(), on => { GM_setValue(DUTY_CALC_KEY, on); refreshTools(); }),
       check('Easier-to-read order pages (labeled details, CBP messages in plain English)', GM_getValue(READABLE_KEY, false), on => { GM_setValue(READABLE_KEY, on); if (on) makeReadable(); else undoReadable(); }),
       check("Hide the portal's own Classify / Quote rail", GM_getValue(HIDE_RAIL_KEY, false), on => { GM_setValue(HIDE_RAIL_KEY, on); refreshTools(); }),
@@ -8273,8 +8018,8 @@
           h('kbd', { text: 'Shift+C' }), h('span', { text: 'Classify' }),
           h('kbd', { text: 'Shift+Q' }), h('span', { text: 'Quote' }),
           h('kbd', { text: '[  ]' }), h('span', { text: 'Previous / next order' }),
-          h('kbd', { text: '/' }), h('span', { text: 'Search the queue (Advanced View)' }),
-          h('kbd', { text: 'j k x Enter o' }), h('span', { text: 'Move, select, open, new tab (Advanced View)' }))));
+          h('kbd', { text: '/' }), h('span', { text: 'Search the queue (Portal+)' }),
+          h('kbd', { text: 'j k x Enter o' }), h('span', { text: 'Move, select, open, new tab (Portal+)' }))));
     settingsBody.insertBefore(prefsGroup, settingsBody.children[1]);
     showLocked();
 
@@ -9416,7 +9161,7 @@
       ui.showEntry(target);
     }, true);
     // Tools is on every portal page. It stays open as you move from order to order, and the work queue
-    // page shows the portal's own queue unless the Tools queue is chosen under Tools.
+    // page shows the portal's own queue unless Portal+ is chosen under Tools.
     let queue = null;
     const onRoute = () => {
       ui?.keepAttached();
