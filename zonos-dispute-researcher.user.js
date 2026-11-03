@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.68.0
+// @version      7.69.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3616,18 +3616,29 @@
     const PAGE = 100;   // the most the portal returns at once
     // Every order matching a filter. The portal's cursors are offsets ("simple-offset-cursor<n>"), so the
     // pages after the first load side by side; if that ever stops matching the count, it reads them in order.
-    async function workOrders(filter, cap = 3000, { history = false, closed = false } = {}) {
+    // `page` and `parallel`: how many orders per request and how many requests at once. Orders with their whole
+    // history are big, and 4 pages of 100 at once could make the portal's server cut a reply off ("unexpected EOF
+    // during chunk size line"), so Analytics reads small pages one at a time. `retries`: a page that fails is asked
+    // again after a pause. `onPage(done, of)`: progress.
+    async function workOrders(filter, cap = 3000, { history = false, closed = false, page = PAGE, parallel = 4, retries = 0, onPage = () => {} } = {}) {
       const LIST = history ? LIST_HISTORY : closed ? LIST_CLOSED : LIST_PLAIN;
-      const first = (await gql('BrokerageWorkOrders', LIST, { first: PAGE, filter })).brokerageWorkOrders;
+      const ask = async vars => {
+        for (let attempt = 0; ; attempt++) {
+          try { return (await gql('BrokerageWorkOrders', LIST, vars)).brokerageWorkOrders; }
+          catch (e) { if (attempt >= retries) throw e; await sleep(2000 * (attempt + 1)); }
+        }
+      };
+      const first = await ask({ first: page, filter });
       const total = Math.min(first.totalCount || 0, cap);
       const nodes = first.edges.map(e => e.node);
+      onPage(nodes.length, total);
       const offsets = [];
-      for (let o = PAGE; o < total; o += PAGE) offsets.push(o);
-      for (let i = 0; i < offsets.length; i += 4) {
-        const batch = await Promise.all(offsets.slice(i, i + 4).map(o =>
-          gql('BrokerageWorkOrders', LIST, { first: PAGE, after: btoa(`simple-offset-cursor${o - 1}`), filter })
-            .then(d => d.brokerageWorkOrders.edges.map(e => e.node))));
+      for (let o = page; o < total; o += page) offsets.push(o);
+      for (let i = 0; i < offsets.length; i += parallel) {
+        const batch = await Promise.all(offsets.slice(i, i + parallel).map(o =>
+          ask({ first: page, after: btoa(`simple-offset-cursor${o - 1}`), filter }).then(d => d.edges.map(e => e.node))));
         nodes.push(...batch.flat());
+        onPage(Math.min(nodes.length, total), total);
       }
       const unique = [...new Map(nodes.map(n => [n.id, n])).values()];
       // Orders claimed, resolved or added while the pages load shift the offsets a little: a few missing is
@@ -3636,7 +3647,7 @@
       const all = first.edges.map(e => e.node);
       let after = first.pageInfo.endCursor;
       while (after && all.length < total) {
-        const d = (await gql('BrokerageWorkOrders', LIST, { first: PAGE, after, filter })).brokerageWorkOrders;
+        const d = await ask({ first: page, after, filter });
         all.push(...d.edges.map(e => e.node));
         after = d.pageInfo.hasNextPage ? d.pageInfo.endCursor : null;
       }
@@ -3925,6 +3936,9 @@
     { key: 'waiting', label: 'Waiting', test: r => r.status === 'WAITING', desc: 'waiting on an answer' },
     { key: 'unclaimed', label: 'Unclaimed', test: r => r.status === 'OPEN' && !r.assigneeId, desc: 'unclaimed, across all customers' },
     { key: 'all', label: 'Everyone', test: () => true, desc: "open or waiting, everyone's" },
+    // The portal's own Completed tab (/entry-writer-queue?scope=completed): every resolved and auto-resolved order
+    // (a submitted duty dispute's order is auto-resolved), everyone's. Read from the closed orders, not the open ones.
+    { key: 'completed', label: 'Completed', closed: true, test: r => r.status === 'RESOLVED' || r.status === 'AUTO_RESOLVED', desc: 'completed (resolved or auto-resolved)' },
   ];
   const CREATED = {
     today: { label: 'Today', test: r => r.createdMs >= today() },
@@ -4154,7 +4168,7 @@
         S.loading = false;
         render();
         if (placePending) { placePending = false; restorePlace(); }
-        if (searching()) loadClosed(!quiet);
+        if (searching() || completedTab()) loadClosed(!quiet);
         // Names the cache didn't have yet come in after the first draw
         const missing = rows.filter(r => r.orgId && !(r.orgId in names)).map(r => r.orgId);
         if (missing.length) {
@@ -4171,6 +4185,7 @@
     // A search looks through every work order, whatever tab is open: the closed ones are read the first time, and
     // again at most every 5 minutes (or on ↻ Refresh), since there are hundreds and they rarely change
     const searching = () => !!clean(S.q);
+    const completedTab = () => S.cscope === 'completed';
     async function loadClosed(force = false) {
       if (S.closedLoading || (!force && Date.now() - S.closedAt < 5 * 60000)) return;
       S.closedLoading = true; S.closedError = '';
@@ -4193,6 +4208,7 @@
     }
     // The orders a tab draws from: the open and waiting ones, plus the closed ones for a search
     function baseRows(scope) {
+      if (scope?.closed) return S.closed;
       if (!scope?.every) return S.rows;
       const open = new Set(S.rows.map(r => r.id));
       return [...S.rows, ...S.closed.filter(r => !open.has(r.id))];
@@ -4233,7 +4249,7 @@
         if (ign.includes(f.key) || !want?.length) continue;
         rows = rows.filter(r => filterVals(f, r).some(v => want.includes(v)) !== !!S.excl[f.key]);
       }
-      if (!ign.includes('esc') && hideEscalated() && !all) rows = rows.filter(r => !r.escalatedTo);
+      if (!ign.includes('esc') && hideEscalated() && !all && !completedTab()) rows = rows.filter(r => !r.escalatedTo);
       if (S.resOnly && !ign.includes('resOnly')) rows = rows.filter(r => r.resFailed);
       if (pq.list) {
         const found = new Set();
@@ -4325,7 +4341,7 @@
     // ---- "Research all shown" (with the access code, once Claude Code research is set up): every row this list
     // shows, a ×N stack counted once, researched in the background (bulk)
     function researchAllBtn(rows, cls) {
-      if (!researchAllAllowed() || !desk.researchOn()) return null;
+      if (!researchAllAllowed() || !desk.researchOn() || completedTab()) return null;   // finished orders aren't researched
       const j = bulk.job();
       const c = j ? bulk.counts(j) : {};
       const busy = !!(c.waiting || c.running);
@@ -4474,7 +4490,7 @@
       wrap.className = `q cq${S.dense ? ' dense' : ''}${S.sel.size ? ' has-sel' : ''}`;
       searchInput.placeholder = 'Search anything: tracking, entry, customer, item, HS code…';
       const scope = CLASSIC_SCOPES.find(s => s.key === S.cscope) || CLASSIC_SCOPES[0];
-      const counts = Object.fromEntries(CLASSIC_SCOPES.map(s => [s.key, stack(S.rows.filter(r => s.test(r, me)), false).length]));
+      const counts = Object.fromEntries(CLASSIC_SCOPES.map(s => [s.key, s.closed ? (S.closedAt ? S.closed.filter(r => s.test(r, me)).length : '…') : stack(S.rows.filter(r => s.test(r, me)), false).length]));
       const focusEl = root.activeElement === searchInput;
       const hidden = rows.reduce((a, r) => a + (r._copies?.length || 0), 0);
       const top = h('div', { class: 'cq-top' },
@@ -4484,14 +4500,14 @@
           h('div', { class: 'cq-sub', text: `${rows.length} order${rows.length === 1 ? '' : 's'} ${scope.desc}${hidden ? ` (${rows.length + hidden} with identical copies)` : ''} · ${sortText()}${S.stackMsg ? ` · ${S.stackMsg}` : ''}` })),
         h('div', { class: 'cq-right' },
           h('span', { text: S.loading ? 'Loading…' : S.loadedAt ? `Updated ${new Date(S.loadedAt).toLocaleTimeString()}` : '' }),
-          h('button', { class: 'cq-icon', type: 'button', text: '↻', title: 'Refresh queue (it also refreshes every minute)', 'aria-label': 'Refresh queue', disabled: S.loading, onclick: () => load() }),
+          h('button', { class: 'cq-icon', type: 'button', text: '↻', title: 'Refresh queue (it also refreshes every minute)', 'aria-label': 'Refresh queue', disabled: S.loading, onclick: () => { load(); if (completedTab()) loadClosed(true); } }),
           h('span', { class: `mode ${mode}`, text: mode.toUpperCase(), title: 'The portal mode every action here goes to' }),
           stackToggle('cq-stack'),
           researchAllBtn(rows, 'cq-btn dark'),
           viewPicker('cq-view')));
       const tabs = h('div', { class: 'cq-tabs', role: 'tablist' }, CLASSIC_SCOPES.map(s =>
         h('button', { class: 'cq-tab', type: 'button', role: 'tab', 'aria-selected': String(S.cscope === s.key),
-          onclick: () => { S.cscope = s.key; S.sel.clear(); S.focus = -1; S.limit = 300; savePrefs(); render(); } },
+          onclick: () => { S.cscope = s.key; S.sel.clear(); S.focus = -1; S.limit = 300; savePrefs(); render(); if (s.closed) loadClosed(); } },
           s.label, h('span', { class: 'cq-n', text: String(counts[s.key]) }))));
       const anyFilter = CLASSIC_FILTERS.some(f => S.filters[f.key]?.length) || S.q;
       // What's in front of you, each due count a one-click filter (they ignore the Due filter, so they don't vanish)
@@ -4521,6 +4537,8 @@
       const note = h('div', { class: 'cq-note' },
         S.missing?.length ? [h('b', { text: `Not found: ${S.missing.join(', ')}` }), ' · ', h('button', { class: 'linkish', type: 'button', text: 'Copy', onclick: () => copy(S.missing.join('\n'), 'Copied.') })]
           : searching() ? ['Searching ', h('b', { text: 'every work order' }), `, open, waiting and closed, whatever tab is open${S.closedLoading ? ' (loading the closed ones…)' : ''}. Filters you set still apply. Clear the search to see the tab again.`]
+          : completedTab() ? (S.closedError ? [h('b', { text: "Couldn't load the completed orders: " }), S.closedError]
+            : ['Showing every ', h('b', { text: 'Resolved' }), ' and ', h('b', { text: 'Auto-resolved' }), ` order (a submitted dispute is auto-resolved), everyone's${S.closedLoading ? ' (loading…)' : ''}. Read again at most every 5 minutes, or with ↻.`])
           : ['Showing every ', h('b', { text: 'Open' }), ' and ', h('b', { text: 'Waiting' }), ' order in one list. Click a column to sort; Ctrl-click a row for a new tab; Shift-click checkboxes to select a range.']);
       drawRun();
       // The list is drawn again on every change: its box keeps where it was scrolled to, both ways
@@ -5305,6 +5323,8 @@
       if (host.parentElement !== main || main.firstElementChild !== host) main.prepend(host);
       if (!started) {
         started = true;
+        // The portal's Completed tab has its own address: opened that way, Portal+ shows its Completed tab
+        if (new URLSearchParams(location.search).get('scope') === 'completed') S.cscope = 'completed';
         // The first visit has nothing to compare with, so nothing is marked new until the next one
         S.seenAt = GM_getValue(SEEN_KEY, 0) || Date.now();
         render();
@@ -7836,7 +7856,10 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         loadBtn.disabled = true;
         out.replaceChildren(h('p', { class: 'muted', text: 'Reading every work order and its history from the portal…' }));
         try {
-          const [me, nodes] = await Promise.all([portal.me(), portal.workOrders({}, 8000, { history: true })]);
+          // Small pages, one at a time, each tried 3 times: gentle on the portal's server (big parallel reads with
+          // every order's history could make it cut replies off)
+          const say = (n, of) => out.replaceChildren(h('p', { class: 'muted', text: `Reading every work order and its history from the portal… ${n.toLocaleString()} of ${of.toLocaleString()}` }));
+          const [me, nodes] = await Promise.all([portal.me(), portal.workOrders({}, 8000, { history: true, page: 50, parallel: 1, retries: 2, onPage: say })]);
           const rows = nodes.map(n => Object.assign(queueRow(n), { history: n.history || [], resolvedAt: Date.parse(n.resolvedAt) || 0 }));
           await portal.orgNames(rows.map(r => r.orgId));
           for (const r of rows) r.customer = portal.orgs[r.orgId] || '';
