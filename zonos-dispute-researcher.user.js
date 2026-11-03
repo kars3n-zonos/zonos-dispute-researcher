@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.64.0
+// @version      7.65.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1682,7 +1682,7 @@
     platform: "Name the e-commerce platform the merchant's site runs on (Shopify, WooCommerce and so on).",
     redFlags: "Collect every red flag: anything in the documents, the claim, the website or your research that contradicts the entry, the claim or itself, or that's missing when it should be there.",
     skill: SKILL_STEP,
-    calculator: "Use your research to answer every open duty calculator question (they're also under What to find): yes, no or can't tell, each with its source (the listing, a document, a photo, the questionnaire, the manufacturer), in the reply's Duty calculator answers block, copying each question as written there. Then give the Chapter 99 codes that apply, to the entry as filed and to what the merchant claims, from each question's \"If yes\" code and the duties listed. If you can call the Entry Assistant API (the entry-assistant skill in claude.ai, or `python3 worker.py calc` in a Claude Code session), send the calculator the same line with your answers by question id and use the codes it returns.",
+    calculator: "Use your research to answer every open duty calculator question (they're also under What to find): yes, no or can't tell, each with its source (the listing, a document, a photo, the questionnaire, the manufacturer), in the reply's Duty calculator answers block, copying each question as written there. Then give the Chapter 99 codes that apply, to the entry as filed and to what the merchant claims, from each question's \"If yes\" code and the duties listed. Don't try to run the calculator yourself: the entry-assistant skill only reads (GET requests), and Tools runs the calculator again with your answers once the reply is saved.",
     judge: "Then decide where this stands: what's proven, what isn't, and what to ask the merchant for. Without proof, the higher-duty option stands, especially for tariffs.",
     closing: [
       "If a page won't open, say which one and try another route: the site's search, its sitemap, or a web search limited to the site (site: plus the domain and the product number).",
@@ -2484,7 +2484,7 @@
     researchFirst: "**Research before you reply, every time.** Search the web and open the pages you find: do every step under \"How to research\", then check you didn't skip one. None of that goes in the reply. Don't fill in the template from this prompt or from memory: the page below is what you're checking. If you can't search the web in this chat, don't answer; reply only: \"I can't search the web in this chat. Turn on web search and send this again.\"",
     govOnly: "**Government sources: .gov only.** When you look for proof, or cite or rely on any government entity (CBP, USTR, the USITC, the Federal Register, Commerce, a foreign customs authority, any agency), search only .gov sites: add `site:.gov` to those searches, and open and cite only .gov pages for them. A government rule, ruling, rate or notice quoted on a non-.gov page (news, a law firm, a broker's blog, a trade site) isn't proof: find it on the .gov page or say you couldn't. Research on the merchant and the product itself isn't limited to .gov.",
     skill: ORDER_SKILL_STEP,
-    calculator: "Use your research to answer every open duty calculator question (they're also under What to find): yes, no or can't tell, each with its source (the listing, a document, a photo, the questionnaire, the manufacturer), in the reply's Duty calculator answers block, copying each question as written there. Then give the Chapter 99 codes that apply, from each question's \"If yes\" code and the duties listed. If you can call the Entry Assistant API (the entry-assistant skill in claude.ai, or `python3 worker.py calc` in a Claude Code session), send the calculator the same line with your answers by question id and use the codes it returns.",
+    calculator: "Use your research to answer every open duty calculator question (they're also under What to find): yes, no or can't tell, each with its source (the listing, a document, a photo, the questionnaire, the manufacturer), in the reply's Duty calculator answers block, copying each question as written there. Then give the Chapter 99 codes that apply, from each question's \"If yes\" code and the duties listed. Don't try to run the calculator yourself: the entry-assistant skill only reads (GET requests), and Tools runs the calculator again with your answers once the reply is saved.",
     redFlags: "Collect every red flag: anything on the page or in your research that contradicts the entry or itself, or that's missing when it should be there.",
     decide: 'Then decide, using one of the choices on the page that settles the order (never waiting or escalating).',
     closing: 'Use as many searches as it takes. A thorough answer matters more than a fast one.',
@@ -2856,8 +2856,9 @@
       // A duty dispute review opens on the dispute's own page, as in the queue (queueRow)
       if (wo.type === 'DUTY_DISPUTE_REVIEW' && /^duty_dispute_/.test(sid)) return { type: wo.type, id: sid, url: `${location.origin}/duty-disputes/${sid}`, wo };
       const q = wo.consignment?.id ? `?consignment=${wo.consignment.id}` : '';
-      // An AD/CVD review's subject is a manifest line, which the portal no longer opens by: its page is the work order's
-      const at = !wo.subject?.id && /^\d+$/.test(String(wo.id)) ? wo.id : sid;
+      // The portal opens a work order only by its own (numeric) id now ("id must be numeric ids"), not by its
+      // subject (a party, consignment or manifest line): the subject only when there's no numeric id
+      const at = /^\d+$/.test(String(wo.id)) ? wo.id : sid;
       return { type: wo.type, id: sid, url: `${location.origin}/entry-writer-queue/${wo.type}/${at}${q}`, wo };
     }
     function* walk(node, depth = 0) {
@@ -3734,8 +3735,10 @@
   function queueRow(n) {
     const sid = n.subject?.id || n.subjectKey || '';
     const dd = n.type === 'DUTY_DISPUTE_REVIEW' && /^duty_dispute_/.test(sid);
-    // An AD/CVD review's subject is a manifest line, which the portal no longer opens by: its page is the work order's
-    const at = !n.subject?.id && /^\d+$/.test(String(n.id)) ? n.id : sid;
+    // The portal opens a work order only by its own (numeric) id now ("id must be numeric ids"), not by its subject
+    // (a party, consignment or manifest line): the subject only when there's no numeric id. Its case is still the
+    // subject (rememberSubject below, read back by caseIdOf).
+    const at = /^\d+$/.test(String(n.id)) ? n.id : sid;
     rememberSubject(String(n.id), sid);
     const url = dd ? `/duty-disputes/${sid}`
       : `${QUEUE_PATH}/${n.type}/${encodeURIComponent(at)}${n.consignment?.id ? `?consignment=${n.consignment.id}` : ''}`;
