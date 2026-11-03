@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.63.0
+// @version      7.64.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3049,7 +3049,9 @@
       // (and asks for a case for the calls that have none)
       if (!j?.ok && (/^Unknown action/.test(j?.error || '') || (!ctx && j?.error === 'No case id.'))) throw new Error("Google Sheet: the sheet's script is older than this. Karsen needs to update it (OctoberDisputes.gs, then Deploy > Manage deployments > New version).");
       if (!j?.ok) throw new Error(`Google Sheet: ${j?.error || `the web app answered ${r.status}`}`);
-      if (j.doc && ctx) { D.sheetCase = { id: ctx.id, doc: j.doc, sheet: j.sheet, links: j.links || {} }; changed(); }
+      // Only the case on screen: one action can write several cases (a work order and its dispute), and the last
+      // reply used to take the card's slot, so the card said "not in the Google Sheet" right after saving to it
+      if ((j.doc || j.row) && ctx && ctx.id === D.ent?.id) { D.sheetCase = { id: ctx.id, doc: j.doc || '', sheet: j.sheet, links: j.links || {} }; D.orphan = null; changed(); }
       return j;
     }
     // A portal action, for the sheet: claim and release set who's on it; wait, escalate and resume set Status;
