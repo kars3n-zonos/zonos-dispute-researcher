@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.65.0
+// @version      7.66.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -4277,12 +4277,13 @@
     }
 
     // ---- identical disputes as one row (with Batch work's access code): the same company, assignee and status, and
-    // exactly the same disputed lines, claims and questionnaire answers. The first in the list's order stands for the
+    // exactly the same disputed lines, claims and questionnaire answers (or denied-party reviews of the same flagged
+    // party). The first in the list's order stands for the
     // rest (r._copies); claiming or selecting it does all of them, and opening it works them as one (merged).
     const stackOn = () => S.stack && stackAllowed();
     const idsOf = r => [r.id, ...(r._copies || []).map(c => c.id)];
     function stackKey(r) {
-      const k = !r.closed && r.type === 'DUTY_DISPUTE_REVIEW' && shapes.key(r.sid);   // closed orders are never stacked
+      const k = !r.closed && stackShape(r);   // closed orders are never stacked
       return k && !/^(none|err):/.test(k) ? `${k}|${r.assigneeId}|${r.status}|${r.escalatedTo}` : '';
     }
     const copyIds = new Set();   // rows standing behind a ×N row, as last drawn
@@ -4405,7 +4406,7 @@
     bulk.on(drawRun);
     function stackToggle(cls) {
       if (!stackAllowed()) return null;
-      return h('label', { class: cls, title: 'Identical disputes (same company, assignee and status; exactly the same lines, claims and questionnaire answers) show as one row with ×N. Claim, select or open it, and what you do is done to all of them.' },
+      return h('label', { class: cls, title: 'Identical disputes (same company, assignee and status; exactly the same lines, claims and questionnaire answers), and denied-party reviews of the same party, show as one row with ×N. Claim, select or open it, and what you do is done to all of them.' },
         h('input', { type: 'checkbox', checked: S.stack, onchange: e => {
           S.stack = e.target.checked; S.sel.clear(); S.limit = 300; savePrefs();
           if (!S.stack) { stackSig = ''; merged.dropFrom('queue'); }
@@ -5721,6 +5722,14 @@
   // order has its own of) and CBP codes
   const orderShape = r => [`org=${r.orgId || `?${r.id}`}`, r.type, String(r.detail || '').split('\n').filter(l => !/^\s*tracking\b/i.test(l)).join('\n')
     .replace(/\bmBOL:\S+\s*\|\s*hBOL:\S+?:\s*/gi, '').replace(/\s+/g, ' ').trim(), [...r.codes].sort().join(',')].join('¶');
+  // A denied-party review's shape: its company and the party the screening flagged ("…returned REVIEW for party
+  // party_…"). The same party on several consignments is one question with one answer (the same name, address and
+  // listed matches); only the order number differs. '' when the problem text names no party.
+  const partyShape = r => { const p = (String(r.detail || '').match(/\bfor party (party_\w+)/) || [])[1]; return p ? `dp¶org=${r.orgId || `?${r.id}`}¶${p}` : ''; };
+  // What a queue row has to share with others to stack with them (×N) and be worked as one: '' when it never does
+  const stackShape = r => (r.type === 'DUTY_DISPUTE_REVIEW' ? shapes.key(r.sid) : r.type === 'DENIED_PARTY_REVIEW' ? partyShape(r) : '');
+  // A denied-party review's Clear and Block are the portal's Resolve with these resolutions (and a note, which it requires)
+  const DP_VERDICTS = { NO_ACTION_REQUIRED: 'Clear — not a match', UNFILEABLE_ACCEPTED: 'Block — confirmed match' };
 
   // The portal's calls for one dispute, on behalf of its company
   const asOrg = org => (org ? { 'x-act-as-org': org } : {});
@@ -5877,7 +5886,7 @@
         // Identical ones already known (from the queue's stacking): only the first of each goes in the sheet
         const firsts = new Set();
         for (const r of take) {
-          const k = shapes.key(r.sid);
+          const k = stackShape(r);
           if (!k || /^(none|err):/.test(k) || !firsts.has(k)) { if (k) firsts.add(k); continue; }
           quietSheet([r.id, r.sid]);
         }
@@ -5895,8 +5904,8 @@
       if (clsSelect.value !== 'DUTY_DISPUTE_REVIEW') {
         const groups = new Map();
         for (const r of rows) {
-          const key = orderShape(r);
-          if (!groups.has(key)) groups.set(key, { key, kind: 'order', members: [], note: '', resolution: '' });
+          const key = (r.type === 'DENIED_PARTY_REVIEW' && partyShape(r)) || orderShape(r);
+          if (!groups.has(key)) groups.set(key, { key, kind: 'order', dp: r.type === 'DENIED_PARTY_REVIEW', members: [], note: '', resolution: '' });
           groups.get(key).members.push({ r });
         }
         S.groups = [...groups.values()].sort((a, b) => b.members.length - a.members.length);
@@ -6003,10 +6012,18 @@
         return result('Added the note to', plural(res.done.length, 'order'), res.failed.map(f => `${f.id}: ${f.error}`));
       });
     }
+    // A denied-party group's Clear or Block: the portal's Resolve with its resolution, which needs a note
+    function adjudicateGroup(g, resolution) {
+      if (!g.note.trim()) { say(status, `Write the adjudication note first: the portal needs one to ${resolution === 'UNFILEABLE_ACCEPTED' ? 'block' : 'clear'}.`, 'err'); return; }
+      g.resolution = resolution;
+      resolveGroup(g);
+    }
     function resolveGroup(g) {
       if (!g.resolution) { say(status, 'Pick a resolution first.', 'err'); return; }
       const n = g.members.length;
-      if (!confirm(`Resolve ${plural(n, 'order')} as "${RESOLUTIONS[g.resolution]}" in ${portal.mode().toUpperCase()} mode?${g.note.trim() ? `\n\nNote: ${g.note.trim()}` : ''}`)) return;
+      const verdict = g.dp && DP_VERDICTS[g.resolution];
+      const what = verdict ? `${verdict.split(' — ')[0]} ${plural(n, 'denied-party review')} ("${verdict}", resolved as ${RESOLUTIONS[g.resolution]})` : `Resolve ${plural(n, 'order')} as "${RESOLUTIONS[g.resolution]}"`;
+      if (!confirm(`${what} in ${portal.mode().toUpperCase()} mode?${g.note.trim() ? `\n\nNote: ${g.note.trim()}` : ''}`)) return;
       quietCopies([g]);
       run(async () => {
         const res = await portal.act('BrokerageWorkOrderResolve', g.members.map(m => m.r.id), { resolution: g.resolution, ...(g.note.trim() ? { note: g.note.trim() } : {}) }, progress);
@@ -6083,9 +6100,19 @@
       const m0 = g.members[0];
       const n = g.members.length;
       const all = n > 1 ? ` (${n})` : '';
+      // Denied-party reviews of the same party: Clear or Block them all (with the note), or work them as one
+      const open = g.members.filter(m => m.r.status === 'OPEN' || m.r.status === 'WAITING').length;
+      const asOne = g.dp && merged.byKey(g.key);
+      const dpRow = g.dp ? h('div', { class: 'row', style: 'flex-wrap:wrap' },
+        btn(`${DP_VERDICTS.NO_ACTION_REQUIRED}${all}…`, () => adjudicateGroup(g, 'NO_ACTION_REQUIRED')),
+        btn(`${DP_VERDICTS.UNFILEABLE_ACCEPTED}${all}…`, () => adjudicateGroup(g, 'UNFILEABLE_ACCEPTED')),
+        open > 1 ? h('button', { class: 'secondary', type: 'button', text: asOne ? 'Open the one you work ↗' : `Work as one (${open}) ↗`,
+          title: `Opens one of these ${open} in the portal. Its Clear or Block (and claim, release, waiting and notes) is done to the other ${open - 1} too.`,
+          onclick: () => { if (asOne) window.open(asOne.leadUrl, '_blank'); else { merged.startOrders(g); draw(); } } }) : null) : null;
       return h('div', { class: 'bt-card' }, membersOf(g),
         m0.r.problem ? h('p', { class: 'hint', style: 'margin:0', text: m0.r.problem }) : null,
-        h('textarea', { class: 'field', rows: 2, placeholder: 'Note', 'aria-label': 'Note', value: g.note, oninput: e => { g.note = e.target.value; } }),
+        h('textarea', { class: 'field', rows: 2, placeholder: g.dp ? 'Adjudication note (needed to clear or block)' : 'Note', 'aria-label': g.dp ? 'Adjudication note' : 'Note', value: g.note, oninput: e => { g.note = e.target.value; } }),
+        dpRow,
         h('div', { class: 'row' }, btn(`Add note${all}`, () => noteGroup(g)),
           h('select', { class: 'field', 'aria-label': 'Resolution', onchange: e => { g.resolution = e.target.value; } },
             h('option', { value: '', text: 'Resolution…' }), Object.entries(RESOLUTIONS).map(([k, t]) => h('option', { value: k, text: t, selected: g.resolution === k }))),
@@ -6096,7 +6123,7 @@
       const n = S.groups.reduce((a, g) => a + g.members.length, 0);
       const disputes = S.groups[0].kind === 'dispute';
       list.replaceChildren(...[
-        h('p', { class: 'hint', style: 'margin:0', text: `${plural(n, 'order')} of yours in ${plural(S.groups.length, 'group')}. Orders of the same company that are exactly the same (for disputes: every disputed line's HS code, description, origin, claims, merchant reasons and questionnaire answers) show once (×N), and what you do to it is done to all of them. "Work as one" opens one in the portal and copies what you do there to the rest.` }),
+        h('p', { class: 'hint', style: 'margin:0', text: `${plural(n, 'order')} of yours in ${plural(S.groups.length, 'group')}. Orders of the same company that are exactly the same (for denied-party reviews: the same flagged party; for disputes: every disputed line's HS code, description, origin, claims, merchant reasons and questionnaire answers) show once (×N), and what you do to it is done to all of them. "Work as one" opens one in the portal and copies what you do there to the rest.` }),
         disputes && h('div', { class: 'row' }, btn('Save all decisions', () => saveAll(S.groups)), btn('Complete all saved…', () => completeAll(S.groups))),
         ...S.groups.map(g => (g.kind === 'dispute' ? disputeCard(g) : orderCard(g))),
       ].filter(Boolean));
@@ -6179,7 +6206,8 @@
     const record = lead => records()[lead] || null;
     const byKey = key => Object.values(records()).find(m => m.key === key) || null;
     // The dispute on this page, `p` = { sid, wo }: the portal opens a dispute at /duty-disputes/<id>, then moves to its
-    // work order's address (/entry-writer-queue/DUTY_DISPUTE_REVIEW/<work order id>), so either one finds its record
+    // work order's address (/entry-writer-queue/DUTY_DISPUTE_REVIEW/<work order id>), so either one finds its record.
+    // A denied-party review's page is only ever its work order's address.
     const isLead = (m, p) => (!!p.sid && m.lead === p.sid) || (!!p.wo && String(m.leadWo ?? '') === p.wo);
     const isCopy = (m, p) => m.copies.some(c => (!!p.sid && c.id === p.sid) || (!!p.wo && String(c.wo ?? '') === p.wo));
     const recordHere = p => (p.sid || p.wo ? Object.values(records()).find(m => isLead(m, p) || isCopy(m, p)) || null : null);
@@ -6187,7 +6215,7 @@
       const wm = WORK_ORDER_PATH.exec(location.pathname);
       return {
         sid: (location.pathname.match(/^\/duty-disputes\/([^/?#]+)/) || [])[1] || disputeIdHere(),
-        wo: wm?.[1] === 'DUTY_DISPUTE_REVIEW' ? decodeURIComponent(wm[2]) : '',
+        wo: wm ? decodeURIComponent(wm[2]) : '',
       };
     }
     const put = m => { const all = records(); all[m.lead] = m; GM_setValue(MERGED_KEY, all); };
@@ -6213,12 +6241,25 @@
       adopt(lead.r, rest.map(m => m.r), g.key);
       window.open(lead.r.url, '_blank');
     }
+    // Batch work's button for denied-party reviews of the same party: asks first
+    function startOrders(g) {
+      const open = g.members.filter(m => m.r.status === 'OPEN' || m.r.status === 'WAITING').sort((a, b) => (a.r.dueMs ?? Infinity) - (b.r.dueMs ?? Infinity));
+      if (open.length < 2) return;
+      const [lead, ...rest] = open;
+      if (!confirm(`Work these ${open.length} denied-party reviews of the same party as one?
+
+${lead.r.ref} opens in a new tab. Work it with the portal's own buttons: when you press Clear or Block there, the other ${rest.length} get the same decision and note (after 5 seconds, with Cancel). Claim, release, mark waiting and notes are copied too.
+
+Portal mode: ${portal.mode().toUpperCase()}`)) return;
+      adopt(lead.r, rest.map(m => m.r), g.key);
+      window.open(lead.r.url, '_blank');
+    }
     // A stacked row opened from the queue (or Batch work): its record, made or brought up to date. Any other
     // record that shares one of these disputes is dropped, so a dispute is only ever copied to from one place.
     // `stacks`: [{ lead, copies, key }] of queue rows; `from`: 'queue' (Portal+'s stacks) or 'batch'
     function adoptMany(stacks, from) {
       const all = records();
-      for (const { lead, copies, key = shapes.key(lead.sid) } of stacks) {
+      for (const { lead, copies, key = stackShape(lead) } of stacks) {
         if (!copies.length || !key) continue;
         const ids = new Set([lead.sid, ...copies.map(c => c.sid)]);
         for (const [k, m] of Object.entries(all)) {
@@ -6228,7 +6269,7 @@
         const old = all[lead.sid];
         all[lead.sid] = {
           lead: lead.sid, leadWo: lead.id, leadRef: lead.ref, leadUrl: lead.url, org: lead.orgId, customer: lead.customer || lead.consignee || '',
-          key, mode: portal.mode(), copies: copies.map(c => ({ id: c.sid, wo: c.id, ref: c.ref, url: c.url })), from,
+          key, kind: lead.type === 'DENIED_PARTY_REVIEW' ? 'party' : 'dispute', mode: portal.mode(), copies: copies.map(c => ({ id: c.sid, wo: c.id, ref: c.ref, url: c.url })), from,
           results: old?.key === key ? old.results || {} : {}, pending: old?.pending || '', submitLater: old?.key === key && !!old.submitLater, at: Date.now(),
         };
       }
@@ -6245,7 +6286,7 @@
     function end(lead) {
       const m = record(lead);
       if (!m) return;
-      if (!confirm(`Stop working ${m.leadRef} as one? Nothing already copied is undone; from now on what you do there stays on that dispute only.`)) return;
+      if (!confirm(`Stop working ${m.leadRef} as one? Nothing already copied is undone; from now on what you do there stays on that ${m.kind === 'party' ? 'order' : 'dispute'} only.`)) return;
       if (R.job?.lead === lead) { R.stop = true; R.cancel = true; }
       for (let i = jobs.length - 1; i >= 0; i--) if (jobs[i].lead === lead) jobs.splice(i, 1);
       drop(lead);
@@ -6343,7 +6384,7 @@
       return true;
     }
     async function workOrderCopies(m, op, vars) {
-      if (portal.mode() !== m.mode) throw new Error(`The portal is in ${portal.mode().toUpperCase()} mode, but these disputes were stacked in ${m.mode.toUpperCase()} mode. Nothing was copied.`);
+      if (portal.mode() !== m.mode) throw new Error(`The portal is in ${portal.mode().toUpperCase()} mode, but these were stacked in ${m.mode.toUpperCase()} mode. Nothing was copied.`);
       const a = WO_ACTIONS[op];
       const { ids, ...rest } = vars || {};
       // Without what was sent (a note, a target), the copies would get something different: nothing is done
@@ -6351,9 +6392,13 @@
       const wos = m.copies.map(c => c.wo).filter(Boolean);
       if (!wos.length) return '';
       if (a.wait && !await countdown(m, a.doing, `Not ${a.done.toLowerCase()}: the other ${m.copies.length} stay as they were.`)) return R.msgs[m.lead];
-      say(m, `${a.doing} the other ${wos.length}${rest.note ? ` ("${String(rest.note).slice(0, 60)}")` : ''}…`);
+      // A denied-party review's Resolve is its Clear or Block, and is called that
+      const blocked = rest.resolution === 'UNFILEABLE_ACCEPTED';
+      const verdict = m.kind === 'party' && op === 'BrokerageWorkOrderResolve' && DP_VERDICTS[rest.resolution];
+      const [doing, done] = verdict ? (blocked ? ['Blocking', 'Blocked'] : ['Clearing', 'Cleared']) : [a.doing, a.done];
+      say(m, `${doing} the other ${wos.length}${rest.note ? ` ("${String(rest.note).slice(0, 60)}")` : ''}…`);
       const res = await holding(wos, () => portal.act(op, wos, rest));
-      return `${a.done} the other ${res.done.length}${rest.note ? `, with the same note` : ''}${res.failed.length ? ` · ${res.failed.length} failed: ${res.failed[0].error}` : ''}.`;
+      return `${done} the other ${res.done.length}${rest.note ? `, with the same note` : ''}${res.failed.length ? ` · ${res.failed.length} failed: ${res.failed[0].error}` : ''}.`;
     }
     async function copy(m, complete) {
       if (portal.mode() !== m.mode) throw new Error(`The portal is in ${portal.mode().toUpperCase()} mode, but these disputes were stacked in ${m.mode.toUpperCase()} mode. Nothing was copied.`);
@@ -6456,10 +6501,12 @@
       box.className = 'bar';
       box.replaceChildren(...[
         h('div', { class: 'head' },
-          h('div', {}, h('span', { class: 'n', text: `×${all1}` }), h('b', { text: 'identical disputes, worked as one' }), h('span', { class: 'muted', text: ` · ${m.customer} · ${m.mode.toUpperCase()}` })),
+          h('div', {}, h('span', { class: 'n', text: `×${all1}` }), h('b', { text: m.kind === 'party' ? 'denied-party reviews of the same party, worked as one' : 'identical disputes, worked as one' }), h('span', { class: 'muted', text: ` · ${m.customer} · ${m.mode.toUpperCase()}` })),
           h('button', { type: 'button', class: 'icon', text: '–', title: 'Minimize (it keeps working; shows in the bottom-left corner)', 'aria-label': 'Minimize the worked-as-one bar', onclick: () => setBarMin(true) })),
-        onCopy ? h('p', { class: 'warn' }, `This dispute is one of the ${all1} worked as one through `, lead, '. Work that one: what you do there is done here too.')
-          : onLead ? h('p', { text: `Work it here as usual: claim, release, mark waiting, resume, escalate, notes, decisions and Submit are each done to the other ${m.copies.length} too. Submit and Resolve do the others after 5 seconds.` })
+        onCopy ? h('p', { class: 'warn' }, `This ${m.kind === 'party' ? 'review' : 'dispute'} is one of the ${all1} worked as one through `, lead, '. Work that one: what you do there is done here too.')
+          : onLead ? h('p', { text: m.kind === 'party'
+            ? `Work it here as usual: claim, release, mark waiting, resume, escalate, notes, and Clear or Block (with its note) are each done to the other ${m.copies.length} too. Clear and Block do the others after 5 seconds.`
+            : `Work it here as usual: claim, release, mark waiting, resume, escalate, notes, decisions and Submit are each done to the other ${m.copies.length} too. Submit and Resolve do the others after 5 seconds.` })
             : h('p', {}, 'Copying from ', lead, ' to its identical copies.'),
         msg ? h('p', { class: /no longer|isn't|mode, but|nothing was|failed/i.test(msg) ? 'err' : '', text: msg }) : null,
         !busy && m.pending ? h('p', { class: 'warn', text: 'Copying stopped part-way (the page was closed or reloaded).' }) : null,
@@ -6468,7 +6515,7 @@
         h('div', { class: 'row' }, ...[
           busy && R.counting ? btn('Cancel', () => { R.cancel = true; }, 'primary') : null,
           busy && !R.counting ? btn('Stop', () => { R.stop = true; }) : null,
-          !busy && onLead ? btn('Copy decisions now', () => queue(m.lead, 'decide')) : null,
+          !busy && onLead && m.kind !== 'party' ? btn('Copy decisions now', () => queue(m.lead, 'decide')) : null,
           !busy && m.pending ? btn('Finish copying', () => queue(m.lead, m.pending), 'primary') : null,
           !busy && !m.pending && m.submitLater ? btn(`Submit the other ${m.copies.length}`, () => queue(m.lead, 'complete'), 'primary') : null,
           btn('Stop working as one', () => end(m.lead)),
@@ -6482,7 +6529,7 @@
       draw();
     }
     replyWatchers.add(onReply);
-    return { record, byKey, start, adoptMany, dropFrom, holding, onRoute };
+    return { record, byKey, start, startOrders, adoptMany, dropFrom, holding, onRoute };
   })();
 
   /* ---- research every order the queue shows, in Claude Code (with the access code) */
@@ -7358,7 +7405,7 @@
     } });
     const stackRow = h('label', { class: 'row', style: 'align-items:flex-start;gap:8px;cursor:pointer', hidden: true }, stackBox,
       h('span', {}, h('b', { text: 'Stack identical disputes in the queue' }), h('span', { class: 'hint', style: 'display:block;margin:0',
-        text: 'Portal+ shows exact duplicates (same company, assignee and status; the same lines, claims and questionnaire answers) as one row with ×N. Whatever you do on that one (claim, waiting, notes, decisions, Submit) is done to all of them.' })));
+        text: 'Portal+ shows exact duplicates (same company, assignee and status; the same lines, claims and questionnaire answers) as one row with ×N, and denied-party reviews of the same company and flagged party too. Whatever you do on that one (claim, waiting, notes, decisions, Submit, Clear, Block) is done to all of them.' })));
     const researchAllBox = h('input', { type: 'checkbox', checked: GM_getValue(RESEARCH_ALL_KEY, false) === true, onchange: e => {
       GM_setValue(RESEARCH_ALL_KEY, e.target.checked);
       if (!e.target.checked && bulk.job()) bulk.pause(true);
