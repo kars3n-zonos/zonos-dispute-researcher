@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.69.0
+// @version      7.70.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -4119,7 +4119,7 @@
       prefs.escSetting = true;
       GM_setValue(PREFS_KEY, prefs);
     }
-    const savePrefs = () => GM_setValue(PREFS_KEY, { cscope: S.cscope, filters: S.filters, sort: S.sort, auto: S.auto, stack: S.stack, excl: S.excl, cgroup: S.cgroup, dense: S.dense, resOnly: S.resOnly, escSetting: true });
+    const savePrefs = () => GM_setValue(PREFS_KEY, { cscope: S.cscope, filters: S.filters, sort: S.sort, auto: S.auto, stack: S.stack, excl: S.excl, cgroup: S.cgroup, dense: S.dense, resOnly: S.resOnly, stacksOnly: S.stacksOnly, escSetting: true });
     const S = {
       rows: [], me: null, loadedAt: 0, loading: false, error: '', q: '', cscope: prefs.cscope, filters: prefs.filters || {}, sort: prefs.sort,
       auto: prefs.auto, sel: new Set(), anchor: -1, focus: -1, pop: '', popSearch: '', extra: null, extraFor: '', seenAt: GM_getValue(SEEN_KEY, 0), shown: [], limit: 300,
@@ -4128,6 +4128,7 @@
       stack: prefs.stack !== false, stackMsg: '',
       excl: prefs.excl || {},
       resOnly: !!prefs.resOnly,   // "Only resolution failed": its own switch
+      stacksOnly: !!prefs.stacksOnly,   // "×N only": only rows that stand for identical copies, the most copies first
       cgroup: prefs.cgroup || '', dense: !!prefs.dense,   // its grouping, and compact rows
     };
     let autoTimer = null;
@@ -4429,6 +4430,12 @@
           render();
         } }), ' Stack identical');
     }
+    // "×N only": just the rows standing for identical copies, the biggest stack first, for working them in bulk
+    function stacksOnlyToggle(cls) {
+      if (!stackOn()) return null;
+      return h('label', { class: cls, title: 'Show only rows that stand for identical copies (×N), the one with the most copies first, so the biggest batches get worked first' },
+        h('input', { type: 'checkbox', checked: S.stacksOnly, onchange: e => { S.stacksOnly = e.target.checked; S.sel.clear(); S.limit = 300; savePrefs(); render(); } }), ' ×N only');
+    }
 
     // ---- drawing
     function render() {
@@ -4436,7 +4443,8 @@
       host.dataset.skin = 'classic';
       S.researched = GM_getValue(RESEARCHED_KEY, {});
       const all = sortRows(visible());
-      const rows = stack(all);
+      let rows = stack(all);
+      if (stackOn() && S.stacksOnly) rows = rows.filter(r => r._copies?.length).map((r, i) => [r, i]).sort((a, b) => b[0]._copies.length - a[0]._copies.length || a[1] - b[1]).map(([r]) => r);
       if (stackOn()) registerStacks(rows); else stackSig = '';
       fillShapes(all.filter(r => !r.closed));
       // Grouped: each group's rows together, groups in the order their first row comes
@@ -4503,6 +4511,7 @@
           h('button', { class: 'cq-icon', type: 'button', text: '↻', title: 'Refresh queue (it also refreshes every minute)', 'aria-label': 'Refresh queue', disabled: S.loading, onclick: () => { load(); if (completedTab()) loadClosed(true); } }),
           h('span', { class: `mode ${mode}`, text: mode.toUpperCase(), title: 'The portal mode every action here goes to' }),
           stackToggle('cq-stack'),
+          stacksOnlyToggle('cq-stack'),
           researchAllBtn(rows, 'cq-btn dark'),
           viewPicker('cq-view')));
       const tabs = h('div', { class: 'cq-tabs', role: 'tablist' }, CLASSIC_SCOPES.map(s =>
