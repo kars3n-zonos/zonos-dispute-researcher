@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.67.0
+// @version      7.68.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -6331,8 +6331,25 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         })(json.data, 0);
       }
       if (wos.length !== 1 || held.has(wos[0])) return;
-      const m = Object.values(records()).find(x => x.leadWo === wos[0]);
-      if (m) queue(m.lead, 'wo', { op, vars });
+      const m = Object.values(records()).find(x => String(x.leadWo) === String(wos[0]));
+      if (m) queue(m.lead, 'wo', { op, vars: { ...fromReply(op, json.data, wos[0]), ...(vars || {}) } });
+    }
+    // What was sent, read back from the portal's reply: the portal often calls its own saved copy of fetch, so the
+    // request itself isn't always seen (a denied-party review's Clear or Block was then never copied). The order
+    // it sends back carries the resolution and its note, the escalation and its note, and the assignee.
+    function fromReply(op, data, wo) {
+      let n = null;
+      (function walk(o, depth) {
+        if (n || !o || typeof o !== 'object' || depth > 6) return;
+        if (String(o.id) === String(wo) && 'assigneeName' in o) { n = o; return; }
+        for (const v of Array.isArray(o) ? o : Object.values(o)) walk(v, depth + 1);
+      })(data, 0);
+      if (!n) return {};
+      const keep = o => Object.fromEntries(Object.entries(o).filter(([, v]) => v != null && v !== ''));
+      if (op === 'BrokerageWorkOrderResolve') return keep({ resolution: n.resolution, note: n.resolutionNote });
+      if (op === 'BrokerageWorkOrderEscalate') return keep({ target: n.escalatedTo, note: n.escalationNote });
+      if (op === 'BrokerageWorkOrderAssign') return keep({ assigneeId: n.assigneeId });
+      return {};
     }
     // Claims from the queue (the whole stack at once): their replies aren't copied again
     async function holding(woIds, fn) {
