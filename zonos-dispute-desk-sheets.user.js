@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.66.0
+// @version      7.67.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -6113,10 +6113,12 @@
         m0.r.problem ? h('p', { class: 'hint', style: 'margin:0', text: m0.r.problem }) : null,
         h('textarea', { class: 'field', rows: 2, placeholder: g.dp ? 'Adjudication note (needed to clear or block)' : 'Note', 'aria-label': g.dp ? 'Adjudication note' : 'Note', value: g.note, oninput: e => { g.note = e.target.value; } }),
         dpRow,
+        // A denied-party review is decided only by Clear or Block (each resolves it at once, as on its page), so it
+        // has no separate Resolve
         h('div', { class: 'row' }, btn(`Add note${all}`, () => noteGroup(g)),
-          h('select', { class: 'field', 'aria-label': 'Resolution', onchange: e => { g.resolution = e.target.value; } },
+          g.dp ? null : h('select', { class: 'field', 'aria-label': 'Resolution', onchange: e => { g.resolution = e.target.value; } },
             h('option', { value: '', text: 'Resolution…' }), Object.entries(RESOLUTIONS).map(([k, t]) => h('option', { value: k, text: t, selected: g.resolution === k }))),
-          btn(`Resolve${all}…`, () => resolveGroup(g))));
+          g.dp ? null : btn(`Resolve${all}…`, () => resolveGroup(g))));
     }
     function draw() {
       if (!S.groups.length) { list.replaceChildren(); return; }
