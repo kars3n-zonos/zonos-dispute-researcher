@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.70.0
+// @version      7.70.1
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -750,14 +750,27 @@
 
   /* ------------------------------------------- dashboard: read the dispute */
 
-  const LINE_RE = /^Line\s+(\d+)\s+[—–-]\s+(.+)$/;
+  // Item headers read "Line 2 — Baby vest" or, on newer/replacement-order disputes, "Order item — Medications…"
+  // (no number: those get their position on the page)
+  const LINE_RE = /^(?:Line|Item|Order item)(?:\s+(\d+))?\s+[—–-]\s+(.+)$/i;
   const ITEM_STOP_RE = /^(order-level documents|audit trail)$/i;
 
   // A "leaf" is the innermost element that holds text (icons don't count)
   const isLeaf = el => !!clean(el.textContent) && [...el.children].every(c => !clean(c.textContent));
   const leaves = root => [...root.querySelectorAll('*')].filter(isLeaf);
   const findLeaf = (root, re) => leaves(root).find(e => re.test(clean(e.textContent)));
-  const lineHeaders = root => [...root.querySelectorAll('span')].filter(s => isLeaf(s) && LINE_RE.test(clean(s.textContent)));
+  const lineHeaders = root => [...root.querySelectorAll('span, h2, h3, h4, h5, p, div')].filter(s => isLeaf(s) && LINE_RE.test(clean(s.textContent)));
+  // The line number in a header, or its position among the page's headers when it has none
+  const headerLine = (header, all) => +(LINE_RE.exec(clean(header.textContent))?.[1] || all.indexOf(header) + 1);
+
+  // Collapsed item cards don't render their field table; open them so they can be read
+  async function expandItems(main) {
+    const shut = lineHeaders(main).map(hd => hd.closest('button,[role="button"]')).filter(b => b && b.getAttribute('aria-expanded') === 'false');
+    if (!shut.length) return;
+    shut.forEach(b => b.click());
+    await waitFor(() => shut.every(b => b.getAttribute('aria-expanded') !== 'false'), { timeout: 3000 });
+    await new Promise(r => setTimeout(r, 300));
+  }
 
   // Climbs from an item's "Line N — ..." header to the largest block that holds only that item
   function itemBox(header, main) {
@@ -827,8 +840,10 @@
     const docOf = a => ({ name: a.getAttribute('aria-label').replace(/^Download\s+/i, ''), url: a.href });
 
     const boxes = [];
-    const items = lineHeaders(main).map(header => {
-      const [, line, title] = clean(header.textContent).match(LINE_RE);
+    const headers = lineHeaders(main);
+    const items = headers.map(header => {
+      const title = clean(header.textContent).match(LINE_RE)[2];
+      const line = headerLine(header, headers);
       const box = itemBox(header, main);
       boxes.push(box);
       const fields = parseFields(box);
@@ -1500,8 +1515,9 @@
     const main = document.querySelector('main');
     const d = main && extractDispute();
     const items = d?.items || [];
-    const header = main && lineHeaders(main).find(hd => itemBox(hd, main).contains(button));
-    const line = header ? +LINE_RE.exec(clean(header.textContent))[1] : 0;
+    const allHeaders = main ? lineHeaders(main) : [];
+    const header = allHeaders.find(hd => itemBox(hd, main).contains(button));
+    const line = header ? headerLine(header, allHeaders) : 0;
     const item = items.find(i => i.line === line) || items.find(i => lineCodes(i).codes.some(c => sameCode(c, code)));
     const { codes = [], from = '' } = item ? lineCodes(item) : {};
     const pair = codes.length === 2 && codes.some(c => sameCode(c, code));
@@ -8728,8 +8744,9 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       body.replaceChildren(h('p', { class: 'muted', text: 'Reading the dispute…' }));
       const ready = await waitFor(() => lineHeaders(document.querySelector('main') || document.body).length > 0);
       if (path !== location.pathname) return;
+      if (ready) await expandItems(document.querySelector('main') || document.body);
       const data = ready && extractDispute();
-      if (!data) {
+      if (!data || !data.items.length) {
         body.replaceChildren(h('p', { class: 'err', text: "Couldn't find any items on this page. Wait for it to finish loading, then close and reopen this panel." }));
         return;
       }
