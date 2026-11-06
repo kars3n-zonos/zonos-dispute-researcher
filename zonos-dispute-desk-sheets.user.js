@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.70.1
+// @version      7.71.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -169,6 +169,7 @@
     extraRoutines: '',                      // more of your routines, one per line "<id> <token>": research starts are spread over all of them
     notesUrl: TEAM.notesUrl || '',                           // shared answers server
     sheetsUrl: TEAM.sheetsUrl || '', sheetsSecret: TEAM.sheetsSecret || '',   // the team sheet's web app
+    slackSearchUrl: '', slackSearchCallback: '',   // Slack & Front search (access code only): the Slack workflow's webhook, and where it sends results
   };
   const teamSheet = () => !!(TEAM.sheetsUrl && TEAM.sheetsSecret);
   const cfg = () => {
@@ -7428,6 +7429,95 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       try { say(sheetsNote, `Saved. Connected to the sheet (version ${await desk.sheetsPing()}).`, 'ok'); } catch (err) { say(sheetsNote, `Saved, but: ${err.message}`, 'err'); }
     };
 
+    // ---- Slack & Front search (only with the access code): sends this page's merchant and dispute to a Slack
+    // workflow that searches Slack and Front for related conversations. The webhook's address is a setting that
+    // comes in the setup block, never built into the script: anyone holding it could start the workflow.
+    const SS_FIELDS = [
+      ['merchant_name', 'Merchant'], ['dispute_type', 'Dispute type'], ['customer_name', 'Customer'],
+      ['customer_email_domain', 'Customer email domain'], ['order_number', 'Order number'], ['tracking_number', 'Tracking number'],
+      ['entry_number', 'Entry number'], ['dispute_id', 'Dispute / work order id'], ['product_name', 'Product'], ['sku', 'SKU'],
+      ['hts_code', 'HTS code'], ['front_conversation_id', 'Front conversation id'], ['callback_url', 'Callback URL'],
+    ];
+    const SS_HOOK = /^https:\/\/hooks\.slack\.com\/(triggers|workflows)\/\S+$/;
+    const ssInputs = Object.fromEntries(SS_FIELDS.map(([k, label]) => [k, h('input', { type: 'text', placeholder: label, 'aria-label': label, autocomplete: 'off', spellcheck: 'false' })]));
+    const ssUrlInput = secretField(() => !!cfg().slackSearchUrl, 'Slack workflow webhook (https://hooks.slack.com/triggers/…)');
+    const ssCallbackInput = textField('slackSearchCallback', 'Callback URL for results (optional)', 'Callback URL');
+    const ssSetupNote = note();
+    const ssNote = note();
+    const ssSaveSetup = () => {
+      const url = ssUrlInput.value.trim();
+      if (url && !SS_HOOK.test(url)) { say(ssSetupNote, 'That isn\'t a Slack workflow webhook (it starts with https://hooks.slack.com/triggers/).', 'err'); return; }
+      setCfg({ ...(url ? { slackSearchUrl: url } : {}), slackSearchCallback: ssCallbackInput.value.trim() });
+      ssUrlInput.value = '';
+      ssUrlInput.placeholder = cfg().slackSearchUrl ? 'Saved (paste a new one to replace it)' : 'Slack workflow webhook (https://hooks.slack.com/triggers/…)';
+      ssInputs.callback_url.value = cfg().slackSearchCallback || '';
+      say(ssSetupNote, cfg().slackSearchUrl ? 'Saved on this computer.' : 'Saved. Add the webhook to turn on Send.', cfg().slackSearchUrl ? 'ok' : '');
+    };
+    // What the page shows: the Research tab's reading of it when that's this page, otherwise read now
+    function ssFacts() {
+      const main = document.querySelector('main');
+      let d = state && state.path === location.pathname ? state.data : null;
+      if (!d && main) {
+        try { d = WORK_ORDER_PATH.test(location.pathname) ? readWorkOrder() : /\/duty-disputes\//.test(location.pathname) ? extractDispute() : null; } catch { d = null; }
+      }
+      const dl = [];
+      main?.querySelectorAll('dt').forEach(dt => dl.push([clean(dt.textContent).toLowerCase(), clean(dt.nextElementSibling?.textContent)]));
+      const pick = re => (dl.find(([k, v]) => re.test(k) && v) || [])[1] || '';
+      const text = main?.innerText || '';
+      const items = d?.items || [];
+      const uniq = list => [...new Set(list.map(clean).filter(Boolean))];
+      const fieldVals = re => uniq(items.flatMap(i => i.fields.filter(f => re.test(f.label)).map(f => f.current || f.claimed || '')));
+      const wo = d?.kind === 'workOrder';
+      const claimed = uniq(items.flatMap(i => (i.claims || []).map(c => c.field)));
+      const front = desk.caseLinks().front || '';
+      const email = pick(/e-?mail/);
+      return {
+        merchant_name: d?.org || pick(/^(organization|merchant|company|store|seller)\b/),
+        dispute_type: wo ? (d.label || d.type || '') : d ? `Duty dispute${claimed.length ? `: ${claimed.join(', ')}` : ''}` : '',
+        customer_name: pick(/^(customer|recipient|consignee|buyer|ship to|ship-to)( name)?$/),
+        customer_email_domain: d?.emailDomain || (email.split('@')[1] || '').toLowerCase(),
+        order_number: d?.order || pick(/^(original )?order( #| number| id)?$/),
+        tracking_number: pick(/^tracking/) || d?.tracking || (text.match(/\b[A-Z]{2}\d{9}[A-Z]{2}\b/) || [])[0] || '',
+        entry_number: pick(/^entry( #| number| no\.?)?$/) || (text.match(/\b[A-Z0-9]{3}-\d{7}-\d\b/) || [])[0] || '',
+        dispute_id: wo ? (d.workOrderId || '') : (d?.disputeId || ''),
+        product_name: uniq(items.map(i => i.title)).join('; ') || pick(/^(product|item|description)( name)?$/),
+        sku: fieldVals(/^sku\b/i).join(', ') || pick(/^sku\b/),
+        hts_code: (fieldVals(/^(hs|hts)\b/i).join(', ')) || (wo ? (d.current || (d.codes || []).map(c => c.code).join(', ')) : ''),
+        front_conversation_id: (front.match(/\bcnv_[a-z0-9]+/i) || [])[0] || front,
+        callback_url: cfg().slackSearchCallback || '',
+      };
+    }
+    const ssFill = () => {
+      const f = ssFacts();
+      for (const [k] of SS_FIELDS) ssInputs[k].value = f[k] || '';
+      say(ssNote, f.merchant_name || f.tracking_number || f.dispute_id ? 'Filled from this page. Check it, fix anything that\'s off, then Send.' : 'Nothing found on this page. Open a dispute or work order (or type the details), then Send.');
+    };
+    const ssSend = async () => {
+      if (!batchUnlocked()) { say(ssNote, 'Unlock with the access code first.', 'err'); return; }
+      const url = cfg().slackSearchUrl;
+      if (!url) { say(ssNote, 'Add the Slack workflow webhook above first.', 'err'); return; }
+      const payload = Object.fromEntries(SS_FIELDS.map(([k]) => [k, clean(ssInputs[k].value)]));   // the workflow wants every field, as text
+      if (!payload.merchant_name && !payload.tracking_number && !payload.order_number && !payload.dispute_id) { say(ssNote, 'Give it at least a merchant, tracking number, order or dispute id.', 'err'); return; }
+      say(ssNote, 'Sending…');
+      try {
+        const r = await gmRequest({ method: 'POST', url, headers: { 'Content-Type': 'application/json' }, data: JSON.stringify(payload) });
+        let body = null;
+        try { body = JSON.parse(r.responseText); } catch { /* not JSON */ }
+        if (r.status >= 200 && r.status < 300 && body?.ok !== false) say(ssNote, `Sent to Slack (${new Date().toLocaleTimeString()}). The workflow posts what it finds in Slack.`, 'ok');
+        else say(ssNote, `Slack didn't take it (${r.status}${body?.error ? `: ${body.error}` : ''}).`, 'err');
+      } catch (err) { say(ssNote, err.message, 'err'); }
+    };
+    const slackSearchGroup = group('Search Slack & Front', 'Sends this page\'s merchant and dispute to the Slack workflow, which looks for related Slack threads and Front conversations. Opening this fills the details from the page; check them, then press Send. Only on computers unlocked with the access code.',
+      h('div', { class: 'row' }, ssUrlInput),
+      h('div', { class: 'row', style: 'margin-top:6px' }, ssCallbackInput, btn('Save', ssSaveSetup)),
+      ssSetupNote,
+      h('div', { style: 'display:grid;grid-template-columns:auto 1fr;gap:4px 8px;align-items:center;margin-top:8px' },
+        ...SS_FIELDS.flatMap(([k, label]) => [h('span', { class: 'hint', style: 'margin:0', text: label }), ssInputs[k]])),
+      h('div', { class: 'row', style: 'margin-top:8px' }, btn('Fill from this page', ssFill), btn('Send to Slack', ssSend)),
+      ssNote);
+    slackSearchGroup.hidden = !batchUnlocked();
+    slackSearchGroup.addEventListener('toggle', () => { if (slackSearchGroup.open) ssFill(); });
+
     // Back up / restore: everything above as one block of text, e.g. to move to another computer
     const importBox = h('textarea', { class: 'answer', rows: 4, placeholder: 'Paste a setup block here', 'aria-label': 'Setup to import', style: 'min-height:70px' });
     const backupNote = note();
@@ -7484,7 +7574,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     function showLocked() {
       if (batchUnlocked() && !batchGroup) { batchGroup = batchTool({ group, note, say, btn }); accessGroup.after(batchGroup); }
       if (!batchUnlocked() && batchGroup) { batchGroup.remove(); batchGroup = null; }
-      stackRow.hidden = researchAllRow.hidden = !batchUnlocked();
+      stackRow.hidden = researchAllRow.hidden = slackSearchGroup.hidden = !batchUnlocked();
       stackBox.checked = GM_getValue(STACK_KEY, false) === true;
       researchAllBox.checked = GM_getValue(RESEARCH_ALL_KEY, false) === true;
       if (batchUnlocked()) say(codeNote, 'Unlocked on this computer: bulk actions in the queue work, the switches above turn on stacking and Research all, and Batch work is below.', 'ok');
@@ -7582,6 +7672,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         h('div', { class: 'row', style: 'margin-top:6px' }, notesKeyInput, btn('Save key', () => saveNotesKey()), btn('Test', () => testNotesKey())),
         notesKeyNote),
       accessGroup,
+      slackSearchGroup,
       group('Back up or move your setup', '',
         h('div', { class: 'row' }, btn('Copy my setup', exportSetup)),
         h('div', { style: 'margin-top:6px' }, importBox),
