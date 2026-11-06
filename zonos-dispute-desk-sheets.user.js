@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.72.0
+// @version      7.73.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -172,6 +172,9 @@
     slackSearchUrl: '', slackSearchCallback: '',   // Slack & Front search (access code only): the Slack workflow's webhook, and where it sends results
   };
   const teamSheet = () => !!(TEAM.sheetsUrl && TEAM.sheetsSecret);
+  // A quick patent check's research request is filed with this kind, so it's never mistaken for the case's research
+  const PATENT_KIND = 'Patent check';
+  const PATENT_KIND_RE = /^patent check/i;
   const cfg = () => {
     const c = { ...CONFIG_DEFAULTS, ...GM_getValue(CONFIG_KEY, {}) };
     for (const k of Object.keys(CONFIG_DEFAULTS)) if (!c[k]) c[k] = CONFIG_DEFAULTS[k];
@@ -3231,7 +3234,8 @@
     async function priorResearch(ctx) {
       // A request still "Waiting" never started: with no session (its call timed out, say), or 20 minutes on with one
       // that never picked it up (a routine without the worker repo, say). It doesn't count, and is marked failed.
-      const all = (await sheetsCall('researchStatus', ctx).catch(() => null))?.requests || [];
+      // Quick patent checks aren't research: they never stop the full research from starting
+      const all = ((await sheetsCall('researchStatus', ctx).catch(() => null))?.requests || []).filter(q => !PATENT_KIND_RE.test(q.kind || ''));
       const stale = q => q.status === 'Waiting' && (!q.session || Date.now() - (Date.parse(String(q.asked).replace(' ', 'T')) || Date.now()) > 20 * 60000);
       for (const q of all.filter(x => stale(x) && x.session)) {
         sheetsCall('fail', null, { requestId: q.id, reason: "Its cloud session never picked it up (the routine may be missing the dispute-desk-cloud repo). Asked again." }).catch(e => console.warn('[Dispute Desk] sheet', e));
@@ -3247,14 +3251,15 @@
     }
     // `ifDone`: what to do when the case was already researched (or still is): 'ask' (a person pressed the button),
     // 'skip' (a bulk run), or 'go'
-    async function queueResearch({ prompt, docs, lines, label, openTab = true, ifDone = 'ask' }) {
+    // `task`: 'research' (the full research) or 'patent' (the quick patent check, which isn't counted as research)
+    async function queueResearch({ prompt, docs, lines, label, openTab = true, ifDone = 'ask', task = 'research' }) {
       if (!D.ent) throw new Error('Open a dispute or a work order first.');
       if (!researchOn()) throw new Error(`Research in Claude Code still needs ${researchMissing().join(', ')}. Add it under Settings (the cog in Tools).`);
       const ctx = caseContext(D.ent);
-      const what = lines.length ? `line${lines.length > 1 ? 's' : ''} ${lines.join(', ')}` : label;
+      const what = task === 'patent' ? 'quick patent check' : lines.length ? `line${lines.length > 1 ? 's' : ''} ${lines.join(', ')}` : label;
       const before = ifDone === 'go' ? '' : await priorResearch(ctx);
       if (before && (ifDone === 'skip' || !confirm(`${before}\n\nResearch it again anyway? That starts another Claude Code session.`))) return { skipped: true, why: before };
-      return queueSheetResearch(ctx, { prompt, docs, lines, label, openTab, what });
+      return queueSheetResearch(ctx, { prompt, docs, lines, label, openTab, what, task });
     }
 
     // Who's signed in to the portal, for the case chat's names
@@ -3289,7 +3294,7 @@
       }
       throw new Error(`This research prompt is ${out.length.toLocaleString()} characters even shortened, more than one Google Sheet cell holds (49,000), and the team sheet's script is an older one that can't split it. Ask Karsen to deploy the new version of the sheet script (Deploy > Manage deployments > New version), or untick some lines and research them in two goes.`);
     }
-    async function queueSheetResearch(ctx, { prompt, docs, lines, label, openTab, what }) {
+    async function queueSheetResearch(ctx, { prompt, docs, lines, label, openTab, what, task = 'research' }) {
       const ent = D.ent;
       if (prompt.length > SHEET_PROMPT_LONG_MAX) throw new Error(`This research prompt is ${prompt.length.toLocaleString()} characters, more than the sheet takes (${SHEET_PROMPT_LONG_MAX.toLocaleString()}). Untick some lines and research them in two goes.`);
       const who = GM_getValue(AUTHOR_KEY, '') || (await portalName()) || '';
@@ -3304,6 +3309,13 @@
       });
       const research = { at: Date.now(), what, requestId: r.requestId };
       const f = await fireResearch({ openTab, text: sheetResearchText(r.requestId, r.token) });
+      if (task === 'patent') {
+        // Kept apart from research, so the case still counts as not researched
+        if (f.session) await sheetsCall('session', ctx, { requestId: r.requestId, session: f.session }).catch(e => console.warn('[Dispute Desk] sheet', e));
+        else await sheetsCall('fail', null, { requestId: r.requestId, reason: `The cloud session didn't start: ${f.fireError || 'no reason given'}.` }).catch(e => console.warn('[Dispute Desk] sheet', e));
+        if (f.session) GM_setValue(`desk:patent:${ent.id}`, { ...research, ...f });
+        return { requestId: r.requestId, session: f.session, fireError: f.fireError, limited: f.limited, retryAfter: f.retryAfter, refused: f.refused };
+      }
       if (f.session) noteResearched(ent?.id, 'Claude Code');
       if (f.session) await sheetsCall('session', ctx, { requestId: r.requestId, session: f.session }).catch(e => console.warn('[Dispute Desk] sheet', e));
       // No session means nobody will answer it: the request is marked failed, not left waiting
@@ -4400,6 +4412,20 @@
       render();
       load({ quiet: true });
     }
+    // The bulk bar's Patent check: a quick Claude Code check of whether each selected order's drug is patented in
+    // the US (one per ×N stack). Nothing is claimed, and it doesn't count as the case's research.
+    const patentRows = () => selectedRows().filter(r => !copyIds.has(r.id) && !r.closed);
+    function patentCheckSelected() {
+      const rows = patentRows();
+      if (!rows.length) { toast('Nothing to check: select open disputes or orders first.', true); return; }
+      const sent = rows.filter(r => GM_getValue(`desk:patent:${r.sid}`, null)).length;
+      if (!confirm(`Run a quick patent check on ${rows.length - sent} order${rows.length - sent === 1 ? '' : 's'}?\n\n`
+        + `Claude Code only checks whether the drug is patented in the US (FDA Orange Book) and whether generics are approved. The answer goes in each case doc and its Answer cell. Nothing is claimed, and the full research can still be run later.`
+        + `${sent ? `\n\n${sent} already checked from this computer ${sent === 1 ? 'is' : 'are'} skipped.` : ''}\n\nIt starts in background tabs, at most ${perHour()} an hour. Keep a queue tab open.\n\nPortal mode: ${portal.mode().toUpperCase()}`)) return;
+      bulk.start(rows, { kind: 'selected', task: 'patent' });
+      S.sel.clear();
+      render();
+    }
     function researchAll(rows) {
       const sent = rows.filter(r => GM_getValue(`desk:research:${r.sid}`, null)).length;
       const todo = rows.length - sent;
@@ -4809,6 +4835,11 @@
               : `Claim ${plan.toClaim.length} & research ${plan.research.length}`;
           return h('button', { class: 'btn small primary', type: 'button', text,
             title: `${plan.toClaim.length ? `Claims the ${plan.toClaim.length} nobody has, then s` : 'S'}tarts Claude Code research on ${plan.research.length} (one per ×N stack; ones already researched are skipped)`, onclick: () => claimAndResearch() });
+        })() : null,
+        batchUnlocked() && desk.researchOn() ? (() => {
+          const n = patentRows().length;
+          return h('button', { class: 'btn small', type: 'button', text: `Patent check${n ? ` ${n}` : ''}`, disabled: !n,
+            title: 'Quick Claude Code check of whether the drug on each selected order is patented in the US (Orange Book) and whether generics are approved. Nothing is claimed; the answer goes in the case doc.', onclick: () => patentCheckSelected() });
         })() : null,
         !batchUnlocked() ? null : BULK.map(a => {
           const n = sel.filter(r => (!r.closed || a.key === 'note') && a.can(r, S.me?.id)).length;
@@ -6684,16 +6715,17 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     // `rows`: queue rows, one per order to research (a stack's first one stands for its copies). `kind`: 'all'
     // (Research all shown, which needs its switch) or 'selected' (Claim & research, which needs only the code).
     // While a run is going, more are added to it instead of starting another.
-    const itemOf = (r, skipDone) => ({ url: r.url, ref: r.ref, sid: r.sid, label: r.label, copies: r._copies?.length || 0,
-      state: skipDone && GM_getValue(`desk:research:${r.sid}`, null) ? 'skipped' : 'waiting' });
-    function start(rows, { skipDone = true, kind = 'all' } = {}) {
+    // `task`: 'research' (the full research) or 'patent' (the quick patent check); each is skipped once it was sent
+    const itemOf = (r, skipDone, task = 'research') => ({ url: r.url, ref: r.ref, sid: r.sid, label: r.label, copies: r._copies?.length || 0, task,
+      state: skipDone && GM_getValue(`desk:${task === 'patent' ? 'patent' : 'research'}:${r.sid}`, null) ? 'skipped' : 'waiting' });
+    function start(rows, { skipDone = true, kind = 'all', task = 'research' } = {}) {
       const cur = job();
       if (cur && (counts(cur).waiting || counts(cur).running)) {
-        const have = new Set(cur.items.map(x => x.sid));
-        cur.items.push(...rows.filter(r => !have.has(r.sid)).map(r => itemOf(r, skipDone)));
+        const have = new Set(cur.items.map(x => `${x.task || 'research'}:${x.sid}`));
+        cur.items.push(...rows.filter(r => !have.has(`${task}:${r.sid}`)).map(r => itemOf(r, skipDone, task)));
         if (kind === 'selected') cur.kind = 'selected';
         save(cur);
-      } else save({ id: Date.now().toString(36), at: Date.now(), mode: portal.mode(), kind, items: rows.map(r => itemOf(r, skipDone)), paused: false, waitUntil: 0, note: '' });
+      } else save({ id: Date.now().toString(36), at: Date.now(), mode: portal.mode(), kind, items: rows.map(r => itemOf(r, skipDone, task)), paused: false, waitUntil: 0, note: '' });
       run();
     }
     function run() {
@@ -9391,14 +9423,64 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
 
     // The autopilot's way in: read this page the way opening the panel does, research every disputed line (or the
     // whole work order), and send it to Claude Code without opening a tab. Nothing on the portal is clicked.
-    async function autoResearch() {
+    // `task`: 'patent' sends the quick patent check instead of the full research
+    async function autoResearch({ task = 'research' } = {}) {
       await open();
       const path = location.pathname;
       const ok = await waitFor(() => state && state.path === path && state.data, { timeout: 45000 });
       if (!ok) throw new Error("Couldn't read this page (it didn't finish loading).");
       if (state.data.kind !== 'workOrder') state.selected = new Set(state.data.items.filter(i => i.inDispute).map(i => i.line));
       await sleep(1500);   // let the portal's own data arrive, so the prompt carries it
+      if (task === 'patent') return sendPatentCheck({ openTab: false });
       return sendToClaudeCode({ openTab: false, ifDone: 'skip' });   // already researched (by anyone): not again
+    }
+
+    // ---- Quick patent check: one question only, is the drug on this case patented in the US? It goes to Claude Code
+    // like research, filed as a "Patent check" request, and its answer lands in the case doc and Answer cell the same
+    // way. It never counts as the case's research.
+    function patentPrompt(d) {
+      const wo = d.kind === 'workOrder';
+      const L = ['# Quick patent check', '',
+        'Answer one question only: **is the pharmaceutical (drug) in this case patented in the United States?** Nothing else: no classification, no claim or questionnaire review, no duty math, no questions for the merchant.', '',
+        `Case: ${wo ? `${d.label || d.type} ${d.workOrderId}` : `Duty dispute ${d.disputeId}`}`];
+      if (d.org) L.push(`Merchant: ${d.org}`);
+      L.push(`Portal: ${location.origin}${location.pathname}`, '', '## The product');
+      if (wo) {
+        if (d.question) L.push(`Page: ${d.question}`);
+        for (const c of d.codes || []) L.push(`- HS code ${c.code}${c.from ? ` (origin ${c.from})` : ''}`);
+        L.push('', 'What the page shows:', ...(d.lines || []).slice(0, 60).map(l => `  ${l}`));
+      } else {
+        const items = d.items.filter(i => i.inDispute).length ? d.items.filter(i => i.inDispute) : d.items;
+        for (const i of items) {
+          L.push(`- Line ${i.line}: ${i.title}`);
+          for (const f of i.fields) if (f.current || f.claimed) L.push(`  ${f.label}: ${f.current || ''}${f.claimed && f.claimed !== f.current ? ` (merchant claims: ${f.claimed})` : ''}`);
+          for (const c of i.claims || []) if (c.reason) L.push(`  Merchant says (${c.field}): ${c.reason.slice(0, 600)}`);
+        }
+      }
+      L.push('', '## How to check',
+        '1. Name the drug: the brand name and its active ingredient(s), strength and form, from the product name and description (search the web if only a brand or a product code is given).',
+        '2. US patents: look the product up in the FDA Orange Book (https://www.accessdata.fda.gov/scripts/cder/ob/), or the Purple Book for a biologic. List its patents with their expiry dates, and any exclusivity. Only an unexpired patent counts.',
+        '3. Generics: whether FDA has approved a generic (ANDA) or biosimilar of the same active ingredient and form.',
+        '4. Decide: **Patented** if at least one unexpired US patent covers the product; **Not patented** if every patent has expired or it never had one (usually a generic); **Unclear** only if you can\'t tell which drug it is.',
+        '', '## Reply template (answer.md)',
+        '**Final answer:** <Patented | Not patented | Unclear>: <drug (active ingredient)> because <one short reason, e.g. the Orange Book lists US patent 1234567 expiring 2031>.',
+        '**Reasoning:** <one plain sentence: the source that decided it>',
+        '', '| Line | Drug | Active ingredient | Patented? | Unexpired US patents (number, expiry) | Generic approved? | Source |',
+        '|---|---|---|---|---|---|---|',
+        '', '## findings.md',
+        'ANSWER: <Patented | Not patented | Unclear>: <drug (active ingredient)>',
+        'Line <N>: <drug>: <Patented, US <patent> expiring <date> | Not patented, last patent expired <date> | never patented>',
+        'Generics: <approved since <year> | none approved>',
+        'Sources: <Orange Book / Purple Book / Drugs@FDA links>');
+      return L.join('\n');
+    }
+    async function sendPatentCheck({ openTab = true } = {}) {
+      const d = await freshData();
+      setStatus('Sending the patent check to Claude Code…');
+      const r = await desk.queueResearch({ prompt: patentPrompt(d), docs: [], lines: [], label: PATENT_KIND, openTab, ifDone: 'go', task: 'patent' });
+      setStatus(r.session ? 'Patent check sent to Claude Code. Its answer shows up in the case doc and the Answer cell.'
+        : `The patent check didn't start${r.fireError ? ` (${r.fireError})` : ''}.`, r.session ? 'ok' : 'warn');
+      return r;
     }
 
     // The prompt treats the ticked files as attached, since you'll attach them by hand
@@ -9582,7 +9664,8 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         try {
           if (!await waitFor(() => isCasePage() && document.querySelector('main'), { timeout: 30000 })) throw new Error("the page didn't open");
           ui = ui || createPanel();
-          const r = await ui.autoResearch();
+          const task = bulk.job()?.items?.[+bulkMark[2]]?.task || 'research';
+          const r = await ui.autoResearch({ task });
           res = r?.skipped ? { skipped: true, session: '', error: r.why }
             : { session: r?.session || '', error: r?.session ? '' : r?.fireError || 'the cloud session did not start', limited: !!r?.limited, retryAfter: r?.retryAfter || 0, refused: !!r?.refused };
         } catch (e) { res = { session: '', error: e.message }; }
