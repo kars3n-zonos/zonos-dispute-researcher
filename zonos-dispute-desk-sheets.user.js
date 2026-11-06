@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.73.1
+// @version      7.73.2
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -6652,11 +6652,21 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
   const PER_ACCOUNT = 95;
   const COOL_KEY = 'zt:fires:cool';   // routine id -> refused until (the routine said so)
   // Your routines: the one under Claude Code research, then the extra ones ("<id> <token>" per line)
+  // A routine's id as the API wants it: "trig_…". Pasted without the prefix, or as the routine's claude.ai link
+  // or Fire URL, it's put right (the API answers 400 "invalid routine ID" otherwise).
+  function routineIdOf(raw) {
+    const v = clean(raw);
+    const m = v.match(/\btrig_[A-Za-z0-9]+/);
+    if (m) return m[0];
+    const bare = v.replace(/^.*\/routines\//, '').replace(/[/?#].*$/, '');
+    return /^[A-Za-z0-9]{16,}$/.test(bare) ? `trig_${bare}` : v;
+  }
   function routines() {
     const c = cfg();
-    const all = c.routineId && c.routineToken ? [{ id: c.routineId, token: c.routineToken }] : [];
+    const all = c.routineId && c.routineToken ? [{ id: routineIdOf(c.routineId), token: c.routineToken }] : [];
     for (const line of String(c.extraRoutines || '').split('\n')) {
-      const [id, token] = clean(line).split(' ');
+      const [raw, token] = clean(line).split(' ');
+      const id = raw && routineIdOf(raw);
       if (id && token && !all.some(r => r.id === id)) all.push({ id, token });
     }
     return all;
@@ -7397,7 +7407,9 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     const routineNote = note();
     const saveRoutine = () => {
       const t = clean(routineTokenInput.value);
-      setCfg({ routineId: clean(routineIdInput.value), ...(t ? { routineToken: t } : {}), ...(clean(routineIdInput.value) ? {} : { routineToken: '' }) });
+      const rid = clean(routineIdInput.value) ? routineIdOf(routineIdInput.value) : '';
+      routineIdInput.value = rid;
+      setCfg({ routineId: rid, ...(t ? { routineToken: t } : {}), ...(rid ? {} : { routineToken: '' }) });
       routineTokenInput.value = '';
       routineTokenInput.placeholder = cfg().routineToken ? 'Saved (paste a new one to replace it)' : 'Routine API token';
       if (refusedNote()) { say(routineNote, refusedNote(), 'err'); afterSetup(); return; }
@@ -7422,7 +7434,10 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
           say(extraNote, `Removed ${saved.id}. ${describeRoutines()}`, 'ok');
         } })),
         h('div', { class: 'row', style: 'margin-top:4px' }, tokIn));
-      row.read = () => ({ id: clean(idIn.value), token: clean(tokIn.value) || (saved && clean(idIn.value) === saved.id ? saved.token : '') });
+      row.read = () => {
+        const id = clean(idIn.value) ? routineIdOf(idIn.value) : '';
+        return { id, token: clean(tokIn.value) || (saved && (clean(idIn.value) === saved.id || id === routineIdOf(saved.id)) ? saved.token : '') };
+      };
       return row;
     }
     const drawExtras = () => extraList.replaceChildren(...savedExtras().map(extraRow));
@@ -7442,7 +7457,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       const list = [...extraList.children].map(r => r.read()).filter(x => x.id || x.token);
       const missing = list.find(x => !x.id || !x.token || /\s/.test(x.id));
       if (missing) { say(extraNote, missing.id ? `Add the API token for ${missing.id}.` : 'Each routine needs its id (trig_…) as well as its token.', 'err'); return; }
-      if (list.some(x => x.id === cfg().routineId)) { say(extraNote, "That's your first routine already (above): add other routines here.", 'err'); return; }
+      if (list.some(x => x.id === routineIdOf(cfg().routineId))) { say(extraNote, "That's your first routine already (above): add other routines here.", 'err'); return; }
       setCfg({ extraRoutines: list.map(x => `${x.id} ${x.token}`).join('\n') });
       drawExtras();
       say(extraNote, refusedNote() || describeRoutines(), refusedNote() ? 'err' : 'ok');
