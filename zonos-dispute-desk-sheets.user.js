@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.73.2
+// @version      7.74.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -4823,7 +4823,7 @@
         batchUnlocked() ? null : h('span', { class: 'muted', style: 'font-size:12px', text: 'Acting on many at once needs the access code (Tools ⚙ Settings).' }),
         batchUnlocked() && sel.some(r => r.type === 'DUTY_DISPUTE_REVIEW' && !r.closed)
           ? h('button', { class: 'btn small', type: 'button', text: 'Decide by reason',
-            title: "Accept or deny every claim on the selected disputes whose merchant gave the exact same reason on every line, with one note", onclick: () => runDecideByReason() }) : null,
+            title: "Decide the selected disputes whose merchant gave the exact same reason on every line: accept or deny each kind of claim (e.g. each questionnaire program) on its own, with its own note", onclick: () => runDecideByReason() }) : null,
         batchUnlocked() && sel.some(r => r.type === 'DUTY_DISPUTE_REVIEW' && !r.closed)
           ? h('button', { class: 'btn small primary', type: 'button', text: `Submit (${sel.filter(r => r.type === 'DUTY_DISPUTE_REVIEW' && !r.closed).length})`,
             title: 'Submit the selected duty disputes with the decisions already saved on them, the same as the Submit button on each dispute', onclick: () => runSubmit() }) : null,
@@ -5109,8 +5109,12 @@
       const mode = portal.mode();
       const reasons = h('div', { class: 'list', style: 'max-height:200px' }, h('div', { class: 'muted', text: `Reading ${rows.length} dispute${rows.length === 1 ? '' : 's'}…` }));
       const which = h('div', { class: 'list', hidden: true });
-      const verdict = h('select', { 'aria-label': 'Decision' }, h('option', { value: 'ACCEPTED', text: 'Accept every claim (as the merchant proposed)' }), h('option', { value: 'DENIED', text: 'Deny every claim' }));
-      const note = h('textarea', { 'aria-label': 'Note', placeholder: 'Required: the note saved on every claim' });
+      // One decision per kind of claim (its type, and for a questionnaire the program it claims, e.g. "Questionnaire ·
+      // USMCA certification of origin"), each with its own note; the general note fills any left empty
+      const slotsBox = h('div', { hidden: true });
+      const choices = new Map();    // slot key -> { verdict: '' | 'ACCEPTED' | 'DENIED' | 'SKIP', note }
+      const slotRows = new Map();   // slot key -> its row, kept so a choice or typing survives a redraw
+      const note = h('textarea', { 'aria-label': 'Note', placeholder: 'Used for every decision above without its own note' });
       const submitToo = h('input', { type: 'checkbox', checked: true });
       const claimFirst = h('input', { type: 'checkbox', checked: true });
       const claimRow = h('label', { style: 'display:flex;gap:6px;align-items:center;margin-top:6px', hidden: true }, claimFirst, h('span'));
@@ -5121,11 +5125,11 @@
       const scrim = h('div', { class: 'scrim', onclick: e => { if (e.target === scrim) scrim.remove(); } },
         h('div', { class: 'dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Decide by reason' },
           h('h2', { text: 'Decide by the merchant\'s reason' }),
-          h('p', {}, 'In ', h('span', { class: `mode ${mode}`, text: mode.toUpperCase() }), " mode. Pick the reason: only disputes that give exactly that reason on every claim, on every line, are decided."),
+          h('p', {}, 'In ', h('span', { class: `mode ${mode}`, text: mode.toUpperCase() }), " mode. Pick the reason: only disputes that give exactly that reason on every claim, on every line, are decided. Then decide each kind of claim on its own."),
           h('label', { class: 'f', text: 'The reason' }), reasons,
           which,
-          h('label', { class: 'f', text: 'Decision' }), verdict,
-          h('label', { class: 'f', text: 'Note (on every claim)' }), note,
+          h('label', { class: 'f', text: 'Decisions, one per kind of claim' }), slotsBox,
+          h('label', { class: 'f', text: 'Note (for any decision above without its own)' }), note,
           h('label', { style: 'display:flex;gap:6px;align-items:center;margin-top:8px' }, submitToo, 'Submit them after deciding (the same as each one\'s Submit button)'),
           claimRow, msg, bar,
           h('div', { class: 'actions' }, cancel, go)));
@@ -5133,8 +5137,41 @@
       let read = [];
       let picked = '';
       const matching = () => read.filter(x => x.ok && x.reasons.length === 1 && x.reasons[0] === picked);
+      // The kinds of claim on these disputes, in the order they first appear
+      const slotsOf = m => {
+        const map = new Map();
+        for (const x of m) for (const s of x.slots) {
+          const e = map.get(s.key) || { key: s.key, label: s.label, n: 0, disputes: new Set(), auto: new Set() };
+          e.n++; e.disputes.add(x); e.auto.add(modelVerdict(s.c) || 'none');
+          map.set(s.key, e);
+        }
+        return [...map.values()];
+      };
+      const slotRow = key => {
+        if (slotRows.has(key)) return slotRows.get(key);
+        const ch = choices.get(key) || { verdict: '', note: '' };
+        choices.set(key, ch);
+        const title = h('div', { style: 'font-weight:600' });
+        const sel = h('select', { 'aria-label': 'Decision', style: 'margin-top:4px', onchange: e => { ch.verdict = e.target.value; draw(); } },
+          [['', 'Choose…'], ['ACCEPTED', 'Accept (as the merchant proposed)'], ['DENIED', 'Deny'], ['SKIP', 'Leave undecided']].map(([v, t]) => h('option', { value: v, text: t })));
+        const noteIn = h('input', { type: 'text', 'aria-label': 'Note for these', placeholder: 'Note for these (optional: the note below otherwise)', style: 'margin-top:4px;width:100%',
+          oninput: e => { ch.note = e.target.value; } });
+        const el = h('div', { style: 'margin:6px 0;padding-top:6px;border-top:1px solid var(--line)' }, title, sel, noteIn);
+        el.titleEl = title;
+        slotRows.set(key, el);
+        return el;
+      };
       const draw = () => {
         const m = matching();
+        const slots = slotsOf(m);
+        slotsBox.hidden = !slots.length;
+        slotsBox.replaceChildren(...slots.map(s => {
+          const el = slotRow(s.key);
+          const auto = s.auto.size === 1 && !s.auto.has('none') ? ` · automated: ${[...s.auto][0].toLowerCase()} on all` : '';
+          el.titleEl.textContent = `${s.label} — ${s.n} claim${s.n === 1 ? '' : 's'} on ${s.disputes.size} dispute${s.disputes.size === 1 ? '' : 's'}${auto}`;
+          return el;
+        }));
+        const unchosen = slots.filter(s => !choices.get(s.key)?.verdict).length;
         which.hidden = !picked;
         if (picked) {
           const left = read.filter(x => !m.includes(x));
@@ -5146,10 +5183,10 @@
         claimRow.hidden = !unclaimed.length;
         claimRow.lastChild.textContent = `Claim the ${unclaimed.length} unclaimed first (deciding needs the order to be yours)`;
         const n = m.filter(x => x.r.assigneeId || claimFirst.checked).length;
-        go.textContent = n ? `${verdict.value === 'DENIED' ? 'Deny' : 'Accept'} ${n}${submitToo.checked ? ' and submit' : ''}` : 'Decide';
-        go.disabled = !n;
+        go.textContent = !n ? 'Decide' : unchosen ? `Choose ${unchosen} more decision${unchosen === 1 ? '' : 's'}` : `Decide ${n}${submitToo.checked ? ' and submit' : ''}`;
+        go.disabled = !n || !!unchosen;
       };
-      [verdict, submitToo, claimFirst].forEach(el => el.addEventListener('change', draw));
+      [submitToo, claimFirst].forEach(el => el.addEventListener('change', draw));
       (async () => {
         const out = [];
         for (let i = 0; i < rows.length; i += 6) {
@@ -5165,6 +5202,15 @@
                 x.claims = (d.items || []).flatMap(it => it.claims || []);
                 x.lines = (d.items || []).filter(it => it.claims?.length).length;
                 x.reasons = [...new Set(x.claims.map(c => exactText(c.justification)))];
+                // Questionnaire claims name their program only by id: its name comes from the questionnaire
+                const names = {};
+                await Promise.all([...new Set((d.items || []).map(it => it.questionnaireSessionId).filter(Boolean))]
+                  .map(id => questionnaireText(id, d.organizationId, names).catch(() => '')));
+                x.slots = x.claims.map(c => {
+                  const pid = c.proposed?.programId || '';
+                  const prog = pid ? names[pid] || pid : '';
+                  return { c, key: `${c.type}|${prog}`, label: `${CLAIM_TYPE_LABELS[c.type] || human2(c.type)}${prog ? ` · ${prog}` : ''}` };
+                });
                 if (!x.claims.length) x.why = 'no claims on it';
                 else if (x.reasons.some(t => !t)) x.why = 'a claim has no reason given';
                 else x.ok = true;
@@ -5190,10 +5236,17 @@
         draw();
       })();
       go.addEventListener('click', async () => {
-        const text = note.value.trim();
-        if (!text) { msg.textContent = 'Write the note first: it\'s saved on every claim.'; note.focus(); return; }
+        const general = note.value.trim();
+        const slots = slotsOf(matching());
+        const chosen = key => choices.get(key) || { verdict: '', note: '' };
+        const missing = slots.find(s => !chosen(s.key).verdict);
+        if (missing) { msg.textContent = `Choose a decision for ${missing.label}.`; return; }
+        const noteOf = key => chosen(key).note.trim() || general;
+        const noNote = slots.find(s => chosen(s.key).verdict !== 'SKIP' && !noteOf(s.key));
+        if (noNote) { msg.textContent = `Write a note for ${noNote.label}, or the note at the bottom (it's used for every decision without its own).`; note.focus(); return; }
         const todo = matching().filter(x => x.r.assigneeId || claimFirst.checked);
-        if (!confirm(`${verdict.value === 'DENIED' ? 'Deny' : 'Accept'} every claim on ${todo.length} dispute${todo.length === 1 ? '' : 's'}${submitToo.checked ? ' and submit them' : ''}, in ${mode.toUpperCase()} mode?\n\nNote: ${text}`)) return;
+        const plan = slots.map(s => { const v = chosen(s.key).verdict; return `• ${s.label}: ${v === 'SKIP' ? 'left undecided' : `${v === 'DENIED' ? 'DENY' : 'ACCEPT'} — "${noteOf(s.key)}"`}`; }).join('\n');
+        if (!confirm(`Decide ${todo.length} dispute${todo.length === 1 ? '' : 's'}${submitToo.checked ? ' and submit the ones left with nothing undecided' : ''}, in ${mode.toUpperCase()} mode?\n\n${plan}`)) return;
         go.disabled = cancel.disabled = true;
         bar.hidden = false;
         const results = [];
@@ -5211,12 +5264,16 @@
         for (const x of todo) {
           msg.textContent = `${submitToo.checked ? 'Deciding and submitting' : 'Deciding'} ${++n} of ${todo.length}…`;
           try {
-            await decideDispute(x.d.id, x.d.organizationId, x.claims.map(c => ({ claimId: c.id, verdict: verdict.value, note: text, adjusted: null })));
+            const decisions = x.slots.filter(s => chosen(s.key).verdict !== 'SKIP')
+              .map(s => ({ claimId: s.c.id, verdict: chosen(s.key).verdict, note: noteOf(s.key), adjusted: null }));
+            if (decisions.length) await decideDispute(x.d.id, x.d.organizationId, decisions);
             const back = await fetchDispute(x.d.id, x.d.organizationId);
-            const undecided = (back?.items || []).flatMap(it => it.claims || []).filter(c => c.decision?.verdict !== verdict.value);
-            if (undecided.length) throw new Error(`${undecided.length} claim${undecided.length === 1 ? '' : 's'} didn't take the decision`);
-            if (submitToo.checked) results.push({ ref: x.r.ref, url: x.r.url, ...(await submitDispute(x.d.id, x.d.organizationId)) });
-            else results.push({ ref: x.r.ref, url: x.r.url, ok: true, note: '' });
+            const backClaims = (back?.items || []).flatMap(it => it.claims || []);
+            const missed = decisions.filter(dc => backClaims.find(c => c.id === dc.claimId)?.decision?.verdict !== dc.verdict);
+            if (missed.length) throw new Error(`${missed.length} claim${missed.length === 1 ? '' : 's'} didn't take the decision`);
+            const open = backClaims.filter(c => !VERDICT_LABELS[c.decision?.verdict]).length;
+            if (submitToo.checked && !open) results.push({ ref: x.r.ref, url: x.r.url, ...(await submitDispute(x.d.id, x.d.organizationId)) });
+            else results.push({ ref: x.r.ref, url: x.r.url, ok: true, note: open ? `decided; not submitted: ${open} claim${open === 1 ? '' : 's'} still undecided` : '' });
           } catch (e) { results.push({ ref: x.r.ref, url: x.r.url, ok: false, error: e.message }); }
           bar.firstChild.style.width = `${Math.round(n / todo.length * 100)}%`;
         }
