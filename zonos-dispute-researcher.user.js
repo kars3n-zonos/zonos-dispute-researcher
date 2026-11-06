@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.71.0
+// @version      7.72.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -7105,6 +7105,15 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     const ccBtn = h('button', { class: 'primary', type: 'button', text: 'Research in Claude Code', title: 'Puts this research in the Google Sheet for Claude Code. Its answer comes back here and in the case doc by itself.', onclick: () => run(sendToClaudeCode) });
     const openBtn = h('button', { class: 'secondary', type: 'button', text: 'Open in claude.ai', onclick: () => run(handoff) });
     const copyBtn = h('button', { class: 'secondary', type: 'button', text: 'Copy prompt', onclick: () => run(copyPrompt) });
+    // Search Slack & Front, beside the research buttons once it's turned on (access code and webhook saved)
+    const slackBtn = h('button', { class: 'secondary', type: 'button', text: 'Search Slack & Front', hidden: true,
+      title: "Sends this page's merchant and dispute to the Slack workflow, which looks for related Slack threads and Front conversations. To check or change the details first, use Settings > Search Slack & Front.",
+      onclick: async () => {
+        slackBtn.disabled = true;
+        setStatus('Sending to Slack…');
+        try { const r = await ssPost(ssFacts()); setStatus(r.text, r.ok ? 'ok' : 'err'); } catch (e) { setStatus(e.message, 'err'); } finally { slackBtn.disabled = false; }
+      } });
+    const slackSearchOn = () => batchUnlocked() && !!cfg().slackSearchUrl;
     // A bubble you can drag anywhere (where you leave it is remembered); a click without a drag opens Tools
     const BUBBLE_KEY = 'zt:bubble';
     const launch = h('button', { class: 'launch', type: 'button', title: 'Tools: Classify, Quote, research and Entry Assistant. Drag to move; \\ to toggle.', 'aria-label': 'Open Tools', hidden: true,
@@ -7451,7 +7460,8 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       ssUrlInput.value = '';
       ssUrlInput.placeholder = cfg().slackSearchUrl ? 'Saved (paste a new one to replace it)' : 'Slack workflow webhook (https://hooks.slack.com/triggers/…)';
       ssInputs.callback_url.value = cfg().slackSearchCallback || '';
-      say(ssSetupNote, cfg().slackSearchUrl ? 'Saved on this computer.' : 'Saved. Add the webhook to turn on Send.', cfg().slackSearchUrl ? 'ok' : '');
+      say(ssSetupNote, cfg().slackSearchUrl ? 'Saved on this computer. The Research tab now has a Search Slack & Front button.' : 'Saved. Add the webhook to turn on Send.', cfg().slackSearchUrl ? 'ok' : '');
+      refreshTools();
     };
     // What the page shows: the Research tab's reading of it when that's this page, otherwise read now
     function ssFacts() {
@@ -7492,19 +7502,24 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       for (const [k] of SS_FIELDS) ssInputs[k].value = f[k] || '';
       say(ssNote, f.merchant_name || f.tracking_number || f.dispute_id ? 'Filled from this page. Check it, fix anything that\'s off, then Send.' : 'Nothing found on this page. Open a dispute or work order (or type the details), then Send.');
     };
-    const ssSend = async () => {
-      if (!batchUnlocked()) { say(ssNote, 'Unlock with the access code first.', 'err'); return; }
+    // Posts the details to the workflow (every field, as text, which is what it wants); { ok, text } says how it went
+    async function ssPost(facts) {
+      if (!batchUnlocked()) return { ok: false, text: 'Search Slack & Front needs the access code (Settings).' };
       const url = cfg().slackSearchUrl;
-      if (!url) { say(ssNote, 'Add the Slack workflow webhook above first.', 'err'); return; }
-      const payload = Object.fromEntries(SS_FIELDS.map(([k]) => [k, clean(ssInputs[k].value)]));   // the workflow wants every field, as text
-      if (!payload.merchant_name && !payload.tracking_number && !payload.order_number && !payload.dispute_id) { say(ssNote, 'Give it at least a merchant, tracking number, order or dispute id.', 'err'); return; }
+      if (!url) return { ok: false, text: 'Add the Slack workflow webhook in Settings > Search Slack & Front first.' };
+      const payload = Object.fromEntries(SS_FIELDS.map(([k]) => [k, clean(facts[k] || '')]));
+      if (!payload.merchant_name && !payload.tracking_number && !payload.order_number && !payload.dispute_id) return { ok: false, text: 'Nothing to search for: no merchant, tracking number, order or dispute id on this page.' };
+      const r = await gmRequest({ method: 'POST', url, headers: { 'Content-Type': 'application/json' }, data: JSON.stringify(payload) });
+      let body = null;
+      try { body = JSON.parse(r.responseText); } catch { /* not JSON */ }
+      if (r.status >= 200 && r.status < 300 && body?.ok !== false) return { ok: true, text: `Sent to Slack (${new Date().toLocaleTimeString()}). The workflow posts what it finds in Slack.` };
+      return { ok: false, text: `Slack didn't take it (${r.status}${body?.error ? `: ${body.error}` : ''}).` };
+    }
+    const ssSend = async () => {
       say(ssNote, 'Sending…');
       try {
-        const r = await gmRequest({ method: 'POST', url, headers: { 'Content-Type': 'application/json' }, data: JSON.stringify(payload) });
-        let body = null;
-        try { body = JSON.parse(r.responseText); } catch { /* not JSON */ }
-        if (r.status >= 200 && r.status < 300 && body?.ok !== false) say(ssNote, `Sent to Slack (${new Date().toLocaleTimeString()}). The workflow posts what it finds in Slack.`, 'ok');
-        else say(ssNote, `Slack didn't take it (${r.status}${body?.error ? `: ${body.error}` : ''}).`, 'err');
+        const r = await ssPost(Object.fromEntries(SS_FIELDS.map(([k]) => [k, ssInputs[k].value])));
+        say(ssNote, r.text, r.ok ? 'ok' : 'err');
       } catch (err) { say(ssNote, err.message, 'err'); }
     };
     const slackSearchGroup = group('Search Slack & Front', 'Sends this page\'s merchant and dispute to the Slack workflow, which looks for related Slack threads and Front conversations. Opening this fills the details from the page; check them, then press Send. Only on computers unlocked with the access code.',
@@ -7585,6 +7600,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (hash !== BATCH_CODE_SHA) { say(codeNote, "That code isn't right.", 'err'); return; }
       GM_setValue(BATCH_UNLOCK_KEY, hash);
       showLocked();
+      refreshTools();
     }
     function lock() {
       GM_deleteValue(BATCH_UNLOCK_KEY);
@@ -7592,6 +7608,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (bulk.job()) bulk.pause(true);
       queueCtl?.refreshView();
       showLocked();
+      refreshTools();
       say(codeNote, 'Locked. Bulk actions, stacking, Research all and Batch work are off again (a research run going is paused).');
     }
 
@@ -8345,6 +8362,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       // what); otherwise claude.ai leads
       ccBtn.hidden = !desk.researchOn() && !cfg().routineId && !cfg().routineToken;
       openBtn.className = ccBtn.hidden ? 'primary' : 'secondary';
+      slackBtn.hidden = !slackSearchOn();
     }
 
     // ---- the panel's own options, at the top of Settings (the cog), out of the way of the tabs
@@ -8420,7 +8438,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       analytics: h('section', { class: 'view', hidden: true }, analyticsBody),
       dispute: h('section', { class: 'view' }, body, researchIdle,
         researchFooter = h('footer', {},
-          h('div', { class: 'actions', style: 'flex-wrap:wrap' }, ccBtn, openBtn),
+          h('div', { class: 'actions', style: 'flex-wrap:wrap' }, ccBtn, openBtn, slackBtn),
           status)),
       doc: h('section', { class: 'view', hidden: true },
         h('div', { class: 'entry-bar' }, h('span', { class: 'entry-caption', text: 'Case doc: answers, decisions and notes' }), docLink),
