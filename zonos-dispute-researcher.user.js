@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.73.0
+// @version      7.73.1
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3353,7 +3353,7 @@
         try {
           r = await gmRequest({
             method: 'POST', url: `https://api.anthropic.com/v1/claude_code/routines/${routine.id}/fire`, timeout: 30000,
-            headers: { Authorization: `Bearer ${routine.token}`, 'anthropic-version': '2026-10-21', 'Content-Type': 'application/json' },
+            headers: { Authorization: `Bearer ${routine.token}`, 'anthropic-version': '2026-10-21', 'anthropic-beta': 'experimental-cc-routine-2026-04-01', 'Content-Type': 'application/json' },
             data: JSON.stringify({ text }),
           });
         } catch (e) { return { fireError: e.message }; }
@@ -3369,7 +3369,10 @@
           if (openTab) GM_openInTab(j.claude_code_session_url, { active: true, insert: true });   // watch the research as it runs
           return { session: j.claude_code_session_url };
         }
-        return { fireError: `the routine answered ${r.status}` };
+        // Anthropic's own reason, so a refusal says why (e.g. "invalid_request_error: …"), with the routine it came from
+        const why = clean(j?.error?.message || j?.message || (typeof j?.error === 'string' ? j.error : '') || (!j ? String(r.responseText || '').slice(0, 200) : '')).slice(0, 300);
+        const type = j?.error?.type ? `${j.error.type}: ` : '';
+        return { fireError: `the routine ${routine.id.slice(0, 14)}… answered ${r.status}${why ? ` (${type}${why})` : ''}` };
       } catch (e) { return { fireError: e.message }; }
     }
 
