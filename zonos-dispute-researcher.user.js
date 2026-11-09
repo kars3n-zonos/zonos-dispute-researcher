@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.78.0
+// @version      7.79.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1507,19 +1507,20 @@
 
   // What to show for a code clicked on the dashboard: both of the line's codes when the merchant claims
   // a different one and the clicked code is either of them, otherwise just the clicked code
-  function clickedCodeTarget(button) {
+  // (`read` can hand over the order already read from the page: { wo } or { d })
+  function clickedCodeTarget(button, read = {}) {
     const code = codeOfButton(button);
     if (!code) return null;
     // A queue order: an HS code review's flagged code opens next to GreenLight's suggestion or the
     // correction typed in; any other code opens alone, for the origin on its row
     if (WORK_ORDER_PATH.test(location.pathname)) {
-      const wo = readWorkOrder();
+      const wo = 'wo' in read ? read.wo : readWorkOrder();
       if (wo?.pair.length && wo.pair.some(c => sameCode(c, code))) return { codes: wo.pair, from: wo.pairFrom };
       const found = wo?.codes.find(c => sameCode(c.code, code));
       return { codes: [code], from: isChapter99(code) ? '' : found?.from || '' };
     }
     const main = document.querySelector('main');
-    const d = main && extractDispute();
+    const d = 'd' in read ? read.d : main && extractDispute();
     const items = d?.items || [];
     const allHeaders = main ? lineHeaders(main) : [];
     const header = allHeaders.find(hd => itemBox(hd, main).contains(button));
@@ -1528,6 +1529,30 @@
     const { codes = [], from = '' } = item ? lineCodes(item) : {};
     const pair = codes.length === 2 && codes.some(c => sameCode(c, code));
     return { codes: pair ? codes : [code], from: isChapter99(code) ? '' : from };
+  }
+
+  // Every Entry Assistant page the open order leads to, most likely first and each once: an HS code review's pair,
+  // then what a click on each code on the page opens, then the codes the Tools links offer. The order is read once.
+  function pageEntryTargets() {
+    const out = [];
+    const seen = new Set();
+    const add = t => {
+      if (!t?.codes?.length) return;
+      const url = entryLink(t, true);
+      if (!seen.has(url)) { seen.add(url); out.push(t); }
+    };
+    const buttons = [...document.querySelectorAll('button[title="Look up in the HTS"]')];
+    if (WORK_ORDER_PATH.test(location.pathname)) {
+      const wo = readWorkOrder();
+      if (wo?.pair.length === 2) add({ codes: wo.pair, from: wo.pairFrom });
+      for (const b of buttons) add(clickedCodeTarget(b, { wo }));
+      for (const c of wo?.codes.slice(0, 4) || []) add({ codes: [c.code], from: c.from });
+    } else if (DISPUTE_PATH.test(location.pathname)) {
+      const d = document.querySelector('main') ? extractDispute() : null;
+      for (const b of buttons) add(clickedCodeTarget(b, { d }));
+      for (const item of d?.items || []) add(lineCodes(item));
+    }
+    return out;
   }
 
   /* ------------------------------------------------- dashboard: the prompt */
@@ -5915,6 +5940,7 @@
   }
   const LIST_LINKS_KEY = 'zt:listLinks';     // "Listed on" opens the official list (Settings)
   const ENTRY_CLICKS_KEY = 'zt:entryClicks'; // a code clicked on the page opens Entry Assistant in Tools (Settings)
+  const ENTRY_AHEAD_KEY = 'zt:entryAhead';   // the open order's codes load in Entry Assistant ahead of time (Settings, on unless turned off)
   function fixListLinks() {
     if (!/DENIED_PARTY_REVIEW/.test(location.pathname)) return;
     if (!GM_getValue(LIST_LINKS_KEY, false)) {   // turned off: the portal's Google links come back
@@ -7123,6 +7149,14 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     .entry-caption { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .entry-bar a { flex: none; font-size: 12px; }
     .entry-frame { flex: 1; display: block; width: 100%; min-height: 0; border: 0; background: var(--bg); }
+    /* The Entry Assistant frames, the one showing and those loaded ahead, stacked in one slot */
+    .entry-slot { flex: 1; position: relative; min-height: 0; }
+    .entry-slot > .entry-frame { position: absolute; inset: 0; height: 100%; }
+    .entry-frame.ahead { visibility: hidden; }
+    /* Kept laid out while out of sight, so a frame loaded ahead gets its real size (at 0x0 the site leaves its HTS table
+       scrolled to the top, not to the code): the closed panel sits off-screen, and the Entry Assistant tab under the one showing */
+    .panel[hidden] { display: flex !important; visibility: hidden; transform: translateX(-300vw); pointer-events: none; }
+    .view.keep[hidden] { display: flex !important; position: absolute; left: 0; right: 0; bottom: 0; top: var(--view-top, 0px); visibility: hidden; pointer-events: none; }
     .entry-blocked { padding: 16px; }
     .entry-blocked p { margin: 0 0 12px; }
     a.primary, a.secondary { display: inline-block; text-decoration: none; }
@@ -8004,14 +8038,42 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       h('p', { class: 'fine', text: "Clicking a code on the page opens it in the Entry Assistant tab once that site allows being shown here (Alt-click for the portal's References). Claude never sends anything until you press Enter there." }),
       h('p', { class: 'fine', text: 'Floating, drag the window\'s header to move it and any edge or corner to resize it; double-click its ⠿ handle to put it back beside the button at its usual size, just wide enough for Entry Assistant\'s full HTS table. Side by side, drag the panel\'s edge to make it wider or narrower; double-click the edge for the default width.' }));
 
-    // The Entry Assistant site, in a frame that's kept while you switch tabs. The sandbox keeps it in its box: even if
-    // that site were broken into, it can't move this tab to another page, open dialogs over the dashboard or download
-    // files. It keeps its own storage and calls to its server (it's another site, so allow-same-origin can't reach the
-    // dashboard), its forms and its links out in new tabs.
+    // The Entry Assistant site, in frames that are kept while you switch tabs: the one showing, and one loaded ahead for
+    // each code on the open order (loadEntryAhead), so a code opens at once. They're stacked in one slot, and the ones
+    // not showing are invisible but laid out at full size. The sandbox keeps each in its box: even if that site were
+    // broken into, it can't move this tab to another page, open dialogs over the dashboard or download files. It keeps
+    // its own storage and calls to its server (it's another site, so allow-same-origin can't reach the dashboard), its
+    // forms and its links out in new tabs.
     const entryCaption = h('span', { class: 'entry-caption' });
     const entryNewTab = h('a', { target: '_blank', rel: 'noreferrer', text: 'Open in a new tab ↗' });
-    const entryFrame = h('iframe', { class: 'entry-frame', title: 'Entry Assistant', referrerpolicy: 'no-referrer', allow: 'clipboard-write',
-      sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox', hidden: true });
+    const entrySlot = h('div', { class: 'entry-slot' });
+    const ENTRY_FRAMES_MAX = 6;   // frames kept at once
+    const ENTRY_AHEAD_MAX = 4;    // of them, loaded ahead for the open order
+    const entryFrames = new Map();   // address -> frame, oldest first
+    let entryShown = null;           // the frame showing in the tab
+    let entryAhead = [];             // the open order's pages, loaded ahead, most likely first
+    function entryFrameFor(url) {
+      let f = entryFrames.get(url);
+      if (f) return f;
+      f = h('iframe', { class: 'entry-frame ahead', title: 'Entry Assistant', referrerpolicy: 'no-referrer', allow: 'clipboard-write',
+        sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox' });
+      f.setAttribute('src', url);
+      entryFrames.set(url, f);
+      entrySlot.append(f);
+      // Over the limit, the oldest goes: one opened by hand before one loaded ahead, and never the one showing
+      const ahead = new Set(entryAhead.map(t => entryLink(t, true)));
+      while (entryFrames.size > ENTRY_FRAMES_MAX) {
+        const spare = [...entryFrames.keys()].filter(u => u !== url && entryFrames.get(u) !== entryShown);
+        const gone = spare.find(u => !ahead.has(u)) ?? spare[0];
+        if (!gone) break;
+        dropEntryFrame(gone);
+      }
+      return f;
+    }
+    function dropEntryFrame(url) {
+      entryFrames.get(url)?.remove();
+      entryFrames.delete(url);
+    }
     const entryBlockedLink = h('a', { class: 'primary', target: '_blank', rel: 'noreferrer', text: 'Open Entry Assistant ↗' });
     const entryBlocked = h('div', { class: 'entry-blocked', hidden: true },
       h('p', { text: "The Entry Assistant site doesn't allow being shown inside the dashboard yet, so it opens in its own tab for now." }),
@@ -8690,6 +8752,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       check("Hide the portal's own Classify / Quote rail", GM_getValue(HIDE_RAIL_KEY, false), on => { GM_setValue(HIDE_RAIL_KEY, on); refreshTools(); }),
       check('Denied-party reviews: "Listed on" opens the official list (and copies the name) instead of a Google search', GM_getValue(LIST_LINKS_KEY, false), on => { GM_setValue(LIST_LINKS_KEY, on); fixListLinks(); }),
       check("Clicking an HS code on the page opens it in the Entry Assistant tab (off: the portal's own References window)", GM_getValue(ENTRY_CLICKS_KEY, false), on => GM_setValue(ENTRY_CLICKS_KEY, on)),
+      check("Load each order's HS codes in Entry Assistant in the background, so they open at once (up to 4 per order)", GM_getValue(ENTRY_AHEAD_KEY, true), on => { GM_setValue(ENTRY_AHEAD_KEY, on); if (on) loadEntryAhead(); }),
       check('Questionnaire disputes: show what each "Disputed program" is, with its questions and answers', GM_getValue(PROGRAMS_KEY, false), on => { GM_setValue(PROGRAMS_KEY, on); showPrograms(); }),
       h('details', { class: 'docs', style: 'margin-top:6px' }, h('summary', { text: 'Keyboard shortcuts' }),
         h('div', { class: 'keys', style: 'margin-top:6px' },
@@ -8755,9 +8818,9 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         h('div', { class: 'entry-bar' }, h('span', { class: 'entry-caption', text: 'Case doc: answers, decisions and notes' }), docLink),
         docFrame,
         h('footer', {}, docNote, h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'secondary', type: 'button', text: 'Add note', onclick: () => addDocNote() })), docNoteStatus)),
-      entry: h('section', { class: 'view', hidden: true },
+      entry: h('section', { class: 'view keep', hidden: true },
         h('div', { class: 'entry-bar' }, entryCaption, entryNewTab),
-        entryBlocked, entryFrame),
+        entryBlocked, entrySlot),
       settings: h('section', { class: 'view', hidden: true }, settingsBody),
     };
     const tab = (name, text) => h('button', { class: 'tab', type: 'button', role: 'tab', 'aria-selected': 'false', text, onclick: () => setView(name) });
@@ -8787,6 +8850,13 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       toolstrip,
       views.dispute, views.doc, views.classify, views.quote, views.analytics, views.entry, views.settings);
     root.append(h('style', { text: PANEL_CSS }), h('div', { class: 'wrap' }, launch, panel));
+    // Where the tabs' pages start, under the header and the order strip: the Entry Assistant tab is kept laid out
+    // there while another tab shows. Kept up to date as they change size, and measured right before frames load
+    // ahead (an observer only runs while the browser tab is painting, and an order can open in a background tab).
+    const syncViewTop = () => panel.style.setProperty('--view-top', `${header.offsetHeight + (toolstrip.hidden ? 0 : toolstrip.offsetHeight)}px`);
+    const viewTop = new ResizeObserver(syncViewTop);
+    viewTop.observe(header);
+    viewTop.observe(toolstrip);
 
     let view = 'dispute';
     let drawQueued = 0;          // a Research redraw waiting for the next frame (see render)
@@ -8839,18 +8909,54 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       setView('entry');
       open();
     }
+    // The code picked (on the page or in Tools); with none picked, the open order's first code
     async function showEntryPage() {
-      const t = entryTarget || {};
+      let t = entryTarget || entryAhead[0];
+      if (!t && isCasePage()) { try { t = pageEntryTargets()[0]; } catch { /* the page isn't read yet: the search page */ } }
+      t = t || {};
       const [a, b] = t.codes || [];
       entryCaption.textContent = !a ? 'Look up and compare HTS codes, notes, rulings and more.'
         : `${b ? `Comparing ${a} with ${b}` : a}${t.from ? ` · made in ${regionName(t.from)}` : ''}`;
       entryNewTab.href = entryBlockedLink.href = entryLink(t);
       const ok = await entryFrameable();
-      entryFrame.hidden = !ok;
+      entrySlot.hidden = !ok;
       entryBlocked.hidden = ok;
       entryNewTab.hidden = !ok;
-      const url = entryLink(t, true);
-      if (ok && entryFrame.getAttribute('src') !== url) entryFrame.setAttribute('src', url);
+      entryShown = ok ? entryFrameFor(entryLink(t, true)) : null;
+      for (const f of entryFrames.values()) f.classList.toggle('ahead', f !== entryShown);
+    }
+
+    // On each order, the Entry Assistant pages its codes lead to (clicking a code on the page, or a Tools link) load
+    // ahead of time, hidden, once the codes have settled on the page, so they open at once. The last order's frames go,
+    // except the one showing. Off under Settings > Panel and pages.
+    let aheadRun = 0;
+    async function loadEntryAhead() {
+      const run = ++aheadRun;
+      const path = location.pathname;
+      entryTarget = null;   // a new order: the tab shows this order's first code until another is picked
+      entryAhead = [];
+      for (const u of [...entryFrames.keys()]) if (entryFrames.get(u) !== entryShown) dropEntryFrame(u);
+      if (!isCasePage() || !GM_getValue(ENTRY_AHEAD_KEY, true)) return;
+      if (!await entryFrameable() || run !== aheadRun) return;
+      // The codes settle as the page loads (an HS code review's suggestion can come later): two reads that agree
+      let seen = '';
+      let targets = [];
+      for (const end = Date.now() + 15000; Date.now() < end;) {
+        await sleep(800);
+        if (run !== aheadRun || location.pathname !== path) return;
+        try { targets = pageEntryTargets().slice(0, ENTRY_AHEAD_MAX); } catch { targets = []; }
+        const key = targets.map(t => entryLink(t, true)).join(' ');
+        if (targets.length && key === seen) break;
+        seen = key;
+      }
+      if (!targets.length) return;
+      entryAhead = targets;
+      entrySlot.hidden = false;
+      toolstrip.hidden = false;   // an order page has the strip (as refreshTools sets it), so the frames get the height they'll show at
+      syncViewTop();
+      for (const t of targets) entryFrameFor(entryLink(t, true));
+      // The tab already open on this order with no code picked shows the first code now
+      if (view === 'entry' && !entryTarget && !panel.hidden && entryShown !== entryFrames.get(entryLink(targets[0], true))) showEntryPage();
     }
 
     // Side by side, the page is narrowed beside the panel rather than covered. The width is yours to drag
@@ -9945,6 +10051,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       step,
       open,
       showEntry,
+      loadEntryAhead,
       autoResearch,
     };
   }
@@ -10010,6 +10117,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       ui = ui || createPanel();
       const wasOpen = ui.isOpen();
       ui.reset();
+      ui.loadEntryAhead();
       ui.show();
       if (wasOpen) ui.open();
     };
