@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.77.1
+// @version      7.78.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -8002,7 +8002,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         h('div', { class: 'row', style: 'margin-top:6px' }, btn('Import', importSetup)),
         backupNote),
       h('p', { class: 'fine', text: "Clicking a code on the page opens it in the Entry Assistant tab once that site allows being shown here (Alt-click for the portal's References). Claude never sends anything until you press Enter there." }),
-      h('p', { class: 'fine', text: 'Floating, drag the window\'s header to move it and any edge or corner to resize it; double-click its ⠿ handle to put it back beside the button at its usual size. Side by side, drag the panel\'s edge to make it wider or narrower; double-click the edge for the default width.' }));
+      h('p', { class: 'fine', text: 'Floating, drag the window\'s header to move it and any edge or corner to resize it; double-click its ⠿ handle to put it back beside the button at its usual size, just wide enough for Entry Assistant\'s full HTS table. Side by side, drag the panel\'s edge to make it wider or narrower; double-click the edge for the default width.' }));
 
     // The Entry Assistant site, in a frame that's kept while you switch tabs. The sandbox keeps it in its box: even if
     // that site were broken into, it can't move this tab to another page, open dialogs over the dashboard or download
@@ -8858,21 +8858,28 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     // so a wide panel in a smaller window stays beside the page. Only a window too narrow for both gets the
     // panel over the page.
     const DEFAULT_WIDTH = 480;
+    // The floating window opens just wide enough for Entry Assistant's HTS table (frame=code) to show all seven
+    // columns with their headings and grid lines. The site stacks the table at 560 px and under, and its columns
+    // need 754 px plus the page's padding and a scrollbar, so the frame needs 840 px (measured on
+    // entry.kars3n.com, 7.78.0); the window's 1 px border on each side makes 842.
+    const FLOAT_WIDTH = 842;
     const MIN_WIDTH = 380;
     const MIN_PAGE = 640;
     const DEFAULT_HEIGHT = 820;
     const MIN_HEIGHT = 360;
     const EDGE_GAP = 12;   // the floating window keeps this far inside the browser window
-    let width = GM_getValue(PANEL_WIDTH_KEY, 0) || DEFAULT_WIDTH;
-    // The floating window's place and height, once you've moved or sized it (the width is shared with side by
-    // side). Until then it opens beside the Tools button.
+    let width = GM_getValue(PANEL_WIDTH_KEY, 0) || DEFAULT_WIDTH;   // side by side
+    // The floating window's place and size, once you've moved or sized it ({ x, y, w, h }). Until then it opens
+    // beside the Tools button at FLOAT_WIDTH. Side by side keeps its own width.
     const PANEL_BOX_KEY = 'zdr:panelBox';
     let box = GM_getValue(PANEL_BOX_KEY, null);
     // Side by side leaves the page at least MIN_PAGE wide; the floating window can be as wide as the browser window allows
-    const panelWidth = () => Math.round(Math.max(MIN_WIDTH, Math.min(width, layout === 'side' ? innerWidth - MIN_PAGE : innerWidth - 2 * EDGE_GAP, 1400)));
+    const panelWidth = () => Math.round(Math.max(MIN_WIDTH, layout === 'side'
+      ? Math.min(width, innerWidth - MIN_PAGE, 1400)
+      : Math.min(box?.w || FLOAT_WIDTH, innerWidth - 2 * EDGE_GAP, 1400)));
     const panelHeight = () => Math.round(Math.max(MIN_HEIGHT, Math.min(box?.h || DEFAULT_HEIGHT, innerHeight - 2 * EDGE_GAP)));
     const saveBox = () => {
-      box = { x: parseFloat(panel.style.left) || EDGE_GAP, y: parseFloat(panel.style.top) || EDGE_GAP, h: panelHeight() };
+      box = { x: parseFloat(panel.style.left) || EDGE_GAP, y: parseFloat(panel.style.top) || EDGE_GAP, w: panelWidth(), h: panelHeight() };
       GM_setValue(PANEL_BOX_KEY, box);
     };
     const dockStyle = h('style', { id: 'zdr-dock' });
@@ -8955,7 +8962,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
           panel.classList.add('moving');
           try { header.setPointerCapture(ev.pointerId); } catch { /* the drag still works while the pointer stays over the page */ }
         }
-        box = { x: start.left + ev.clientX - sx, y: start.top + ev.clientY - sy, h: panelHeight() };
+        box = { x: start.left + ev.clientX - sx, y: start.top + ev.clientY - sy, w: panelWidth(), h: panelHeight() };
         dock();
       };
       const done = () => {
@@ -8977,11 +8984,11 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (!d || layout === 'side') return;
       e.preventDefault();
       const r = panel.getBoundingClientRect();
-      box = { x: r.left + d[0], y: r.top + d[1], h: panelHeight() };
+      box = { x: r.left + d[0], y: r.top + d[1], w: panelWidth(), h: panelHeight() };
       dock();
       saveBox();
     });
-    handle.addEventListener('dblclick', () => { box = null; width = DEFAULT_WIDTH; GM_deleteValue(PANEL_BOX_KEY); GM_deleteValue(PANEL_WIDTH_KEY); dock(); });
+    handle.addEventListener('dblclick', () => { box = null; GM_deleteValue(PANEL_BOX_KEY); dock(); });
     // Floating: drag an edge or corner to resize the window in that direction; the opposite side stays put
     for (const [k, [dx, dy]] of Object.entries(EDGES)) {
       const el = edges[k];
@@ -8998,8 +9005,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         const move = ev => {
           const W = dx ? Math.max(MIN_WIDTH, Math.min(maxW, start.width + dx * (ev.clientX - sx))) : start.width;
           const H = dy ? Math.max(MIN_HEIGHT, Math.min(maxH, start.height + dy * (ev.clientY - sy))) : start.height;
-          width = W;
-          box = { x: dx < 0 ? start.right - W : start.left, y: dy < 0 ? start.bottom - H : start.top, h: H };
+          box = { x: dx < 0 ? start.right - W : start.left, y: dy < 0 ? start.bottom - H : start.top, w: W, h: H };
           dock();
         };
         const done = () => {
@@ -9008,8 +9014,6 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
           el.removeEventListener('pointercancel', done);
           panel.classList.remove('resizing');
           el.classList.remove('active');
-          width = panelWidth();
-          GM_setValue(PANEL_WIDTH_KEY, width);
           saveBox();
         };
         el.addEventListener('pointermove', move);
