@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.76.0
+// @version      7.77.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1438,18 +1438,20 @@
 
   /* ------------------------------------------ dashboard: Entry Assistant site */
 
-  // The Entry Assistant website, shown in the panel's second tab. Its address picks the page: one code
-  // (?code=) or two compared (?compare=current,claimed), for goods made in `from`; embed=1 asks for its
-  // compact layout. The site itself needs no token.
+  // The Entry Assistant website, shown in the panel's Entry Assistant tab. Its address picks the page: one
+  // code (?code=) or two compared (?compare=current,claimed), for goods made in `from`. Inside the panel the
+  // site's framed parts are asked for instead (frame=code or frame=compare: one slim bar in place of the site's
+  // header and menus, laid out for the frame's size), filled in with the same codes and origin; with no code,
+  // the frame starts from its search box. The site itself needs no token.
   const entrySite = () => `${entryBase()}/`;
 
-  function entryLink({ codes = [], from = '' } = {}, embed = false) {
+  function entryLink({ codes = [], from = '' } = {}, framed = false) {
     const url = new URL(entrySite());
     const [a, b] = codes;
+    if (framed) url.searchParams.set('frame', a && b ? 'compare' : 'code');
     if (a && b) url.searchParams.set('compare', `${a},${b}`);
     else if (a) url.searchParams.set('code', a);
     if (from) url.searchParams.set('from', from);
-    if (embed) url.searchParams.set('embed', '1');
     return url.href;
   }
 
@@ -7080,20 +7082,38 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     .panel { position: fixed; top: 0; right: 0; height: 100vh; width: min(var(--w, 480px), 100vw); z-index: 2147483001; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border-left: 1px solid var(--line); box-shadow: -10px 0 30px rgba(0,0,0,.3); }
     .panel.docked { box-shadow: none; }
     .panel.overlay { top: 12px; right: 12px; height: calc(100vh - 24px); width: min(var(--w, 480px), calc(100vw - 24px)); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: 0 24px 70px rgba(0,0,0,.55); }
-    .panel.resizing { user-select: none; }
-    .panel.resizing iframe { pointer-events: none; }
+    .panel.resizing, .panel.moving { user-select: none; }
+    .panel.resizing iframe, .panel.moving iframe { pointer-events: none; }
     [hidden] { display: none !important; }
     .grip { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 2; }
-    .panel.grip-right .grip { left: auto; right: -4px; }
+    .panel.overlay .grip { display: none; }
     .grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; }
     .grip:hover::after, .grip:focus-visible::after, .resizing .grip::after { background: var(--accent); }
     .grip:focus-visible { outline: none; }
-    header { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; padding: 6px 8px 0 10px; border-bottom: 1px solid var(--line); }
+    /* The floating window's edges and corners, for resizing in any direction. They sit just inside the rounded border, which clips. */
+    .edge { position: absolute; z-index: 3; display: none; }
+    .panel.overlay .edge { display: block; }
+    .edge.n, .edge.s { left: 12px; right: 12px; height: 6px; cursor: ns-resize; }
+    .edge.e, .edge.w { top: 12px; bottom: 12px; width: 6px; cursor: ew-resize; }
+    .edge.n { top: 0; } .edge.s { bottom: 0; } .edge.e { right: 0; } .edge.w { left: 0; }
+    .edge.ne, .edge.nw, .edge.se, .edge.sw { width: 14px; height: 14px; }
+    .edge.ne { top: 0; right: 0; cursor: nesw-resize; } .edge.sw { bottom: 0; left: 0; cursor: nesw-resize; }
+    .edge.nw { top: 0; left: 0; cursor: nwse-resize; } .edge.se { bottom: 0; right: 0; cursor: nwse-resize; }
+    .edge.n::after, .edge.s::after, .edge.e::after, .edge.w::after { content: ""; position: absolute; background: transparent; }
+    .edge.n::after, .edge.s::after { left: 0; right: 0; height: 2px; } .edge.n::after { top: 0; } .edge.s::after { bottom: 0; }
+    .edge.e::after, .edge.w::after { top: 0; bottom: 0; width: 2px; } .edge.e::after { right: 0; } .edge.w::after { left: 0; }
+    .edge:hover::after, .edge.active::after { background: var(--accent); }
+    header { display: flex; align-items: flex-end; justify-content: flex-start; gap: 8px; padding: 6px 8px 0 10px; border-bottom: 1px solid var(--line); }
+    .panel.overlay header { cursor: grab; touch-action: none; }
+    .panel.moving header, .panel.moving header button { cursor: grabbing; }
+    .handle { display: none; align-self: center; margin-left: -4px; padding: 2px 3px; background: none; border: 0; border-radius: 6px; color: var(--muted); font-size: 15px; line-height: 1; cursor: grab; }
+    .panel.overlay .handle { display: block; }
+    .handle:hover { color: var(--fg); background: var(--soft); }
     .tabs { display: flex; gap: 0; min-width: 0; overflow-x: auto; scrollbar-width: none; }
     .tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: 9px 7px 8px; font-weight: 600; white-space: nowrap; }
     .tab:hover { color: var(--fg); }
     .tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
-    .header-actions { display: flex; align-items: center; gap: 2px; padding-bottom: 5px; }
+    .header-actions { display: flex; align-items: center; gap: 2px; padding-bottom: 5px; margin-left: auto; }
     .icon { background: none; border: 0; color: var(--muted); font-size: 18px; line-height: 1; padding: 3px 6px; border-radius: 6px; }
     .icon:hover, .icon[aria-pressed="true"] { color: var(--fg); background: var(--soft); }
     .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -7982,7 +8002,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         h('div', { class: 'row', style: 'margin-top:6px' }, btn('Import', importSetup)),
         backupNote),
       h('p', { class: 'fine', text: "Clicking a code on the page opens it in the Entry Assistant tab once that site allows being shown here (Alt-click for the portal's References). Claude never sends anything until you press Enter there." }),
-      h('p', { class: 'fine', text: 'Drag the panel\'s left edge to make it wider or narrower; double-click the edge for the default width.' }));
+      h('p', { class: 'fine', text: 'Floating, drag the window\'s header to move it and any edge or corner to resize it; double-click its ⠿ handle to put it back beside the button at its usual size. Side by side, drag the panel\'s edge to make it wider or narrower; double-click the edge for the default width.' }));
 
     // The Entry Assistant site, in a frame that's kept while you switch tabs
     const entryCaption = h('span', { class: 'entry-caption' });
@@ -8744,15 +8764,21 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     let layout = GM_getValue(LAYOUT_KEY, 'overlay');
     const layoutBtn = h('button', { class: 'icon', type: 'button', onclick: () => { layout = layout === 'side' ? 'overlay' : 'side'; GM_setValue(LAYOUT_KEY, layout); dock(); refreshTools(); } });
     const grip = h('div', { class: 'grip', role: 'separator', tabindex: '0', 'aria-orientation': 'vertical', 'aria-label': 'Resize panel', title: 'Drag to resize. Double-click for the default width.' });
+    // The floating window: a handle to drag it by (the whole header drags too) and edges and corners to resize it
+    const handle = h('button', { class: 'handle', type: 'button', 'aria-label': 'Move the window', text: '⠿',
+      title: 'Drag to move the window (the header works too); drag an edge or corner to resize it. Double-click to put it back beside the button at its usual size. Arrow keys move it.' });
+    const EDGES = { n: [0, -1], s: [0, 1], e: [1, 0], w: [-1, 0], ne: [1, -1], nw: [-1, -1], se: [1, 1], sw: [-1, 1] };
+    const edges = Object.fromEntries(Object.keys(EDGES).map(k => [k, h('div', { class: `edge ${k}`, 'aria-hidden': 'true' })]));
+    const header = h('header', {},
+      handle,
+      h('nav', { class: 'tabs', role: 'tablist' }, tabs.dispute, tabs.doc, tabs.classify, tabs.quote, tabs.entry),
+      h('div', { class: 'header-actions' },
+        analyticsBtn,
+        layoutBtn,
+        gear,
+        h('button', { class: 'icon', type: 'button', 'aria-label': 'Close panel', title: 'Close', text: '×', onclick: () => close() })));
     const panel = h('aside', { class: 'panel', hidden: true, 'aria-label': 'Tools' },
-      grip,
-      h('header', {},
-        h('nav', { class: 'tabs', role: 'tablist' }, tabs.dispute, tabs.doc, tabs.classify, tabs.quote, tabs.entry),
-        h('div', { class: 'header-actions' },
-          analyticsBtn,
-          layoutBtn,
-          gear,
-          h('button', { class: 'icon', type: 'button', 'aria-label': 'Close panel', title: 'Close', text: '×', onclick: () => close() }))),
+      grip, Object.values(edges), header,
       toolstrip,
       views.dispute, views.doc, views.classify, views.quote, views.analytics, views.entry, views.settings);
     root.append(h('style', { text: PANEL_CSS }), h('div', { class: 'wrap' }, launch, panel));
@@ -8822,16 +8848,28 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (ok && entryFrame.getAttribute('src') !== url) entryFrame.setAttribute('src', url);
     }
 
-    // While the panel is open the page is narrowed beside it rather than covered. The width is yours to
-    // drag and is remembered, but the panel never takes so much room that the page gets narrower than
-    // MIN_PAGE, so a wide panel in a smaller window stays beside the page. Only a window too narrow for
-    // both gets the panel over the page.
+    // Side by side, the page is narrowed beside the panel rather than covered. The width is yours to drag
+    // and is remembered, but the panel never takes so much room that the page gets narrower than MIN_PAGE,
+    // so a wide panel in a smaller window stays beside the page. Only a window too narrow for both gets the
+    // panel over the page.
     const DEFAULT_WIDTH = 480;
     const MIN_WIDTH = 380;
     const MIN_PAGE = 640;
+    const DEFAULT_HEIGHT = 820;
+    const MIN_HEIGHT = 360;
+    const EDGE_GAP = 12;   // the floating window keeps this far inside the browser window
     let width = GM_getValue(PANEL_WIDTH_KEY, 0) || DEFAULT_WIDTH;
-    // Side by side leaves the page at least MIN_PAGE wide; the overlay can be as wide as the window allows
-    const panelWidth = () => Math.round(Math.max(MIN_WIDTH, Math.min(width, layout === 'side' ? innerWidth - MIN_PAGE : innerWidth - 48, 1400)));
+    // The floating window's place and height, once you've moved or sized it (the width is shared with side by
+    // side). Until then it opens beside the Tools button.
+    const PANEL_BOX_KEY = 'zdr:panelBox';
+    let box = GM_getValue(PANEL_BOX_KEY, null);
+    // Side by side leaves the page at least MIN_PAGE wide; the floating window can be as wide as the browser window allows
+    const panelWidth = () => Math.round(Math.max(MIN_WIDTH, Math.min(width, layout === 'side' ? innerWidth - MIN_PAGE : innerWidth - 2 * EDGE_GAP, 1400)));
+    const panelHeight = () => Math.round(Math.max(MIN_HEIGHT, Math.min(box?.h || DEFAULT_HEIGHT, innerHeight - 2 * EDGE_GAP)));
+    const saveBox = () => {
+      box = { x: parseFloat(panel.style.left) || EDGE_GAP, y: parseFloat(panel.style.top) || EDGE_GAP, h: panelHeight() };
+      GM_setValue(PANEL_BOX_KEY, box);
+    };
     const dockStyle = h('style', { id: 'zdr-dock' });
     function dock() {
       const w = panelWidth();
@@ -8839,24 +8877,26 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       const docked = !panel.hidden && layout === 'side' && innerWidth - w >= MIN_PAGE;
       panel.classList.toggle('docked', docked);
       panel.classList.toggle('overlay', layout !== 'side');
-      // The overlay opens beside the bubble: to its left when the bubble is on the right half of the screen,
-      // otherwise to its right, lined up with it and kept inside the window
       if (layout !== 'side') {
-        // The anchor is the sidebar button when that's the chosen launcher, otherwise the bubble
-        const a = launcherMode() === 'sidebar' && sideBtn.isConnected ? sideBtn.getBoundingClientRect()
-          : (() => { const x = parseFloat(launch.style.left) || innerWidth - 80, y = parseFloat(launch.style.top) || innerHeight - 80; return { left: x, top: y, right: x + 58, bottom: y + 58 }; })();
-        const pw = Math.min(w, innerWidth - 24);
-        const ph = Math.min(innerHeight - 24, 820);
-        const toRight = (a.left + a.right) / 2 <= innerWidth / 2;   // opens to the button's right, so it resizes from its right edge
-        const left = toRight ? a.right + 10 : a.left - 10 - pw;
-        panel.classList.toggle('grip-right', toRight);
-        panel.style.left = `${Math.round(Math.max(12, Math.min(innerWidth - pw - 12, left)))}px`;
-        panel.style.top = `${Math.round(Math.max(12, Math.min(innerHeight - ph - 12, (a.top + a.bottom) / 2 - ph / 2)))}px`;
+        // Where you last left it, kept inside the browser window. Before that, beside the button: to its left
+        // when the button is on the right half of the screen, otherwise to its right, lined up with it.
+        const pw = Math.min(w, innerWidth - 2 * EDGE_GAP);
+        const ph = panelHeight();
+        let left, top;
+        if (box) { left = box.x; top = box.y; }
+        else {
+          // The anchor is the sidebar button when that's the chosen launcher, otherwise the bubble
+          const a = launcherMode() === 'sidebar' && sideBtn.isConnected ? sideBtn.getBoundingClientRect()
+            : (() => { const x = parseFloat(launch.style.left) || innerWidth - 80, y = parseFloat(launch.style.top) || innerHeight - 80; return { left: x, top: y, right: x + 58, bottom: y + 58 }; })();
+          left = (a.left + a.right) / 2 <= innerWidth / 2 ? a.right + 10 : a.left - 10 - pw;
+          top = (a.top + a.bottom) / 2 - ph / 2;
+        }
+        panel.style.left = `${Math.round(Math.max(EDGE_GAP, Math.min(innerWidth - pw - EDGE_GAP, left)))}px`;
+        panel.style.top = `${Math.round(Math.max(EDGE_GAP, Math.min(innerHeight - ph - EDGE_GAP, top)))}px`;
         panel.style.height = `${ph}px`;
         panel.style.right = 'auto';
       } else {
         for (const k of ['left', 'top', 'height', 'right']) panel.style[k] = '';
-        panel.classList.remove('grip-right');
       }
       layoutBtn.textContent = layout === 'side' ? '⧉' : '◫';
       layoutBtn.title = layout === 'side' ? 'Float over the page (overlay)' : 'Open side by side with the page';
@@ -8866,16 +8906,13 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (!dockStyle.isConnected) (document.head || document.documentElement).append(dockStyle);
     }
     window.addEventListener('resize', () => { if (!panel.hidden) dock(); });
+    // Side by side: drag the panel's edge to change its width
     grip.addEventListener('pointerdown', e => {
       if (e.button !== 0) return;
       e.preventDefault();
       try { grip.setPointerCapture(e.pointerId); } catch { /* the drag still works while the pointer stays on the edge */ }
       panel.classList.add('resizing');
-      // The edge away from the button moves; the side by the button stays put
-      const box = panel.getBoundingClientRect();
-      const fromRight = panel.classList.contains('grip-right');
-      const edge = layout === 'side' ? innerWidth : box.right;
-      const move = ev => { width = fromRight ? ev.clientX - box.left : edge - ev.clientX; dock(); };
+      const move = ev => { width = innerWidth - ev.clientX; dock(); };
       const done = () => {
         grip.removeEventListener('pointermove', move);
         grip.removeEventListener('pointerup', done);
@@ -8898,6 +8935,83 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       width = panelWidth();
       GM_setValue(PANEL_WIDTH_KEY, width);
     });
+    // Floating: drag the header (or its ⠿ handle) to move the window. A press that doesn't move is an ordinary
+    // click on whatever is under it (a tab, an icon), so the pointer is only taken over once it has moved.
+    let movedAt = 0;
+    header.addEventListener('pointerdown', e => {
+      if (e.button !== 0 || layout === 'side') return;
+      const sx = e.clientX, sy = e.clientY;
+      const start = panel.getBoundingClientRect();
+      let moved = false;
+      const move = ev => {
+        if (!moved) {
+          if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < 5) return;
+          moved = true;
+          panel.classList.add('moving');
+          try { header.setPointerCapture(ev.pointerId); } catch { /* the drag still works while the pointer stays over the page */ }
+        }
+        box = { x: start.left + ev.clientX - sx, y: start.top + ev.clientY - sy, h: panelHeight() };
+        dock();
+      };
+      const done = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', done);
+        window.removeEventListener('pointercancel', done);
+        if (!moved) return;
+        panel.classList.remove('moving');
+        movedAt = Date.now();   // the click that ends a drag isn't a click on a tab
+        saveBox();
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', done);
+      window.addEventListener('pointercancel', done);
+    });
+    header.addEventListener('click', e => { if (Date.now() - movedAt < 400) { e.stopPropagation(); e.preventDefault(); } }, true);
+    handle.addEventListener('keydown', e => {
+      const d = { ArrowLeft: [-40, 0], ArrowRight: [40, 0], ArrowUp: [0, -40], ArrowDown: [0, 40] }[e.key];
+      if (!d || layout === 'side') return;
+      e.preventDefault();
+      const r = panel.getBoundingClientRect();
+      box = { x: r.left + d[0], y: r.top + d[1], h: panelHeight() };
+      dock();
+      saveBox();
+    });
+    handle.addEventListener('dblclick', () => { box = null; width = DEFAULT_WIDTH; GM_deleteValue(PANEL_BOX_KEY); GM_deleteValue(PANEL_WIDTH_KEY); dock(); });
+    // Floating: drag an edge or corner to resize the window in that direction; the opposite side stays put
+    for (const [k, [dx, dy]] of Object.entries(EDGES)) {
+      const el = edges[k];
+      el.addEventListener('pointerdown', e => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        try { el.setPointerCapture(e.pointerId); } catch { /* the drag still works while the pointer stays on the edge */ }
+        panel.classList.add('resizing');
+        el.classList.add('active');
+        const sx = e.clientX, sy = e.clientY;
+        const start = panel.getBoundingClientRect();
+        const maxW = Math.min(1400, dx > 0 ? innerWidth - EDGE_GAP - start.left : dx < 0 ? start.right - EDGE_GAP : start.width);
+        const maxH = dy > 0 ? innerHeight - EDGE_GAP - start.top : dy < 0 ? start.bottom - EDGE_GAP : start.height;
+        const move = ev => {
+          const W = dx ? Math.max(MIN_WIDTH, Math.min(maxW, start.width + dx * (ev.clientX - sx))) : start.width;
+          const H = dy ? Math.max(MIN_HEIGHT, Math.min(maxH, start.height + dy * (ev.clientY - sy))) : start.height;
+          width = W;
+          box = { x: dx < 0 ? start.right - W : start.left, y: dy < 0 ? start.bottom - H : start.top, h: H };
+          dock();
+        };
+        const done = () => {
+          el.removeEventListener('pointermove', move);
+          el.removeEventListener('pointerup', done);
+          el.removeEventListener('pointercancel', done);
+          panel.classList.remove('resizing');
+          el.classList.remove('active');
+          width = panelWidth();
+          GM_setValue(PANEL_WIDTH_KEY, width);
+          saveBox();
+        };
+        el.addEventListener('pointermove', move);
+        el.addEventListener('pointerup', done);
+        el.addEventListener('pointercancel', done);
+      });
+    }
 
     let state = null;
     let siteInput = null;
