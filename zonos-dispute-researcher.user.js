@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.74.0
+// @version      7.76.0
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -1727,6 +1727,173 @@
   const DP = k => P(`dispute.${k}`, DISPUTE_TEXT[k]);
   const DPL = k => PL(`dispute.${k}`, DISPUTE_TEXT[k]);
 
+  /* --------------------------------------------- the route: case type and specialist checks (claude.ai prompts) */
+
+  // The same funnel the Claude Code worker follows (kars3n-zonos/dispute-desk-cloud, worker.py route() and
+  // playbooks/): each case goes down one path (its kind of work) and picks up the specialist checks its goods and
+  // claims call for. Claude Code reads the full playbooks itself; claude.ai can't, so its prompt carries the route
+  // and each specialist's checks (editable by the team in Prompts, group "Specialist checks"). Keep the rules
+  // here in step with worker.py.
+  const SPECIALISTS = {
+    pharma: {
+      label: 'Pharmaceuticals',
+      text: [
+        '- **Code first.** The Section 232 pharmaceutical duty (headings 9903.04.60–.70, Chapter 99 U.S. note 40) reaches only the codes listed in note 40(c): finished drugs in 3002/3003/3004 and listed chapter 29 APIs. In 3004.90.92 only suffixes .01, .06, .08, .10, .11, .12, .15, .16, .17, .18, .26, .36, .43, .46, .49, .51, .52, .53, .60, .63, .67, .68, .70, .71, .73 and .76 are listed: a molecule-specific suffix outside that list (e.g. .19 metoprolol, .35 tramadol) carries no 9903.04 heading, so check the suffix matches the molecule and its use (don\'t default to the .76 basket). Not covered at all: supplements (2106.90, ch. 30 note 1(a)), hormonal contraceptives (3006.60), cosmetics (3304), excipients.',
+        '- **Name the drug exactly**: active ingredient, strength, dosage form, maker, and the authorization on the pack (a U.S. NDC / ANDA number, a Health Canada DIN, an Indian licence). Origin is where it was made; CBP has given a drug the origin of the country that made the API (ruling N361841). Origin decides 9903.04.60 vs .62/.63/.66.',
+        '- **Patented** (note 40(c)(ii)) = a valid, unexpired U.S. patent AND listed in the FDA Orange Book (Purple Book for biologics), on the entry date. Open the reference drug\'s Patent and Exclusivity page in the Orange Book (accessdata.fda.gov/scripts/cder/ob/) and list each patent and exclusivity with its expiry (a patent shown twice carries pediatric exclusivity). Desk rule: a foreign version of a drug whose U.S. product is still patented is treated as patented, so 9903.04.60 stays. That reading is unsettled (CBP hasn\'t ruled; read literally it could be .69): say the decision rests on the desk rule.',
+        '- **Generic** (note 40(c)(iii)) = FDA-approved under an ANDA, a therapeutically equivalent 505(b)(2), a 351(k) biosimilar or an authorized generic imported by a generic maker, AND off patent AND off exclusivity. The proof is that exact product\'s FDA approval (NDC Directory, Drugs@FDA). A DIN, a foreign licence or "generic" on a pharmacy site is not FDA approval: off patent but not FDA-approved files under 9903.04.69 (no extra duty), not 9903.04.67.',
+        '- **One heading only**: .60 patented, 100% in total; .62 patented and a product of Japan, the EU, South Korea, Switzerland or Liechtenstein, 15% in total; .63 UK, 0%; .64/.65 only importers Commerce has approved (never a pharmacy or consumer); .66 orphan and listed specialty drugs from listed jurisdictions (India yes, Canada no); .67 FDA generic; .68 API made in the U.S.; .69 neither patented nor generic, or not a pharmaceutical article; .70 clinical trials or R&D (not a paid retail order). Every note 40(c) line must report one 9903.04 heading, even at 0% (CBP CSMS #70054007).',
+        '- **What doesn\'t remove it**: USMCA or another FTA (note 40(b): collected on top of any special rate) and personal use (no such exclusion for mailed parcels). Patented .60–.66 lines are relieved of the note 52 country duty (9903.05.90), and headings 3003/3004 are on the note 52(b) list (9903.05.86).',
+        '- **FDA admissibility is a separate question**: personal importation is FDA discretion only (serious condition, generally a 90-day supply or less, a U.S. doctor); mailed controlled substances (opioids, benzodiazepines, stimulants, tramadol, testosterone) have no personal-use exemption (21 CFR 1301.26 covers travelers only). Mention it under Red flags unless the claim is about it.',
+        '- **Red flags**: no documents; a "Canadian pharmacy" pack made in India, Türkiye or the EU; "generic" with no NDC or ANDA; "no animal content" on a tablet with lactose or gelatin; a questionnaire naming a different drug or strength; the same claim text across many drugs; quantities over 90 days.',
+      ],
+      reply: '- **Pharma:** <drug: active ingredient, strength, form, maker> · <FDA approval: ANDA / NDA / BLA number | "not FDA-approved (Health Canada DIN …)"> · <U.S. patents: number and expiry | "none unexpired"> · <exclusivity and expiry | none> · `9903.04.<xx>` because <the deciding fact> ([Orange Book](<link>))',
+    },
+    metals: {
+      label: 'Section 232 metals',
+      text: [
+        '- **Covered only if the code is on a note 16 list** (the HTS facts\' extra duties name Section 232 steel, aluminum or copper). Outside chapters 72, 73, 74 and 76, a derivative heading applies only if the listed metal is at least **15% of the article\'s weight** (below that: 9903.82.03, no 232).',
+        '- **The duty is on the full customs value** (note 16(c)). A claim that only the metal\'s value should be dutiable asks for a rule that no longer exists.',
+        '- **What it\'s made of** comes from the listing, spec sheet and photos, not the merchant\'s word. Zinc alloy and plastics aren\'t covered metals; if the item is mostly another material, the code (and the 232 duty) may change.',
+        '- **The heading** (one only): 9903.82.02 +50% for base metals, first-tier derivatives and copper; 9903.82.09 +25% for the later derivative lists; lower headings when at least 85% of the metal was melted and poured / smelted and cast in the U.S., for UK metal (95% UK), for USMCA metal Commerce authorized; Russian aluminum 9903.85.67/.68 at +200%.',
+        '- **Proof of where the metal was melted and poured (steel) or smelted and cast (aluminum)** is a mill certificate or supplier declaration naming the country. Unknown → the costlier heading stands.',
+        '- **Stacking**: autos/parts, trucks/parts and semiconductor 232 duties replace metals 232 for their goods; metals 232 relieves the note 52 country duty (9903.05.90); USMCA doesn\'t remove it except under its own headings.',
+      ],
+      reply: '- **Section 232:** <covered | not covered> — <metal> <article | derivative> under `9903.82.<xx>`; metal <share of weight and source> (15% test <met | not met | n/a in ch. 72–76>); melted/poured or smelted/cast in <country | not shown>',
+      replyOnlyOrders: true,   // dispute replies already have their own Section 232 line
+    },
+    pga: {
+      label: 'Partner agencies (PGA)',
+      text: [
+        '- **Which agencies**: from the HTS facts\' partner agencies (an agency list means the code is flagged; a "rule" match is only a likely review) and from what the goods really are: FDA (drugs, food and supplements with Prior Notice, devices, cosmetics, tobacco and vapes), DEA (controlled substances), USDA APHIS (plants, seeds, wood, Lacey Act declarations), FSIS (meat), FWS (wildlife products, CITES species), CPSC (children\'s products and their certificates), EPA (pesticides, engines), NHTSA (vehicle equipment), FCC (radio devices), TTB (alcohol), ATF (firearms).',
+        '- **For each**: regulated (what it requires, and who supplies it), disclaim (not regulated for these goods, and why), or not admissible at all (an unapproved drug, a controlled substance by mail, a prohibited species, an unauthorized vape). Confirm on the agency\'s own .gov page.',
+        '- All FDA-regulated products are transmitted to FDA whatever their value (CBP CSMS #65581188).',
+        '- Duty and admissibility are separate: answer the one the case asks, and flag the other.',
+      ],
+      reply: '- **Agencies:** <each agency: regulated | disclaim | not applicable — what it requires or why not>',
+    },
+    classification: {
+      label: 'Classification',
+      text: [
+        '- Identify the goods from evidence first (what it is, what it does, what it\'s made of, who it\'s for), not from either side\'s description.',
+        '- GRI 1: the heading text and the section and chapter notes (they exclude and redirect); GRI 3 only when that doesn\'t settle it (most specific description, then essential character for sets and composites); GRI 6 for the subheading, then the statistical suffix, including the residual "other" lines. Parts follow section XV, XVI and XVII notes.',
+        '- Compare the candidate codes and the closest CBP rulings (CROSS); say why any ruling pointing elsewhere doesn\'t fit.',
+        '- Check what the code you land on does to the Chapter 99 duties and agency flags: a code change can switch Section 232, 301 or the pharma duty on or off.',
+      ],
+    },
+    origin: {
+      label: 'Origin and trade agreements',
+      text: [
+        '- Origin is where the goods were made or last substantially transformed, never where they were posted, sold or shipped from, and never the barcode prefix. Proof: "Made in" marks, the maker\'s own statement of where it makes the item, an invoice naming the factory, the same SKU on the maker\'s overseas listings.',
+        '- For a USMCA or other FTA claim, no certificate of origin is needed: work out whether the goods likely qualify (made there from materials that meet the rule) and ask plain questions for what\'s unproven. An FTA gives the special rate only: if the general rate is already Free it saves nothing, and Section 232 (metals, pharma) and 301 stay. Note 52 relieves only goods of Canada or Mexico entered free under USMCA (9903.05.93 / .94).',
+        '- Check the duties again for the origin you actually found.',
+      ],
+    },
+    valuation: {
+      label: 'Valuation',
+      text: [
+        '- The value is the price actually paid for this sale (invoice or receipt first, then the order page, then the listing around the order date); separately stated international freight is out; duties don\'t change it.',
+        '- A discount counts only if it was actually given on this sale. Gifts, samples and replacements still have a value. Convert currency at CBP\'s rate for the export date.',
+        '- Undervaluation signs: values far below any real price, round placeholders, the same value on every line, a total just under a threshold.',
+      ],
+    },
+    tariffs: {
+      label: 'Tariff programs (Chapter 99)',
+      text: [
+        '- Settle the code and the origin first, then read every Chapter 99 measure the HTS facts list for that origin, what doesn\'t apply and why, and the ways it may pay less.',
+        '- IEEPA tariffs (9903.01 / 9903.02) ended for entries from Feb 24, 2026 after the Supreme Court\'s Learning Resources v. Trump ruling; refunds of IEEPA duty on earlier entries go through CBP\'s CAPE tool, not a dispute. The note 52 country duties (9903.05.20–.84, since July 24, 2026), Brazil (note 50) and Canada (note 51) are separate programs and do apply.',
+        '- Section 301 China (9903.88, 9903.91) stacks on everything. Section 232 duties usually relieve the note 50/51/52 country duties.',
+        '- Personal use is carved out only for accompanied baggage, never a mailed parcel. De minimis is suspended for all countries.',
+        '- A claimed exemption or exclusion must match its exact wording, conditions and dates; the merchant naming a heading isn\'t proof.',
+      ],
+    },
+    questionnaire: {
+      label: 'Questionnaire',
+      text: [
+        '- The merchant\'s questionnaire answers are claims, not proof. Use the attached images to find the real listing (shop, title, listing number, photos), read it in full, and mark each answer matched, contradicted or unsupported.',
+        '- Hand each answer to its specialist check above (a generic-drug answer to Pharmaceuticals, a metal answer to Section 232 metals, a USMCA answer to Origin).',
+      ],
+    },
+  };
+  const SPEC_ORDER = ['pharma', 'metals', 'pga', 'classification', 'origin', 'valuation', 'tariffs', 'questionnaire'];
+  const specText = k => PL(`spec.${k}`, SPECIALISTS[k].text);
+  const PHARMA_WORDS = /pharmac|prescription|\brx\b|\btablets?\b|\bcapsules?\b|\d\s?mg\b|generic (med|drug)|medication|\bdrugs?\b|orange book|purple book|\banda\b|\bndc\b|\bdin\b|biosimilar|insulin|semaglutide|tirzepatide|ozempic|wegovy|mounjaro|section 232 pharma|9903\.04\.(6\d|70)/gi;
+  const METAL_WORDS = /section 232 (steel|alumin|copper)|\bsteel\b|alumin(i)?um|\bcopper\b|\bbrass\b|melted and poured|smelted and cast/gi;
+  const PGA_WORDS = /\bfda\b|\busda\b|aphis|\bfws\b|wildlife|\bcites\b|\bcpsc\b|\bepa\b|nhtsa|\bfcc\b|\bttb\b|\batf\b|\bdea\b|prior notice|partner (government )?agenc|\bpga\b|lacey/gi;
+  const ROUTE_FTA = /usmca|cusma|t-mec|nafta|free[\s-]*trade|\bfta\b|korus|cafta|preferential|originating/i;
+  const ROUTE_TARIFF = /section 301|\b301\b|section 338|ieepa|reciprocal|de minimis|personal use|chapter 99|exclusion|exempt/i;
+  const PGA_CHAPTERS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 30, 33, 44, 93]);
+  const PGA_HEADINGS = ['3808', '9018', '9019', '9020', '9021', '9022', '8517', '8525', '8526', '8527', '8528', '8703', '8711', '9503', '9504', '9506'];
+  const METAL_HEADINGS = ['8708', '8714', '9403', '9401', '8302', '8481', '8536', '8544'];
+  // Work-order classes that skip the commodity specialists: the page's own question decides them
+  const NO_SPECIALISTS = new Set(['DENIED_PARTY_REVIEW', 'ADCVD_REVIEW']);
+
+  // { spec: [keys], why: { key: reason } } for a body of text, the HS codes in it and the claims made
+  function specialistsFor({ text, codes, claims = [], type = '' }) {
+    const spec = [];
+    const why = {};
+    const add = (k, reason) => { if (!spec.includes(k)) spec.push(k); why[k] = why[k] || reason; };
+    const words = re => [...new Set((text.match(re) || []).map(w => w.toLowerCase()))];
+    const digits = codes.map(digitsOf).filter(c => c.length >= 4);
+    const real = digits.filter(c => !c.startsWith('99'));
+    const ch99 = digits.filter(c => c.startsWith('99'));
+    const fields = claims.map(c => c.field || '');
+    const reasons = claims.map(c => c.reason || '').join(' ');
+    if (!NO_SPECIALISTS.has(type)) {
+      const pharmaCodes = real.filter(c => c.startsWith('30') || ['2936', '2937', '2939', '2941', '2942'].includes(c.slice(0, 4)));
+      const pw = words(PHARMA_WORDS);
+      if (pharmaCodes.length || ch99.some(c => /^990304(6|70)/.test(c)) || pw.length >= 2) add('pharma', pharmaCodes.length ? 'a chapter 30 drug code' : `the goods read as a drug (${pw.slice(0, 3).join(', ')})`);
+      const metalCodes = real.filter(c => ['72', '73', '74', '76'].includes(c.slice(0, 2)) || METAL_HEADINGS.includes(c.slice(0, 4)));
+      if (metalCodes.length || ch99.some(c => /^99038[25]/.test(c)) || (words(METAL_WORDS).length && /232/.test(text) && !spec.includes('pharma'))) add('metals', metalCodes.length ? 'a steel, aluminum or copper code' : 'Section 232 metal duties come up');
+      const pgaCodes = real.filter(c => PGA_CHAPTERS.has(+c.slice(0, 2)) || PGA_HEADINGS.includes(c.slice(0, 4)));
+      const gw = words(PGA_WORDS);
+      if (pgaCodes.length || spec.includes('pharma') || gw.length >= 2 || (gw.length && /HOLD|EXAM|SUBMISSION|REJECTED/.test(type))) add('pga', pgaCodes.length ? 'a code agencies regulate' : 'a partner agency comes up');
+    }
+    if (type === 'HS_CODE_REVIEW' || fields.some(f => /hs code|description/i.test(f)) || (!type && !claims.length)) add('classification', 'the code or description is in question');
+    if (fields.some(f => /origin|country/i.test(f)) || ROUTE_FTA.test(reasons)) add('origin', 'origin or a trade agreement is claimed');
+    if (type === 'VALUE_REVIEW' || fields.some(f => /value/i.test(f))) add('valuation', 'the value is in question');
+    if (fields.some(f => /tariff|exempt|exclusion|chapter 99|301|232/i.test(f)) || ROUTE_TARIFF.test(reasons) || ch99.some(c => /^9903(88|91|92|01|02|03|05|06|74|76|79|94|08)/.test(c))) add('tariffs', 'a tariff program or exemption is claimed or applies');
+    if (fields.some(f => /questionnaire/i.test(f))) add('questionnaire', 'a questionnaire claim');
+    spec.sort((a, b) => SPEC_ORDER.indexOf(a) - SPEC_ORDER.indexOf(b));
+    return { spec, why };
+  }
+  const factCodeText = facts => (facts?.codes || []).map(c => `${c.code || c.asked || ''} ${c.extra || ''}`).join('\n');
+  // One disputed line's route (its reply block gets the specialists' lines)
+  function itemRoute(item, facts) {
+    const codes = item.fields.filter(f => /^hs code$/i.test(f.label)).flatMap(f => [f.current, f.claimed]).map(hsCodeIn).filter(Boolean);
+    const claims = claimsOf(item);
+    const text = [item.title, ...item.fields.map(f => `${f.label}: ${f.current || ''} ${f.claimed || ''}`), ...claims.map(c => `${c.field}: ${c.reason || ''}`), factCodeText(facts)].join('\n');
+    return specialistsFor({ text, codes: [...codes, ...(facts?.codes || []).map(c => c.code || '')], claims });
+  }
+  // The whole case's route: { path, spec, why }
+  function caseRoute(d, s) {
+    const facts = Object.values(s.facts || {}).map(f => f.data).filter(Boolean);
+    if (d.kind === 'workOrder') {
+      const text = [d.question, d.summary, ...(d.lines || []), ...facts.map(factCodeText)].join('\n');
+      const r = specialistsFor({ text, codes: [...(d.codes || []).map(c => c.code), ...facts.flatMap(f => (f.codes || []).map(c => c.code || ''))], type: d.type });
+      return { path: guideFor(d.type).label, ...r };
+    }
+    const items = d.items.filter(i => i.inDispute);
+    const spec = [];
+    const why = {};
+    for (const item of items) {
+      const r = itemRoute(item, s.facts?.[item.line]?.data);
+      for (const k of r.spec) { if (!spec.includes(k)) spec.push(k); why[k] = why[k] || r.why[k]; }
+    }
+    spec.sort((a, b) => SPEC_ORDER.indexOf(a) - SPEC_ORDER.indexOf(b));
+    return { path: 'Duty dispute', spec, why };
+  }
+  const routeHeadline = r => `**Case type:** ${r.path}${r.spec.length ? ` → ${r.spec.map(k => SPECIALISTS[k].label).join(' · ')}` : ''}`;
+  // The specialist sections, for claude.ai prompts
+  function routeLines(r) {
+    if (!r.spec.length) return [];
+    const L = ['', '## Specialist checks for this case', `This case goes down the ${r.path.toLowerCase()} path with these specialist checks, picked from its goods and claims: ${r.spec.map(k => `${SPECIALISTS[k].label} (${r.why[k]})`).join('; ')}. Work every check below as part of "How to research", for each line it applies to; if one plainly doesn't fit the goods, say so in a few words and skip it.`];
+    for (const k of r.spec) L.push('', `### ${SPECIALISTS[k].label}`, ...specText(k));
+    return L;
+  }
+  // The specialists' lines for the reply's "What we found"
+  const routeReply = (spec, { orders = false } = {}) => spec.filter(k => SPECIALISTS[k].reply && (orders || !SPECIALISTS[k].replyOnlyOrders)).map(k => SPECIALISTS[k].reply);
+
   // forClaudeAi: the prompt goes to claude.ai (Open in claude.ai, Copy prompt), so it gets the .gov-only rule
   function buildPrompt(d, s, attachedNames, forClaudeAi = false) {
     const L = [];
@@ -1741,8 +1908,10 @@
     const kinds = items.map(i => disputeKinds(i, s.facts?.[i.line]?.data));
     const any232 = kinds.some(k => k.s232);
     const productClaim = about(PRODUCT_CLAIM) || any232;
+    const route = caseRoute(d, s);
 
     L.push(DP('brief'));
+    if (forClaudeAi) L.push('', routeHeadline(route));
     L.push('', 'How I handle disputes:', ...DPL('rules'));
     L.push('', DP('researchFirst'));
     if (forClaudeAi) L.push('', DP('govOnly'));
@@ -1852,12 +2021,14 @@
       productClaim && !about(/hs code/i) && DP('rulings'),
       about(/qty|quantity|weight/i) && DP('qtyWeight'),
       platformUnknown && DP('platform'),
+      forClaudeAi && route.spec.length > 0 && 'Work through every check under "Specialist checks for this case" above, for each line it applies to, and fill in the reply line each one has.',
       DP('redFlags'),
       DP('skill'),
       hasCalc && DP('calculator'),
       judgeStep,
     ].filter(Boolean);
     L.push(...programLines());
+    if (forClaudeAi) L.push(...routeLines(route));
     L.push('', '## How to research', ...steps.map((step, i) => `${i + 1}. ${step}`));
     L.push('', ...DPL('closing'));
 
@@ -1963,6 +2134,7 @@
       (k.hs || k.description) && '- **Closest rulings:** <ruling numbers, what they cover, which match and why any others don\'t>',
       k.s232 && "- **Section 232:** <proven | not proven> — <the metal and its share, the countries where it was smelted and cast, and the heading>",
       k.tariff && "- **Tariff provision:** <applies | does not apply | can't tell> — <whether the item meets the terms of the heading or exclusion they name>",
+      ...routeReply(itemRoute(item, facts).spec),
       k.value && `- **Value:** price paid <amount> per <the invoice | receipt | listing> vs declared ${declared}`,
       k.weight && '- **Weight:** <weight per the invoice, listing or shipping documents> vs the claimed weight',
       k.quantity && '- **Quantity:** <quantity per the invoice, order or listing> vs the claimed quantity',
@@ -2575,6 +2747,8 @@
       const name = type === 'DUTY_DISPUTE' ? 'Duty dispute' : type === 'other' ? 'Any other order' : guideFor(type).label;
       add(`final.${type}`, F, name, text, `How the one-sentence Final answer is worded (${name}). It follows "written as".`);
     }
+    const S = 'Specialist checks';
+    for (const k of SPEC_ORDER) add(`spec.${k}`, S, SPECIALISTS[k].label, SPECIALISTS[k].text, `The "${SPECIALISTS[k].label}" checks in claude.ai prompts (Open in claude.ai, Copy prompt), for cases the route sends there. Claude Code reads the full playbooks in dispute-desk-cloud instead.`);
     const Q = 'Entry Writer Queue';
     add('order.rules', Q, 'How I work these', ORDER_TEXT.rules, 'The rules under "How I work these:" in every queue order prompt (a class\'s own rules follow them).');
     add('order.researchFirst', Q, 'Research before you reply', ORDER_TEXT.researchFirst, 'The paragraph after the rules.');
@@ -2602,6 +2776,8 @@
     const L = [];
     // Class names read badly in a sentence ("a submission failed"), so the class is quoted
     L.push(`I'm a customs broker at Zonos working the Entry Writer Queue, on an order in the "${g.label}" class. ${g.goal} Do the fact-finding I'd otherwise do by hand, catch anything that doesn't add up, and end with a decision I can act on.`);
+    const route = caseRoute(d, s);
+    if (forClaudeAi) L.push('', routeHeadline(route));
     L.push('', 'How I work these:', ...OPL('rules'), ...(g.rules || []));
     L.push('', OP('researchFirst'));
     if (forClaudeAi) L.push('', OP('govOnly'));
@@ -2639,9 +2815,11 @@
       !d.hasShipper && /HS_CODE|VALUE|DENIED/.test(d.type) && "The shipper isn't shown (the Parties section was closed); if the goods or the party can't be pinned down without it, say so.",
       OP('skill'),
       hasCalc && OP('calculator'),
+      forClaudeAi && route.spec.length > 0 && 'Work through every check under "Specialist checks for this case" above, and fill in the reply line each one has.',
       OP('redFlags'),
       OP('decide'),
     ].filter(Boolean);
+    if (forClaudeAi) L.push(...routeLines(route));
     L.push('', '## How to research', ...steps.map((step, i) => `${i + 1}. ${step}`));
     L.push('', OP('closing'));
     // Waiting and escalating don't settle an order, so they aren't offered as the decision
@@ -2670,6 +2848,7 @@
       '',
       '**What we found**',
       ...g.found,
+      ...routeReply(route.spec, { orders: true }),
       '',
       ...calcReplyBlock(calcFacts, 'the Chapter 99 codes that apply with these answers'),
       '**What to do**',
@@ -9410,10 +9589,14 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
 
       desk.setPageData(d);
       const deskCard = desk.card(noteLink);
+      // With Claude Code research set up (the same test as its button), Claude's answer comes first, right under the
+      // case; otherwise it stays further down, under the research inputs
+      const answerFirst = !!(desk.researchOn() || cfg().routineId || cfg().routineToken);
       if (isOrder) {
-        rest.replaceChildren(...[deskCard, linksSection, commentSection, orderSection, answerSection, detailsSection, tokenHint].filter(Boolean));
+        rest.replaceChildren(...[deskCard, answerFirst && answerSection, linksSection, commentSection, orderSection, !answerFirst && answerSection, detailsSection, tokenHint].filter(Boolean));
       } else rest.replaceChildren(...[
         deskCard,
+        answerFirst && answerSection,
         linksSection,
         commentSection,
         h('div', { class: 'section' },
@@ -9432,7 +9615,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
           siteLine),
         docsBlock,
         valueHint,
-        answerSection,
+        !answerFirst && answerSection,
         detailsSection,
         tokenHint,
       ].filter(Boolean));
