@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.77.0
+// @version      7.77.1
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -8004,10 +8004,14 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       h('p', { class: 'fine', text: "Clicking a code on the page opens it in the Entry Assistant tab once that site allows being shown here (Alt-click for the portal's References). Claude never sends anything until you press Enter there." }),
       h('p', { class: 'fine', text: 'Floating, drag the window\'s header to move it and any edge or corner to resize it; double-click its ⠿ handle to put it back beside the button at its usual size. Side by side, drag the panel\'s edge to make it wider or narrower; double-click the edge for the default width.' }));
 
-    // The Entry Assistant site, in a frame that's kept while you switch tabs
+    // The Entry Assistant site, in a frame that's kept while you switch tabs. The sandbox keeps it in its box: even if
+    // that site were broken into, it can't move this tab to another page, open dialogs over the dashboard or download
+    // files. It keeps its own storage and calls to its server (it's another site, so allow-same-origin can't reach the
+    // dashboard), its forms and its links out in new tabs.
     const entryCaption = h('span', { class: 'entry-caption' });
     const entryNewTab = h('a', { target: '_blank', rel: 'noreferrer', text: 'Open in a new tab ↗' });
-    const entryFrame = h('iframe', { class: 'entry-frame', title: 'Entry Assistant', referrerpolicy: 'no-referrer', allow: 'clipboard-write', hidden: true });
+    const entryFrame = h('iframe', { class: 'entry-frame', title: 'Entry Assistant', referrerpolicy: 'no-referrer', allow: 'clipboard-write',
+      sandbox: 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox', hidden: true });
     const entryBlockedLink = h('a', { class: 'primary', target: '_blank', rel: 'noreferrer', text: 'Open Entry Assistant ↗' });
     const entryBlocked = h('div', { class: 'entry-blocked', hidden: true },
       h('p', { text: "The Entry Assistant site doesn't allow being shown inside the dashboard yet, so it opens in its own tab for now." }),
@@ -8591,7 +8595,8 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
           j && tips.length ? dcFold('Worth knowing', h('span', { class: 'dc-pill', text: `${tips.length} to check` }),
             tips.slice(0, 12).map(t => h('div', { class: `dc-tip ${t.tone}` }, t.title ? h('b', { text: t.title }) : null, t.text)), was.tips, 'tips') : null,
           j ? dcFold('Worked out from', '', [
-            ...(j.sources || []).map(src => h('p', { class: 'dc-tip' }, src.url ? h('a', { href: src.url, target: '_blank', rel: 'noopener', text: src.name }) : src.name, src.edition ? `: ${src.edition}` : '')),
+            // Only https links: these are drawn in the dashboard itself, so a javascript: address would run here
+            ...(j.sources || []).map(src => h('p', { class: 'dc-tip' }, /^https:\/\//i.test(src.url || '') ? h('a', { href: src.url, target: '_blank', rel: 'noopener', text: src.name }) : src.name, src.edition ? `: ${src.edition}` : '')),
             j.fx && j.fx.currency !== 'USD' ? h('p', { class: 'dc-tip', text: `${j.fx.label}: ${j.fx.perUsd} per U.S. dollar (${j.fx.date}). ${j.fx.source || ''}` }) : null,
           ], was.from, 'from') : null));
       // Which folds are open is kept across redraws
