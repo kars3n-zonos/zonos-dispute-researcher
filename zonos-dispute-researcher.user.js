@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.70.1
+// @version      7.70.2
 // @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -8413,18 +8413,54 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       setView('entry');
       open();
     }
-    async function showEntryPage() {
+    let entryReady = false;
+    let entrySentUrl = '';
+    let entryNavigation = 0;
+    let entryFallback = 0;
+    const reloadEntry = url => {
+      clearTimeout(entryFallback);
+      entryReady = false;
+      entrySentUrl = url;
+      entryFrame.setAttribute('src', url);
+    };
+    window.addEventListener('message', event => {
+      if (event.source !== entryFrame.contentWindow || event.origin !== new URL(entrySite()).origin) return;
+      if (event.data?.type === 'entry:ready') {
+        entryReady = true;
+        clearTimeout(entryFallback);
+        showEntryPage(); // A code clicked during startup may be newer than the iframe's original URL.
+      } else if (event.data?.type === 'entry:navigated' && event.data.id === entryNavigation) {
+        clearTimeout(entryFallback);
+      }
+    });
+    function showEntryPage() {
       const t = entryTarget || {};
       const [a, b] = t.codes || [];
       entryCaption.textContent = !a ? 'Look up and compare HTS codes, notes, rulings and more.'
         : `${b ? `Comparing ${a} with ${b}` : a}${t.from ? ` · made in ${regionName(t.from)}` : ''}`;
       entryNewTab.href = entryBlockedLink.href = entryLink(t);
-      const ok = await entryFrameable();
-      entryFrame.hidden = !ok;
-      entryBlocked.hidden = ok;
-      entryNewTab.hidden = !ok;
       const url = entryLink(t, true);
-      if (ok && entryFrame.getAttribute('src') !== url) entryFrame.setAttribute('src', url);
+      const origin = new URL(url).origin;
+      const id = ++entryNavigation;
+      const display = ok => {
+        entryFrame.hidden = !ok;
+        entryBlocked.hidden = ok;
+        entryNewTab.hidden = !ok;
+      };
+      const allowed = entryFrameCheck?.result !== false;
+      display(allowed);
+      if (allowed && entrySentUrl !== url) {
+        const loadedOrigin = entrySentUrl ? new URL(entrySentUrl).origin : '';
+        if (entryReady && loadedOrigin === origin && (a || b)) {
+          entrySentUrl = url;
+          clearTimeout(entryFallback);
+          entryFrame.contentWindow.postMessage({ type: 'entry:navigate', url, id }, origin);
+          // Older sites may announce readiness but not support this route. Reload only if no acknowledgement arrives.
+          entryFallback = setTimeout(() => { if (id === entryNavigation) reloadEntry(url); }, 4000);
+        } else reloadEntry(url);
+      }
+      // The framing probe informs the fallback UI; it never blocks starting the actual page.
+      void entryFrameable().then(ok => { if (id === entryNavigation) display(ok); });
     }
 
     // While the panel is open the page is narrowed beside it rather than covered. The width is yours to

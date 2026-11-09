@@ -22,6 +22,7 @@ Cases are tracked in the team's **Google Sheet** (since 7.17.0): one row per cas
 For the maintainer:
 - Edit only `zonos-dispute-researcher.user.js`. On every push to `main`, a GitHub Action runs `build-sheets.ps1`, commits `zonos-dispute-desk-sheets.user.js` (the same script under its own name and update address), and publishes both to the secret gist Tampermonkey installs and updates from (needs the `GIST_TOKEN` secret, a token with only the "gist" scope).
 - Raise `@version` with every change pushed to `main`, or Tampermonkey won't install it.
+- Check the embedded-site navigation with `node --test tests/entry-loading.test.mjs`.
 - The sheet's web app is `OctoberDisputes.gs` (kept outside this repo, since it holds the sheet's secret). After changing it: Deploy > Manage deployments > edit > Version: New version > Deploy.
 
 ## Opening Tools
@@ -51,7 +52,7 @@ For the maintainer:
   - **Quote** gives the additional Chapter 99 codes that apply.
   - Or, with **Quote tab: use my duty calculator** ticked under Settings > Panel and pages, the tab becomes **Duties**: the Entry Assistant duty calculator, laid out like the website's. It fills in from the order (each line's HTS code, origin and value, the currency, the order date, how it shipped and when it arrived, and what a dispute's order was charged), works out what the entry owes as you type, shows every duty with its Chapter 99 code, and lists the questions it can't settle, answered right there with Yes / No / Not sure. Its results may not be 100% correct: double-check them.
 - **Analytics:** from every work order's own history in the portal: who resolved (and submitted) the most, who claimed, released, marked waiting, escalated and added notes, and the typical time from claim to resolve, for today, 7, 30 or 90 days or 12 months, by class. Also who holds how many right now (overdue and waiting), unclaimed orders, how orders were resolved, and new orders by company. **Export** gives every event as a CSV.
-- **Entry Assistant:** the Entry Assistant site, for looking up and comparing codes, notes and rulings.
+- **Entry Assistant:** the Entry Assistant site, for looking up and comparing codes, notes and rulings. Code clicks start loading immediately; compatible sites reuse the embedded app when switching codes or opening Compare (since 7.70.2).
 - **Queue views:** **Default Portal** (the portal's own queue, the default) and **Portal+**. Pick one under Settings > Panel and pages, or with the picker on Portal+. (The Advanced View was taken out in 7.58.0; anyone who had it now gets Portal+.)
 - **Completed tab** (Portal+, since 7.69.0): every resolved and auto-resolved order, everyone's, the same as the portal's own Completed tab (a submitted duty dispute's order is auto-resolved). It loads when you open the tab, then at most every 5 minutes or with ↻; the portal's `?scope=completed` address opens it too.
 - **Search** in Portal+ searches every work order, open, waiting and closed, whatever tab is open (closed ones load the first time you search), and takes a pasted list of tracking numbers. Filters you set still apply; the default "hide escalated" doesn't. Clear the search to see the tab again.
