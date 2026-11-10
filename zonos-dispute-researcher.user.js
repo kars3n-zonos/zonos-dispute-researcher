@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.82.0
+// @version      8.0.0
 // @description  Tools for the Zonos broker portal, built into its own pages: Research in Claude Code (or claude.ai) in the portal's Research tool, with the answer written into the dispute's Notes; a fuller Classify inside the portal's Classify; Entry Assistant in the top bar beside Research, Classify and Quote; the Portal+ queue with search and bulk actions; easier-to-read order pages. Settings are under Manage account > Tools. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -5781,6 +5781,21 @@
       el.append(h('span', { class: 'zt-plain', text: plain }));
     }
   }
+  // A dispute's order item lists every code Classify knows in its HS codes table (chapter, heading, subheading and
+  // tariff line, validations, alternates, provided, classified, catalog, components). Only the codes applied are shown:
+  // the item's own ("On the item") and the order's additional ones. A click on a code still opens its breakdown.
+  // The rows are only hidden (not removed or rewritten), so the portal's own rendering isn't disturbed.
+  function appliedCodesOnly() {
+    const main = document.querySelector('main');
+    if (!main || !isCasePage()) return;
+    for (const table of main.querySelectorAll('table')) {
+      const head = [...table.querySelectorAll('thead th')].map(th => clean(th.textContent).toLowerCase()).join('|');
+      if (head !== 'where|code|detail') continue;
+      for (const tr of table.querySelectorAll('tbody tr')) {
+        if (!/^(on the item|additional)\b/i.test(clean(tr.cells[0]?.textContent)) && tr.style.display !== 'none') tr.style.display = 'none';
+      }
+    }
+  }
   function undoReadable() {
     for (const g of document.querySelectorAll('.zt-meta, .zt-plain')) g.remove();
     for (const p of document.querySelectorAll('p[data-zt-src]')) { p.style.display = ''; delete p.dataset.ztSrc; }
@@ -7179,8 +7194,10 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (!id) return '';
       return strip((await read(id)).body);
     }
-    // ---- Earlier Claude research: every past answer and research chat of a dispute, in one section after the current
-    // answers. Each run only adds what isn't there yet (answers by their ref, links by address); nothing in it is changed.
+    // ---- Earlier Claude research: every past answer of a dispute, with its research chats, in one section after the
+    // current answers. Each run only adds what isn't there yet (answers by their ref, links by address); nothing in it is
+    // changed. A dispute with no answer gets no section: links alone (the case doc, the sheet row, Front, Slack) only
+    // bloat the Notes, and a links-only section an earlier version wrote is taken out.
     const ENTRY_MAX = 12000;   // characters of one past answer
     const iso = d => { const t = typeof d === 'number' ? d : Date.parse(String(d || '').replace(' ', 'T')); return t ? new Date(t).toISOString().slice(0, 10) : ''; };
     const fingerprint = t => String(t || '').replace(/[\s*_#>`|-]+/g, ' ').trim().toLowerCase().slice(0, 300);
@@ -7198,9 +7215,9 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (text.length > ENTRY_MAX) text = `${text.slice(0, ENTRY_MAX)}…\n\n*(Cut short. The whole answer is in the case doc.)*`;
       return [`### ${a.label}${a.date ? ` · ${a.date}` : ''}`, '', `*${meta}*`, '', text].join('\n');
     }
-    // { answers: [{ key, label, date, text, author?, lines?, also? }], links: [{ label, url }] }; false when nothing was new
+    // { answers: [{ key, label, date, text, author?, lines?, also? }], links: [{ label, url }] }; false when nothing changed
     async function mergeHistory(id, { answers = [], links = [] }) {
-      if (!id || (!answers.length && !links.length)) return false;
+      if (!id) return false;
       for (let tries = 0; tries < 4; tries++) {
         await settled();
         const cur = await read(id);
@@ -7228,13 +7245,23 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
           seen.add(fp);
           fresh.push({ text: entryText(a), date: a.date || '' });
         }
+        // No answer, old or new: no section (one with only links is taken out)
+        if (!entries.length && !fresh.length) {
+          if (!b) return false;
+          const body = [...lines.slice(0, b.start), ...lines.slice(b.end + 1)].join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+          const r = await call(id, 'PUT', { body, etag: cur.etag });
+          if (r.status === 409) { await sleep(800); continue; }
+          if (r.status < 200 || r.status >= 300) throw new Error(r.data?.error || `the portal answered ${r.status}`);
+          refresh();
+          return true;
+        }
         const linkMap = new Map(oldLinks.map(l => [l.url, l]));
         let newLinks = 0;
         for (const l of links) if (/^https:\/\//.test(l.url || '') && !linkMap.has(l.url) && !cur.body.includes(l.url)) { linkMap.set(l.url, l); newLinks++; }
         if (!fresh.length && !newLinks) return false;
         const all = [...entries, ...fresh].sort((x, y) => (y.date || '').localeCompare(x.date || ''));
         const head = [`## ${TITLES.history}`, '',
-          "*Claude's past answers and research chats on this dispute, gathered by Dispute Deck, newest first. Running it again only adds what's new.*"];
+          "*Claude's past answers on this dispute and their research chats, gathered by Dispute Deck, newest first. Running it again only adds what's new.*"];
         const linkPart = linkMap.size ? ['', '### Chats and links', '', ...[...linkMap.values()].map(l => `- ${mdLink(l.label, l.url)}`)] : [];
         // The rest of the notes, without this section
         const rest = b ? [...lines.slice(0, b.start), ...lines.slice(b.end + 1)] : lines;
@@ -7863,7 +7890,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     async function fillNotes(id, { light = false } = {}) {
       const local = await localPast(id);
       if (light && await portalNotes.hasHistory(id)) {
-        const added = local.answers.length || local.links.length ? await portalNotes.mergeHistory(id, local) : false;
+        const added = await portalNotes.mergeHistory(id, local);   // also takes out a links-only section
         markFilled(id);
         return { added, error: '' };
       }
@@ -7889,12 +7916,34 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     const FILL_ALL_KEY = 'zt:notesFilledAll';     // { live|test: when a run through every dispute finished }
     const FILL_OWNER_KEY = 'zt:notesFill:owner';  // { id, at }: the portal tab running it, so only one tab does
     const fillTab = Math.random().toString(36).slice(2);
+    const beat = () => GM_setValue(FILL_OWNER_KEY, { id: fillTab, at: Date.now() });
+    // 7.82.0 also wrote the section for disputes with no answer (only links): once on each computer, every dispute it
+    // went through has such a section taken out (one with an answer is left as it is)
+    const CLEANED_KEY = 'zt:notesLinksOnlyCleaned';
+    async function cleanLinksOnly() {
+      const run = fillRun = { stop: false, auto: true };
+      fillBtn.textContent = 'Stop';
+      beat();
+      const todo = Object.keys(filled().live || {});
+      let n = 0, removed = 0, failed = 0;
+      try {
+        for (const id of todo) {
+          if (run.stop || portal.mode() !== 'live') break;
+          try { if (await portalNotes.mergeHistory(id, {})) removed++; } catch { failed++; }
+          n++;
+          beat();
+          say(fillNote, `Taking out sections with no answer: ${n} of ${todo.length} disputes · ${removed} taken out${run.stop ? ' · stopping…' : ''}`);
+        }
+        if (n === todo.length && !failed) GM_setValue(CLEANED_KEY, Date.now());
+        console.info(`[Tools] earlier research with no answer: ${n} disputes, ${removed} sections taken out, ${failed} not read`);
+        say(fillNote, `Took the Earlier Claude research section out of ${removed} dispute${removed === 1 ? '' : 's'} with no answer${failed ? ` (${failed} couldn't be read: tried again later)` : ''}.`, failed ? 'warn' : 'ok');
+      } finally { fillRun = null; fillBtn.textContent = 'Fill in Notes'; GM_deleteValue(FILL_OWNER_KEY); }
+    }
     async function fillAll({ auto = false } = {}) {
       const mode = portal.mode();
       if (!auto && mode !== 'live' && !confirm('The portal is in TEST mode, and test mode has its own Notes. Fill in the test Notes?')) return;
       const run = fillRun = { stop: false, auto };
       fillBtn.textContent = 'Stop';
-      const beat = () => GM_setValue(FILL_OWNER_KEY, { id: fillTab, at: Date.now() });
       beat();
       try {
         say(fillNote, 'Finding every duty dispute…');
@@ -7929,15 +7978,18 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     // By itself: once on each computer (live mode), in the background, in one portal tab at a time; a reload carries on
     // where it stopped (each dispute done is remembered)
     function autoFill() {
-      if (fillRun || portal.mode() !== 'live' || GM_getValue(FILL_ALL_KEY, {}).live) return;
+      if (fillRun || portal.mode() !== 'live') return;
+      const cleaned = GM_getValue(CLEANED_KEY, 0);
+      if (cleaned && GM_getValue(FILL_ALL_KEY, {}).live) return;
       const o = GM_getValue(FILL_OWNER_KEY, null);
       if (o && o.id !== fillTab && Date.now() - o.at < 3 * 60000) return;
+      if (!cleaned) { cleanLinksOnly().catch(e => console.warn('[Tools] earlier research with no answer', e)); return; }
       fillAll({ auto: true });
     }
     setTimeout(autoFill, 20000);
     setInterval(autoFill, 5 * 60000);
     window.addEventListener('pagehide', () => { if (fillRun) GM_deleteValue(FILL_OWNER_KEY); });
-    const fillGroup = group('Earlier research into Notes', "Puts every duty dispute's earlier Claude answers and research chats (Claude Code sessions, claude.ai chats, the case doc and sheet row, Front and Slack) in its Notes, in an \"Earlier Claude research\" section. From the Google Sheet, the shared answers server and this computer. It runs by itself once on each computer (live mode, in the background, one dispute at a time), and a dispute you open is filled in by itself too; Fill in Notes runs it now. Notes are shared, so one run fills them in for everyone; a teammate's adds what only their computer had. Nothing already in the Notes is changed.",
+    const fillGroup = group('Earlier research into Notes', "Puts every duty dispute's earlier Claude answers and research chats (Claude Code sessions, claude.ai chats, the case doc and sheet row, Front and Slack) in its Notes, in an \"Earlier Claude research\" section, only where there's an answer: a dispute with links but no answer gets nothing. From the Google Sheet, the shared answers server and this computer. It runs by itself once on each computer (live mode, in the background, one dispute at a time), and a dispute you open is filled in by itself too; Fill in Notes runs it now. Notes are shared, so one run fills them in for everyone; a teammate's adds what only their computer had. Nothing already in the Notes is changed.",
       h('div', { class: 'row' }, fillBtn), fillAgain, fillNote);
 
     const settingsBody = h('div', { class: 'body' },
@@ -9652,6 +9704,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     const onRoute = () => {
       ui?.keepAttached();
       if (GM_getValue(READABLE_KEY, false)) makeReadable();
+      appliedCodesOnly();
       fixListLinks();
       showPrograms();
       if (onQueuePage()) { queue = queue || createQueue(); queue.mount(); }
