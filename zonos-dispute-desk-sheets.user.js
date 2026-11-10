@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.80.0
+// @version      7.81.0
 // @description  Tools for the Zonos broker portal, built into its own pages: Research in Claude Code (or claude.ai) in the portal's Research tool, with the answer written into the dispute's Notes; a fuller Classify inside the portal's Classify; Entry Assistant in the top bar beside Research, Classify and Quote; the Portal+ queue with search and bulk actions; easier-to-read order pages. Settings are under Manage account > Tools. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -45,7 +45,6 @@
   const CHAT_REPLY_PREFIX = 'zdr:chatreply:';   // per chat handoff: { caseId, text, chatUrl, at } or { failed }
   const CHAT_LOG_PREFIX = 'zdr:chatlog:';       // per case: this computer's copy of the thread
   const SITE_PREFIX = 'zdr:site:';
-  const PANEL_WIDTH_KEY = 'zdr:panelWidth';
   const HANDOFF_TTL_MS = 30 * 60 * 1000;
   const MAX_FILE_BYTES = 15 * 1024 * 1024;
 
@@ -89,6 +88,9 @@
     chart: ['M3 3v16a2 2 0 0 0 2 2h16', 'M18 17V9', 'M13 17V5', 'M8 17v-3'],
     bot: ['M12 8V4H8', 'M6 8h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z', 'M2 14h2', 'M20 14h2', 'M15 13v2', 'M9 13v2'],
     external: ['M15 3h6v6', 'M10 14 21 3', 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6'],
+    x: ['M18 6 6 18', 'm6 6 12 12'],
+    layers: ['m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z', 'm22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65', 'm22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65'],
+    columns: ['M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z', 'M12 3v18'],
   };
   function svgIcon(paths, cls = '') {
     const NS = 'http://www.w3.org/2000/svg';
@@ -7170,44 +7172,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     button { font: inherit; cursor: pointer; }
     button:disabled { opacity: .55; cursor: default; }
     button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .panel { position: fixed; top: 0; right: 0; height: 100vh; width: min(var(--w, 480px), 100vw); z-index: 2147483001; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border-left: 1px solid var(--line); box-shadow: -10px 0 30px rgba(0,0,0,.3); }
-    .panel.docked { box-shadow: none; }
-    .panel.overlay { top: 12px; right: 12px; height: calc(100vh - 24px); width: min(var(--w, 480px), calc(100vw - 24px)); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,.18); }
-    .panel.resizing, .panel.moving { user-select: none; }
-    .panel.resizing iframe, .panel.moving iframe { pointer-events: none; }
     [hidden] { display: none !important; }
-    .grip { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 2; }
-    .panel.overlay .grip { display: none; }
-    .grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; }
-    .grip:hover::after, .grip:focus-visible::after, .resizing .grip::after { background: var(--accent); }
-    .grip:focus-visible { outline: none; }
-    /* The floating window's edges and corners, for resizing in any direction. They sit just inside the rounded border, which clips. */
-    .edge { position: absolute; z-index: 3; display: none; }
-    .panel.overlay .edge { display: block; }
-    .edge.n, .edge.s { left: 12px; right: 12px; height: 6px; cursor: ns-resize; }
-    .edge.e, .edge.w { top: 12px; bottom: 12px; width: 6px; cursor: ew-resize; }
-    .edge.n { top: 0; } .edge.s { bottom: 0; } .edge.e { right: 0; } .edge.w { left: 0; }
-    .edge.ne, .edge.nw, .edge.se, .edge.sw { width: 14px; height: 14px; }
-    .edge.ne { top: 0; right: 0; cursor: nesw-resize; } .edge.sw { bottom: 0; left: 0; cursor: nesw-resize; }
-    .edge.nw { top: 0; left: 0; cursor: nwse-resize; } .edge.se { bottom: 0; right: 0; cursor: nwse-resize; }
-    .edge.n::after, .edge.s::after, .edge.e::after, .edge.w::after { content: ""; position: absolute; background: transparent; }
-    .edge.n::after, .edge.s::after { left: 0; right: 0; height: 2px; } .edge.n::after { top: 0; } .edge.s::after { bottom: 0; }
-    .edge.e::after, .edge.w::after { top: 0; bottom: 0; width: 2px; } .edge.e::after { right: 0; } .edge.w::after { left: 0; }
-    .edge:hover::after, .edge.active::after { background: var(--accent); }
-    header { display: flex; align-items: center; gap: 8px; height: 48px; flex: none; padding: 0 10px 0 12px; border-bottom: 1px solid var(--line); }
-    .win-title { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 14px; font-weight: 500; }
-    .win-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .win-title svg { flex: none; }
-    .panel.overlay header { cursor: grab; touch-action: none; }
-    .panel.moving header, .panel.moving header button { cursor: grabbing; }
-    .handle { display: none; align-self: center; margin-left: -4px; padding: 2px 3px; background: none; border: 0; border-radius: 6px; color: var(--muted); font-size: 15px; line-height: 1; cursor: grab; }
-    .panel.overlay .handle { display: block; }
-    .handle:hover { color: var(--fg); background: var(--soft); }
-    .tabs { display: flex; gap: 0; min-width: 0; overflow-x: auto; scrollbar-width: none; }
-    .tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: 9px 7px 8px; font-weight: 600; white-space: nowrap; }
-    .tab:hover { color: var(--fg); }
-    .tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
-    .header-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; }
     .icon { background: none; border: 0; color: var(--muted); font-size: 18px; line-height: 1; padding: 3px 6px; border-radius: 6px; }
     .icon:hover, .icon[aria-pressed="true"] { color: var(--fg); background: var(--soft); }
     .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -7221,9 +7186,6 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     .entry-slot { flex: 1; position: relative; min-height: 0; }
     .entry-slot > .entry-frame { position: absolute; inset: 0; height: 100%; }
     .entry-frame.ahead { visibility: hidden; }
-    /* Kept laid out while out of sight, so a frame loaded ahead gets its real size (at 0x0 the site leaves its HTS table
-       scrolled to the top, not to the code): the closed panel sits off-screen, and the Entry Assistant tab under the one showing */
-    .panel[hidden] { display: flex !important; visibility: hidden; transform: translateX(-300vw); pointer-events: none; }
     .view.keep[hidden] { display: flex !important; position: absolute; left: 0; right: 0; bottom: 0; top: var(--view-top, 0px); visibility: hidden; pointer-events: none; }
     .entry-blocked { padding: 16px; }
     .entry-blocked p { margin: 0 0 12px; }
@@ -7511,7 +7473,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     // Entry Assistant in the portal's top bar, beside Research, Classify and Quote, with their look
     const TOOL_BTN = 'flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset';
     const eaBtn = h('button', { type: 'button', id: 'zt-entry-tool', 'aria-pressed': 'false', title: 'Entry Assistant: HTS codes, notes, duties and CBP rulings for this order',
-      onclick: () => { if (!panel.hidden && view === 'entry') close(); else openWindow('entry'); } },
+      onclick: () => { if (cardOpen && view === 'entry') close(); else openWindow('entry'); } },
       svgIcon(ICONS.book, 'h-4 w-4 shrink-0'), 'Entry Assistant');
     // This page's case, as the queue and the sheet name it
     const entityFromPathHere = () => {
@@ -7769,7 +7731,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         h('div', { style: 'margin-top:6px' }, importBox),
         h('div', { class: 'row', style: 'margin-top:6px' }, btn('Import', importSetup)),
         backupNote),
-      h('p', { class: 'fine', text: "Entry Assistant opens from its button in the top bar, beside Research, Classify and Quote. Drag its header to move it and any edge or corner to resize it; double-click its ⠿ handle to put it back where it opens at first." }));
+      h('p', { class: 'fine', text: "Entry Assistant opens from its button in the top bar, beside Research, Classify and Quote, in the same card and spot as they do: laid over the page or beside it, as the portal's Open tool setting above says." }));
 
     // The Entry Assistant site, in frames that are kept while you switch tabs: the one showing, and one loaded ahead for
     // each code on the open order (loadEntryAhead), so a code opens at once. They're stacked in one slot, and the ones
@@ -8138,8 +8100,13 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     settingsBody.insertBefore(prefsGroup, settingsBody.children[2] || null);
     showLocked();
 
-    // ---- The window: Entry Assistant (its button in the top bar, or a code clicked on the page) or Analytics (from the
-    // settings), over the page. The portal's open tool closes when it opens, so the two never sit on top of each other.
+    // ---- The tool card: Entry Assistant (its button in the top bar, or a code clicked on the page) or Analytics (from the
+    // settings). It works like the portal's own tools: it opens in the same card in the same spot, under the top bar on
+    // the page's left edge, laid over the page or moving it over as the portal's "Open tool" setting says (the toggle in
+    // its header changes that setting for every tool), fades in the same way, and Escape closes it when it's laid over the
+    // page. One tool at a time: opening it closes the portal's open tool, and opening one of those closes it. Only its
+    // width is its own: Entry Assistant's HTS table needs 842 px to show all seven columns (measured on entry.kars3n.com,
+    // 7.78.0); on a screen too narrow to keep the page usable beside that, it lays over the page instead.
     const views = {
       entry: h('section', { class: 'view keep', hidden: true },
         h('div', { class: 'entry-bar' }, entryCaption, entryNewTab),
@@ -8147,30 +8114,73 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       analytics: h('section', { class: 'view', hidden: true }, analyticsBody),
     };
     const WINDOW = { entry: ['Entry Assistant', ICONS.book], analytics: ['Analytics', ICONS.chart] };
-    const winTitle = h('div', { class: 'win-title' });
-    // Overlay (floats over the page) or side by side (the page narrows beside it); your choice is remembered
-    const LAYOUT_KEY = 'zt:layout';
-    let layout = GM_getValue(LAYOUT_KEY, 'overlay');
-    const layoutBtn = h('button', { class: 'icon', type: 'button', onclick: () => { layout = layout === 'side' ? 'overlay' : 'side'; GM_setValue(LAYOUT_KEY, layout); dock(); } });
-    const grip = h('div', { class: 'grip', role: 'separator', tabindex: '0', 'aria-orientation': 'vertical', 'aria-label': 'Resize panel', title: 'Drag to resize. Double-click for the default width.' });
-    // The floating window: a handle to drag it by (the whole header drags too) and edges and corners to resize it
-    const handle = h('button', { class: 'handle', type: 'button', 'aria-label': 'Move the window', text: '⠿',
-      title: 'Drag to move the window (the header works too); drag an edge or corner to resize it. Double-click to put it back where it opens at first. Arrow keys move it.' });
-    const EDGES = { n: [0, -1], s: [0, 1], e: [1, 0], w: [-1, 0], ne: [1, -1], nw: [-1, -1], se: [1, 1], sw: [-1, 1] };
-    const edges = Object.fromEntries(Object.keys(EDGES).map(k => [k, h('div', { class: `edge ${k}`, 'aria-hidden': 'true' })]));
-    const header = h('header', {},
-      handle,
-      winTitle,
-      h('div', { class: 'header-actions' },
-        layoutBtn,
-        h('button', { class: 'icon', type: 'button', 'aria-label': 'Close', title: 'Close (Escape)', text: '×', onclick: () => close() })));
-    const panel = h('aside', { class: 'panel', hidden: true, 'aria-label': 'Entry Assistant' },
-      grip, Object.values(edges), header, views.entry, views.analytics);
-    root.append(h('style', { text: PANEL_CSS }), h('div', { class: 'wrap' }, panel));
-    // Where the window's pages start, under its header: Entry Assistant is kept laid out there while hidden, so a page
-    // loaded ahead gets the size it will show at
-    const syncViewTop = () => panel.style.setProperty('--view-top', `${header.offsetHeight}px`);
-    new ResizeObserver(syncViewTop).observe(header);
+    const CARD_WIDTH = 842;
+    const TOOLS_SETTINGS_KEY = 'broker-portal-tools-settings';   // the portal's own "Open tool" choice, in this browser
+    const placement = () => { try { return JSON.parse(localStorage.getItem(TOOLS_SETTINGS_KEY) || '{}').placement === 'beside' ? 'beside' : 'overlay'; } catch { return 'overlay'; } };
+    function setPlacement(p) {
+      try {
+        const cur = JSON.parse(localStorage.getItem(TOOLS_SETTINGS_KEY) || '{}');
+        localStorage.setItem(TOOLS_SETTINGS_KEY, JSON.stringify({ ...(cur && typeof cur === 'object' ? cur : {}), placement: p }));
+        // The portal follows the setting when another tab changes it: tell it this one did
+        const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        W.dispatchEvent(new W.StorageEvent('storage', { key: TOOLS_SETTINGS_KEY }));
+      } catch { /* storage blocked: it stays as it was */ }
+      layoutCard();
+    }
+    // The card's header, as the portal draws its tools' (ToolCardHeader): icon and name, then overlay and close
+    const HEAD_BTN = 'flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
+    const cardTitle = h('div', { class: 'flex min-w-0 items-center gap-2' });
+    const overlayBtn = h('button', { type: 'button', 'aria-label': 'Overlay the page', onclick: () => setPlacement(placement() === 'overlay' ? 'beside' : 'overlay') });
+    const cardHeader = h('div', { class: 'flex h-12 shrink-0 items-center gap-2 border-b border-border pr-2.5 pl-4' },
+      cardTitle,
+      h('div', { class: 'ml-auto flex items-center gap-0.5' }, overlayBtn,
+        h('button', { type: 'button', class: HEAD_BTN, 'aria-label': 'Close tools', title: 'Close', onclick: () => close() }, svgIcon(ICONS.x, 'h-4 w-4'))));
+    root.append(h('style', { text: `${PANEL_CSS}
+    .wrap.card-body { position: absolute; inset: 0; display: flex; flex-direction: column; }` }), h('div', { class: 'wrap card-body' }, views.entry, views.analytics));
+    host.setAttribute('style', 'display:block;position:relative;flex:1 1 0%;min-height:0');
+    const CARD = 'pointer-events-auto flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-lg animate-in fade-in-0 duration-150 motion-reduce:animate-none';
+    const OVERLAID = 'absolute top-2 bottom-4 left-4 md:bottom-6 md:left-6';
+    const DOCKED = 'shrink-0 self-stretch';
+    const card = h('section', { id: 'zt-tool-card', 'aria-label': 'Entry Assistant', class: `${CARD} ${OVERLAID}`, inert: true, 'aria-hidden': 'true',
+      style: 'visibility:hidden;pointer-events:none' }, cardHeader, host);
+    // Kept in the page while closed, invisible but laid out at its size, so Entry Assistant pages loaded ahead get the size
+    // they'll show at. Its place: beside the portal's own card, in the column it opens its tools in. A page without that
+    // column gets a stand-in just under where the top bar would be.
+    const cardHolder = h('div', { id: 'zt-card-holder', style: 'position:fixed;top:56px;bottom:0;left:0;width:0;z-index:40' });
+    let cardOpen = false;
+    let cardDocked = false;
+    function placeCard() {
+      const branch = document.querySelector('#work-order-tool-rail [data-broker-classify-window]');
+      if (branch) { if (card.parentElement !== branch) branch.append(card); cardHolder.remove(); return; }
+      if (!cardHolder.isConnected) document.body.append(cardHolder);
+      if (card.parentElement !== cardHolder) cardHolder.append(card);
+    }
+    function layoutCard() {
+      const room = innerWidth >= 1024;
+      const left = card.parentElement?.getBoundingClientRect().left || 0;
+      // Beside the page when chosen, there's room (as in the portal), and the page keeps at least 480 px beside it
+      const docked = cardOpen && room && placement() === 'beside' && left + CARD_WIDTH + 40 + 480 <= innerWidth;
+      cardDocked = docked;
+      const cls = `${CARD} ${docked ? DOCKED : OVERLAID}`;
+      if (card.className !== cls) card.className = cls;
+      const md = innerWidth >= 768 ? 24 : 16;
+      const style = { width: docked ? `${CARD_WIDTH}px` : `min(${CARD_WIDTH}px, calc(100vw - 2rem))`, margin: docked ? `8px 12px ${md}px ${md}px` : '',
+        visibility: cardOpen ? '' : 'hidden', pointerEvents: cardOpen ? '' : 'none' };
+      for (const [k, v] of Object.entries(style)) if (card.style[k] !== v) card.style[k] = v;
+      if (card.inert === cardOpen) card.inert = !cardOpen;
+      if (card.getAttribute('aria-hidden') !== String(!cardOpen)) card.setAttribute('aria-hidden', String(!cardOpen));
+      // The overlay toggle, as on the portal's card: only where there's room to choose
+      const over = placement() === 'overlay';
+      overlayBtn.hidden = !room;
+      if (overlayBtn.dataset.on !== String(over)) {
+        overlayBtn.dataset.on = String(over);
+        overlayBtn.className = `${HEAD_BTN}${over ? ' text-foreground' : ''}`;
+        overlayBtn.setAttribute('aria-pressed', String(over));
+        overlayBtn.title = over ? 'Laid over the page. Press to move the page over instead.' : 'Beside the page. Press to lay it over the page instead.';
+        overlayBtn.replaceChildren(svgIcon(over ? ICONS.layers : ICONS.columns, 'h-4 w-4'));
+      }
+    }
+    window.addEventListener('resize', () => { if (cardOpen) layoutCard(); });
 
     let view = 'entry';
     let drawQueued = 0;   // a redraw of the research state waiting for the next frame (see render)
@@ -8178,8 +8188,8 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       view = WINDOW[name] ? name : 'entry';
       for (const [k, el] of Object.entries(views)) el.hidden = k !== view;
       const [title, icon] = WINDOW[view];
-      winTitle.replaceChildren(svgIcon(icon), h('span', { text: title }));
-      panel.setAttribute('aria-label', title);
+      cardTitle.replaceChildren(svgIcon(icon, 'h-4 w-4 shrink-0'), h('span', { class: 'truncate text-sm font-medium', text: title }));
+      card.setAttribute('aria-label', title);
       if (!load) return;
       if (view === 'analytics') renderAnalytics();
       if (view === 'entry') showEntryPage();
@@ -8191,28 +8201,31 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       // The portal's open tool (Research, Classify or Quote) closes first: one tool at a time, as in the portal
       document.querySelector('#work-order-tool-bar [role="tablist"] [role="tab"][aria-selected="true"]')?.click();
       setView(name);
-      panel.hidden = false;
-      dock();
+      const was = cardOpen;
+      cardOpen = true;
+      layoutCard();
+      // Fades in as the portal's card does when it opens
+      if (!was) { card.classList.remove('animate-in'); void card.offsetWidth; card.classList.add('animate-in'); }
       syncTopButton();
     }
     function close() {
-      panel.hidden = true;
-      dock();
+      cardOpen = false;
+      layoutCard();
       syncTopButton();
     }
     function syncTopButton() {
-      const on = !panel.hidden && view === 'entry';
+      const on = cardOpen && view === 'entry';
       if (eaBtn.getAttribute('aria-pressed') !== String(on)) eaBtn.setAttribute('aria-pressed', String(on));
       const cls = `${TOOL_BTN} ${on ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`;
       if (eaBtn.className !== cls) eaBtn.className = cls;
     }
-    // Pressing one of the portal's tools closes the window over the page, so the tool's card isn't hidden under it
+    // Pressing one of the portal's tools closes it: one tool at a time
     document.addEventListener('click', e => {
-      if (!panel.hidden && layout !== 'side' && e.target?.closest?.('#work-order-tool-bar [role="tab"]')) close();
+      if (cardOpen && e.target?.closest?.('#work-order-tool-bar [role="tab"]')) close();
     }, true);
-    // Over the page, Escape closes it, as it closes the portal's own tools
+    // Laid over the page, Escape closes it, like any popup (as the portal's tools do); beside the page it stays open
     window.addEventListener('keydown', e => {
-      if (e.key !== 'Escape' || panel.hidden || layout === 'side' || e.defaultPrevented) return;
+      if (e.key !== 'Escape' || !cardOpen || cardDocked || e.defaultPrevented) return;
       if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return;
       close();
     });
@@ -8324,6 +8337,8 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
 
     function syncPortal() {
       if (!portalCss.isConnected) (document.head || document.documentElement).append(portalCss);
+      attach();
+      if (cardOpen) layoutCard();
       const tabsEl = document.querySelector('#work-order-tool-bar [role="tablist"][aria-label="Tools"]');
       if (tabsEl) { if (tabsEl.nextElementSibling !== eaBtn) tabsEl.after(eaBtn); syncTopButton(); }
       else if (eaBtn.isConnected) eaBtn.remove();
@@ -8402,181 +8417,10 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (!targets.length) return;
       entryAhead = targets;
       entrySlot.hidden = false;
-      syncViewTop();
+      attach();
       for (const t of targets) entryFrameFor(entryLink(t, true));
-      // The tab already open on this order with no code picked shows the first code now
-      if (view === 'entry' && !entryTarget && !panel.hidden && entryShown !== entryFrames.get(entryLink(targets[0], true))) showEntryPage();
-    }
-
-    // Side by side, the page is narrowed beside the panel rather than covered. The width is yours to drag
-    // and is remembered, but the panel never takes so much room that the page gets narrower than MIN_PAGE,
-    // so a wide panel in a smaller window stays beside the page. Only a window too narrow for both gets the
-    // panel over the page.
-    const DEFAULT_WIDTH = 480;
-    // The floating window opens just wide enough for Entry Assistant's HTS table (frame=code) to show all seven
-    // columns with their headings and grid lines. The site stacks the table at 560 px and under, and its columns
-    // need 754 px plus the page's padding and a scrollbar, so the frame needs 840 px (measured on
-    // entry.kars3n.com, 7.78.0); the window's 1 px border on each side makes 842.
-    const FLOAT_WIDTH = 842;
-    const MIN_WIDTH = 380;
-    const MIN_PAGE = 640;
-    const DEFAULT_HEIGHT = 820;
-    const MIN_HEIGHT = 360;
-    const EDGE_GAP = 12;   // the floating window keeps this far inside the browser window
-    let width = GM_getValue(PANEL_WIDTH_KEY, 0) || DEFAULT_WIDTH;   // side by side
-    // The floating window's place and size, once you've moved or sized it ({ x, y, w, h }). Until then it opens
-    // beside the Tools button at FLOAT_WIDTH. Side by side keeps its own width.
-    const PANEL_BOX_KEY = 'zdr:panelBox';
-    let box = GM_getValue(PANEL_BOX_KEY, null);
-    // Side by side leaves the page at least MIN_PAGE wide; the floating window can be as wide as the browser window allows
-    const panelWidth = () => Math.round(Math.max(MIN_WIDTH, layout === 'side'
-      ? Math.min(width, innerWidth - MIN_PAGE, 1400)
-      : Math.min(box?.w || FLOAT_WIDTH, innerWidth - 2 * EDGE_GAP, 1400)));
-    const panelHeight = () => Math.round(Math.max(MIN_HEIGHT, Math.min(box?.h || DEFAULT_HEIGHT, innerHeight - 2 * EDGE_GAP)));
-    const saveBox = () => {
-      box = { x: parseFloat(panel.style.left) || EDGE_GAP, y: parseFloat(panel.style.top) || EDGE_GAP, w: panelWidth(), h: panelHeight() };
-      GM_setValue(PANEL_BOX_KEY, box);
-    };
-    const dockStyle = h('style', { id: 'zdr-dock' });
-    function dock() {
-      const w = panelWidth();
-      host.style.setProperty('--w', `${w}px`);
-      const docked = !panel.hidden && layout === 'side' && innerWidth - w >= MIN_PAGE;
-      panel.classList.toggle('docked', docked);
-      panel.classList.toggle('overlay', layout !== 'side');
-      if (layout !== 'side') {
-        // Where you last left it, kept inside the browser window. Before that, beside the button: to its left
-        // when the button is on the right half of the screen, otherwise to its right, lined up with it.
-        const pw = Math.min(w, innerWidth - 2 * EDGE_GAP);
-        let ph = panelHeight();
-        let left, top;
-        if (box) { left = box.x; top = box.y; }
-        else {
-          // Until it's moved: where the portal opens its own tools, on the page's left edge just under the top bar,
-          // running down the page
-          const bar = document.getElementById('work-order-tool-bar')?.parentElement?.getBoundingClientRect();
-          const rail = document.getElementById('work-order-tool-rail')?.getBoundingClientRect();
-          top = (bar?.bottom || 0) + 8;
-          left = (rail?.left ?? bar?.left ?? 0) + 16;
-          ph = Math.round(Math.max(MIN_HEIGHT, innerHeight - top - 16));
-        }
-        panel.style.left = `${Math.round(Math.max(EDGE_GAP, Math.min(innerWidth - pw - EDGE_GAP, left)))}px`;
-        panel.style.top = `${Math.round(Math.max(EDGE_GAP, Math.min(innerHeight - ph - EDGE_GAP, top)))}px`;
-        panel.style.height = `${ph}px`;
-        panel.style.right = 'auto';
-      } else {
-        for (const k of ['left', 'top', 'height', 'right']) panel.style[k] = '';
-      }
-      layoutBtn.textContent = layout === 'side' ? '⧉' : '◫';
-      layoutBtn.title = layout === 'side' ? 'Float over the page (overlay)' : 'Open side by side with the page';
-      layoutBtn.setAttribute('aria-label', layoutBtn.title);
-      const css = docked ? `body { margin-right: ${w}px !important; }` : '';
-      if (dockStyle.textContent !== css) dockStyle.textContent = css;
-      if (!dockStyle.isConnected) (document.head || document.documentElement).append(dockStyle);
-    }
-    window.addEventListener('resize', () => { if (!panel.hidden) dock(); });
-    // Side by side: drag the panel's edge to change its width
-    grip.addEventListener('pointerdown', e => {
-      if (e.button !== 0) return;
-      e.preventDefault();
-      try { grip.setPointerCapture(e.pointerId); } catch { /* the drag still works while the pointer stays on the edge */ }
-      panel.classList.add('resizing');
-      const move = ev => { width = innerWidth - ev.clientX; dock(); };
-      const done = () => {
-        grip.removeEventListener('pointermove', move);
-        grip.removeEventListener('pointerup', done);
-        grip.removeEventListener('pointercancel', done);
-        panel.classList.remove('resizing');
-        width = panelWidth();
-        GM_setValue(PANEL_WIDTH_KEY, width);
-      };
-      grip.addEventListener('pointermove', move);
-      grip.addEventListener('pointerup', done);
-      grip.addEventListener('pointercancel', done);
-    });
-    grip.addEventListener('dblclick', () => { width = DEFAULT_WIDTH; GM_deleteValue(PANEL_WIDTH_KEY); dock(); });
-    grip.addEventListener('keydown', e => {
-      const step = e.key === 'ArrowLeft' ? 40 : e.key === 'ArrowRight' ? -40 : 0;
-      if (!step) return;
-      e.preventDefault();
-      width = panelWidth() + step;
-      dock();
-      width = panelWidth();
-      GM_setValue(PANEL_WIDTH_KEY, width);
-    });
-    // Floating: drag the header (or its ⠿ handle) to move the window. A press that doesn't move is an ordinary
-    // click on whatever is under it (a tab, an icon), so the pointer is only taken over once it has moved.
-    let movedAt = 0;
-    header.addEventListener('pointerdown', e => {
-      if (e.button !== 0 || layout === 'side') return;
-      const sx = e.clientX, sy = e.clientY;
-      const start = panel.getBoundingClientRect();
-      let moved = false;
-      const move = ev => {
-        if (!moved) {
-          if (Math.hypot(ev.clientX - sx, ev.clientY - sy) < 5) return;
-          moved = true;
-          panel.classList.add('moving');
-          try { header.setPointerCapture(ev.pointerId); } catch { /* the drag still works while the pointer stays over the page */ }
-        }
-        box = { x: start.left + ev.clientX - sx, y: start.top + ev.clientY - sy, w: panelWidth(), h: panelHeight() };
-        dock();
-      };
-      const done = () => {
-        window.removeEventListener('pointermove', move);
-        window.removeEventListener('pointerup', done);
-        window.removeEventListener('pointercancel', done);
-        if (!moved) return;
-        panel.classList.remove('moving');
-        movedAt = Date.now();   // the click that ends a drag isn't a click on a tab
-        saveBox();
-      };
-      window.addEventListener('pointermove', move);
-      window.addEventListener('pointerup', done);
-      window.addEventListener('pointercancel', done);
-    });
-    header.addEventListener('click', e => { if (Date.now() - movedAt < 400) { e.stopPropagation(); e.preventDefault(); } }, true);
-    handle.addEventListener('keydown', e => {
-      const d = { ArrowLeft: [-40, 0], ArrowRight: [40, 0], ArrowUp: [0, -40], ArrowDown: [0, 40] }[e.key];
-      if (!d || layout === 'side') return;
-      e.preventDefault();
-      const r = panel.getBoundingClientRect();
-      box = { x: r.left + d[0], y: r.top + d[1], w: panelWidth(), h: panelHeight() };
-      dock();
-      saveBox();
-    });
-    handle.addEventListener('dblclick', () => { box = null; GM_deleteValue(PANEL_BOX_KEY); dock(); });
-    // Floating: drag an edge or corner to resize the window in that direction; the opposite side stays put
-    for (const [k, [dx, dy]] of Object.entries(EDGES)) {
-      const el = edges[k];
-      el.addEventListener('pointerdown', e => {
-        if (e.button !== 0) return;
-        e.preventDefault();
-        try { el.setPointerCapture(e.pointerId); } catch { /* the drag still works while the pointer stays on the edge */ }
-        panel.classList.add('resizing');
-        el.classList.add('active');
-        const sx = e.clientX, sy = e.clientY;
-        const start = panel.getBoundingClientRect();
-        const maxW = Math.min(1400, dx > 0 ? innerWidth - EDGE_GAP - start.left : dx < 0 ? start.right - EDGE_GAP : start.width);
-        const maxH = dy > 0 ? innerHeight - EDGE_GAP - start.top : dy < 0 ? start.bottom - EDGE_GAP : start.height;
-        const move = ev => {
-          const W = dx ? Math.max(MIN_WIDTH, Math.min(maxW, start.width + dx * (ev.clientX - sx))) : start.width;
-          const H = dy ? Math.max(MIN_HEIGHT, Math.min(maxH, start.height + dy * (ev.clientY - sy))) : start.height;
-          box = { x: dx < 0 ? start.right - W : start.left, y: dy < 0 ? start.bottom - H : start.top, w: W, h: H };
-          dock();
-        };
-        const done = () => {
-          el.removeEventListener('pointermove', move);
-          el.removeEventListener('pointerup', done);
-          el.removeEventListener('pointercancel', done);
-          panel.classList.remove('resizing');
-          el.classList.remove('active');
-          saveBox();
-        };
-        el.addEventListener('pointermove', move);
-        el.addEventListener('pointerup', done);
-        el.addEventListener('pointercancel', done);
-      });
+      // Entry Assistant already open on this order with no code picked shows the first code now
+      if (view === 'entry' && !entryTarget && cardOpen && entryShown !== entryFrames.get(entryLink(targets[0], true))) showEntryPage();
     }
 
     let state = null;
@@ -8814,8 +8658,9 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     }
 
     function attach() {
-      if (!host.isConnected) document.body.append(host);
-      host.dataset.theme = pageIsDark() ? 'dark' : 'light';
+      placeCard();
+      const theme = pageIsDark() ? 'dark' : 'light';
+      if (host.dataset.theme !== theme) host.dataset.theme = theme;
     }
 
     // Reads this page's case (a dispute's lines, claims and documents, or a work order), for research
@@ -9483,8 +9328,8 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       // A new page: what was read for the last one goes (the window stays open, as the portal's tools do)
       reset() { stopPolling(); state = null; pendingFor = ''; setStatus(''); setTimeout(checkPending, 3000); },
       keepAttached() {
-        if (!host.isConnected) attach();
-        if (!panel.hidden && !dockStyle.isConnected) dock();
+        attach();
+        if (cardOpen) layoutCard();
         syncPortal();
       },
       openWindow,
