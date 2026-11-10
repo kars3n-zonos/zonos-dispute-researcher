@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zonos Dispute Researcher
 // @namespace    zonos-brokerage
-// @version      7.79.0
-// @description  Tools for the Zonos broker portal: a Tools panel on every page (Classify, Quote, Analytics, research prompts, Entry Assistant, Prev / Next through your queue), an optional rebuilt work queue, Portal+ (search everything, sorting, filters, grouping, bulk actions), and easier-to-read order pages. Optional, per person under Settings (the cog in Tools): Entry Assistant token, Google Sheet case tracking (a row and a Google Doc per case, with comments and editable research prompts), Claude Code cloud research, shared answers. No keys are built in. Changes the dashboard only through bulk actions you confirm.
+// @version      7.80.0
+// @description  Tools for the Zonos broker portal, built into its own pages: Research in Claude Code (or claude.ai) in the portal's Research tool, with the answer written into the dispute's Notes; a fuller Classify inside the portal's Classify; Entry Assistant in the top bar beside Research, Classify and Quote; the Portal+ queue with search and bulk actions; easier-to-read order pages. Settings are under Manage account > Tools. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
 // @updateURL    https://gist.githubusercontent.com/kars3n-zonos/9dd13b6c4c3ea4d1d6a876d45002c0a3/raw/zonos-dispute-researcher.user.js
@@ -83,6 +83,21 @@
     for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false && kid !== '') el.append(kid);
     return el;
   }
+  // A small line icon (Lucide's shapes, the portal's own icon set), so what's added to the portal's bars looks like them
+  const ICONS = {
+    book: ['M12 7v14', 'M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z'],
+    chart: ['M3 3v16a2 2 0 0 0 2 2h16', 'M18 17V9', 'M13 17V5', 'M8 17v-3'],
+    bot: ['M12 8V4H8', 'M6 8h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z', 'M2 14h2', 'M20 14h2', 'M15 13v2', 'M9 13v2'],
+    external: ['M15 3h6v6', 'M10 14 21 3', 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6'],
+  };
+  function svgIcon(paths, cls = '') {
+    const NS = 'http://www.w3.org/2000/svg';
+    const s = document.createElementNS(NS, 'svg');
+    for (const [k, v] of Object.entries({ viewBox: '0 0 24 24', width: '16', height: '16', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) s.setAttribute(k, v);
+    if (cls) s.setAttribute('class', cls);
+    for (const d of paths) { const p = document.createElementNS(NS, 'path'); p.setAttribute('d', d); s.append(p); }
+    return s;
+  }
 
   function gmRequest(opts) {
     return new Promise((resolve, reject) => {
@@ -152,7 +167,7 @@
   /* ------------------------------------------------------------------ setup */
 
   // Nothing personal is built into this file, so it can be shared as is. Each person enters their own keys
-  // and ids under Settings (the cog in Tools); they're kept in Tampermonkey storage on that computer. Every part is
+  // and ids under Manage account > Tools; they're kept in Tampermonkey storage on that computer. Every part is
   // optional: what isn't set up is left out of the panel instead of failing.
   const CONFIG_KEY = 'zt:config';
   // The team's built-in values. This file leaves it empty, so the repo holds no keys; the copy published to the team's
@@ -460,7 +475,7 @@
     let json = null;
     try { json = JSON.parse(r.responseText); } catch { /* handled by status below */ }
     if (r.status === 401) {
-      if (manualNotesKey()) throw apiError('bad-token', 'The notes server rejected your key. Check it under Settings (the cog in Tools).');
+      if (manualNotesKey()) throw apiError('bad-token', 'The notes server rejected your key. Check it under Manage account > Tools.');
       // A joined key that ran out or was dropped: join again once (unless another tab already has)
       if (joinRecord().key === key) GM_setValue(NOTES_JOIN, {});
       if (!retried && location.host === DASHBOARD_HOST) return notesApi(method, path, body, true);
@@ -1137,7 +1152,7 @@
   // `body`: sent as a POST (the duty calculator); without it, a GET
   async function entryApi(path, timeout = 30000, body = null) {
     const token = entryToken();
-    if (!token) throw apiError('no-token', 'No Entry Assistant token is saved. Add it under Settings (the cog in Tools).');
+    if (!token) throw apiError('no-token', 'No Entry Assistant token is saved. Add it under Manage account > Tools.');
     let r;
     try {
       r = await gmRequest({ url: `${entryBase()}/api/v1/${path}`, timeout,
@@ -1146,7 +1161,7 @@
     } catch (e) {
       throw apiError('unreachable', `${e.message}. If Tampermonkey asked whether to allow the connection, allow it.`);
     }
-    if (r.status === 401 || r.status === 403) throw apiError('bad-token', 'Entry Assistant rejected the token. Check it under Settings (the cog in Tools).');
+    if (r.status === 401 || r.status === 403) throw apiError('bad-token', 'Entry Assistant rejected the token. Check it under Manage account > Tools.');
     if (r.status === 404) return null;
     if (r.status < 200 || r.status >= 300) {
       let why = '';
@@ -1164,7 +1179,7 @@
 
   // What the prompt tells Claude when the script's lookup didn't work
   const LOOKUP_FAILED = {
-    'no-token': 'no Entry Assistant token is saved (Settings (the cog in Tools))',
+    'no-token': 'no Entry Assistant token is saved (Manage account > Tools)',
     'bad-token': 'the Entry Assistant API rejected the saved token',
     unreachable: "the script couldn't reach the Entry Assistant API",
     server: 'the Entry Assistant API returned an error',
@@ -2893,7 +2908,7 @@
   /* ---------------------------------- the desk: every case tracked in the Google Sheet, research for Claude Code */
 
   // The dispute desk: each case you work is a row in the team's Google Sheet with a Google Doc of its answers and
-  // decisions, through the sheet's web app (set up under Settings, the cog in Tools). With it set up:
+  // decisions, through the sheet's web app (its address comes in the setup block). With it set up:
   // - the portal's own data (its GraphQL replies) shows what the case is, and its own actions (claim, resolve,
   //   escalate…) keep the case's row up to date;
   // - Claude's saved answers go into the case's doc;
@@ -3460,7 +3475,7 @@
     // `task`: 'research' (the full research) or 'patent' (the quick patent check, which isn't counted as research)
     async function queueResearch({ prompt, docs, lines, label, openTab = true, ifDone = 'ask', task = 'research' }) {
       if (!D.ent) throw new Error('Open a dispute or a work order first.');
-      if (!researchOn()) throw new Error(`Research in Claude Code still needs ${researchMissing().join(', ')}. Add it under Settings (the cog in Tools).`);
+      if (!researchOn()) throw new Error(`Research in Claude Code still needs ${researchMissing().join(', ')}. Add it under Manage account > Tools.`);
       const ctx = caseContext(D.ent);
       const what = task === 'patent' ? 'quick patent check' : lines.length ? `line${lines.length > 1 ? 's' : ''} ${lines.join(', ')}` : label;
       const before = ifDone === 'go' ? '' : await priorResearch(ctx);
@@ -3604,7 +3619,7 @@
           done[q.id] = Date.now();
           news = true;
           if (q.status === 'Done' && q.answer) {
-            importer({ text: q.answer, lines: q.lines.split(/[,\s]+/).filter(Boolean).map(Number), title: `Claude Code answer · ${q.id}` });
+            importer({ text: q.answer, lines: q.lines.split(/[,\s]+/).filter(Boolean).map(Number), title: `Claude Code answer · ${q.id}`, ref: q.id, kind: q.kind || '' });
             D.msg = 'Claude Code answered. Its answer is saved below and in the case doc.';
           } else D.msg = `Claude Code couldn't finish the research: ${q.answer || 'no reason given'}`;
         }
@@ -4983,7 +4998,7 @@
       const box = (on, text, n, title, onchange, extra = '') => h('label', { class: `cq-toggle${on ? ' on' : ''}${extra}`, title },
         h('input', { type: 'checkbox', checked: on, onchange: e => onchange(e.target.checked) }), text, h('span', { class: 'n', text: String(n) }));
       return [
-        nEsc > 0 ? h('span', { class: 'cq-eschid', title: 'Escalated orders are hidden here. They show in a search. To show them everywhere, untick "Hide escalated orders" under Tools > Settings > Panel and pages.',
+        nEsc > 0 ? h('span', { class: 'cq-eschid', title: 'Escalated orders are hidden here. They show in a search. To show them everywhere, untick "Hide escalated orders" under Manage account > Tools > Portal pages.',
           text: `${nEsc} escalated hidden` }) : null,
         resAll.length || S.resOnly ? box(S.resOnly, 'Only resolution failed', resShown.length,
           `${S.resOnly ? 'Showing only' : 'Tick to show only'} the disputes whose resolution failed (submitted, but the portal couldn't finish resolving them).${resAll.length > resShown.length ? ` ${resAll.length - resShown.length} more are escalated, so hidden (Hide escalated orders, in Settings).` : ''}`,
@@ -5155,22 +5170,11 @@
       root.querySelector(`tr.row[data-i="${S.focus}"]`)?.scrollIntoView({ block: 'nearest' });
       root.querySelector(`tr.row[data-i="${S.focus}"]`)?.focus({ preventScroll: true });
     }
-    // Typed anywhere on the page (not in a box): the queue's own keys
+    // Escape closes the queue's open popup or dialog (the queue has no other keys)
     function onKey(e) {
-      if (!host.isConnected || e.ctrlKey || e.metaKey || e.altKey) return;
-      const t = e.composedPath()[0];
-      const typing = t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
-      if (root.querySelector('.scrim')) { if (e.key === 'Escape') root.querySelector('.scrim').remove(); return; }
-      if (e.key === 'Escape' && S.pop) { S.pop = ''; render(); return; }
-      if (e.key === '/' && !typing) { e.preventDefault(); searchInput.focus(); searchInput.select(); return; }
-      if (typing) return;
-      const r = S.shown[S.focus];
-      if (e.key === 'j') { moveFocus(1); e.preventDefault(); }
-      else if (e.key === 'k') { moveFocus(-1); e.preventDefault(); }
-      else if (e.key === 'x' && r) { selectClick(r, S.focus, e); e.preventDefault(); }
-      else if (e.key === 'Enter' && r) { openRow(r); e.preventDefault(); }
-      else if (e.key === 'o' && r) { prepareOpen(r); GM_openInTab(location.origin + r.url, { active: false, insert: true }); e.preventDefault(); }
-      else if (e.key === 'Escape') { if (S.pop) S.pop = ''; else S.sel.clear(); render(); }
+      if (!host.isConnected || e.key !== 'Escape' || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (root.querySelector('.scrim')) { root.querySelector('.scrim').remove(); return; }
+      if (S.pop) { S.pop = ''; render(); }
     }
     document.addEventListener('keydown', onKey, true);
     document.addEventListener('click', () => { if (S.pop) { S.pop = ''; render(); } });
@@ -5680,38 +5684,6 @@
     location.assign(url);
   }
 
-  // The order the current page is about, from the queue as you last left it
-  // (asked every second while Tools is open: the list is read again only when the queue saved a new one, and
-  // each order's place is looked up in a map)
-  let navCache = { at: -1, items: [], index: new Map() };
-  function navPosition() {
-    const at = GM_getValue(NAV_AT_KEY, 0);
-    if (at !== navCache.at || !at) {
-      const nav = GM_getValue(NAV_KEY, null);
-      const items = nav?.items || [];
-      navCache = { at: at || nav?.at || 0, items, index: new Map() };
-      items.forEach((it, i) => { const k = decodeURIComponent(it.url.split('?')[0]); if (!navCache.index.has(k)) navCache.index.set(k, i); });
-    }
-    if (!navCache.items.length) return { items: [], i: -1 };
-    const here = decodeURIComponent(location.pathname).replace(/\/$/, '');
-    return { items: navCache.items, i: navCache.index.get(here) ?? -1, at: navCache.at };
-  }
-
-  // The portal's own Classify / Quote rail on order pages is hidden: Classify and Quote are built into Tools.
-  const RAIL_CSS_ID = 'zt-rail-css';
-  function hideRail(on) {
-    let el = document.getElementById(RAIL_CSS_ID);
-    if (!on) { el?.remove(); return; }
-    if (!el) {
-      el = document.createElement('style');
-      el.id = RAIL_CSS_ID;
-      el.textContent = `
-        div:has(> div > button[title="Classify"][aria-pressed]) { display: none !important; }
-        div.shrink-0:has(button[title="Classify"][aria-pressed]) { width: 0 !important; min-width: 0 !important; }`;
-    }
-    if (!el.isConnected) (document.head || document.documentElement).append(el);
-  }
-
   /* ------------------------------------------- dashboard: order pages, easier to read */
 
   // Keeps the portal's look, and makes two things plain: the run-together "Entry … · consignee … · ship-from KR"
@@ -5807,7 +5779,6 @@
   // program with different answers.
   let questionnaires = [];
   let programsFor = '';
-  const PROGRAMS_KEY = 'zt:programs';   // show them on the page (Settings; off by default)
   // An answer can be a choice (label), free text (value) or several of either
   const answerText = a => (Array.isArray(a) ? a.map(answerText).filter(Boolean).join('; ') : clean(a?.label || a?.value || (typeof a === 'string' ? a : '')));
   async function loadPrograms(disputeId) {
@@ -5847,39 +5818,10 @@
     } catch (e) { console.warn('[Tools] questionnaire programs', e); }
   }
   const programLabel = p => [p.name, [p.type, p.code].filter(Boolean).join(' · ')].filter(Boolean).join(' — ');
+  // The dispute's questionnaire programs, loaded once per dispute for the research prompt
   function showPrograms() {
-    const main = document.querySelector('main');
     const id = disputeIdHere();
-    if (!main || !id) return;
-    if (programsFor !== id) { loadPrograms(id); return; }   // loaded either way: the research prompt uses it
-    const on = GM_getValue(PROGRAMS_KEY, false);
-    // Turned off: the ids come back and the questionnaire lists go
-    if (!on) {
-      for (const b of main.querySelectorAll('.zt-program')) b.remove();
-      for (const el of main.querySelectorAll('[data-zt-program]')) { el.textContent = el.dataset.ztProgram; el.removeAttribute('title'); delete el.dataset.ztProgram; }
-      return;
-    }
-    // The id itself ("compliance_program_…", the bold text after "Disputed program") is replaced by what it is;
-    // the id stays in its tooltip. The questions and answers fold out under the line.
-    const walker = document.createTreeWalker(main, NodeFilter.SHOW_TEXT);
-    const hits = [];
-    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-      const m = n.textContent.match(/compliance_program_\w+/);
-      if (m && programs.has(m[0]) && !n.parentElement.closest('.zt-program')) hits.push([n, m[0]]);
-    }
-    for (const [node, pid] of hits) {
-      const p = programs.get(pid);
-      const el = node.parentElement;
-      const whole = el.textContent.trim() === pid;   // the id has its own element (the bold part): swap its text
-      if (whole) { el.dataset.ztProgram = pid; el.textContent = programLabel(p); el.title = pid; }
-      else node.textContent = node.textContent.replace(pid, programLabel(p));
-      const line = (whole ? el.parentElement : el);
-      if (!p.qa.length || (line.nextElementSibling?.classList.contains('zt-program') && line.nextElementSibling.dataset.id === pid)) continue;
-      line.after(h('details', { class: 'zt-program text-sm', 'data-id': pid, style: 'margin:4px 0 8px' },
-        h('summary', { class: 'text-muted-foreground', style: 'cursor:pointer', text: `Questionnaire: ${p.qa.length} question${p.qa.length === 1 ? '' : 's'} and the merchant's answers` }),
-        h('ol', { style: 'margin:6px 0 0 18px;list-style:decimal' }, p.qa.map(([q, a]) => h('li', { style: 'margin:4px 0' },
-          h('span', { class: 'text-muted-foreground', text: q }), h('br'), h('strong', { text: a }))))));
-    }
+    if (id && programsFor !== id) loadPrograms(id);
   }
   // For the research prompt: each program claimed on this dispute, with its questions and answers
   function programLines() {
@@ -5939,7 +5881,7 @@
     return page ? { url: page, name } : null;
   }
   const LIST_LINKS_KEY = 'zt:listLinks';     // "Listed on" opens the official list (Settings)
-  const ENTRY_CLICKS_KEY = 'zt:entryClicks'; // a code clicked on the page opens Entry Assistant in Tools (Settings)
+  const ENTRY_CLICKS_KEY = 'zt:entryClicks'; // a code clicked on the page opens the Entry Assistant window (Settings)
   const ENTRY_AHEAD_KEY = 'zt:entryAhead';   // the open order's codes load in Entry Assistant ahead of time (Settings, on unless turned off)
   function fixListLinks() {
     if (!/DENIED_PARTY_REVIEW/.test(location.pathname)) return;
@@ -7092,6 +7034,132 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     return { job, counts, start, pause, retryFailed, clear, resume, running: () => !!timer, on: fn => listeners.add(fn) };
   })();
 
+  /* ------------------------------------------- dashboard: the portal's research Notes */
+
+  // Each duty dispute has one shared Notes document in the portal's Research tool. Claude's answers go in it by
+  // themselves, through the portal's own notes API (same site, your sign-in, the portal's Live/Test mode), as a section
+  // at the top: "Claude Code research", "Claude Code patent check" or "Claude research (claude.ai)". A new answer replaces
+  // its own section and leaves everything else in the notes as it is. Every save names the version it read, so it never
+  // overwrites someone's newer save: on a clash it reads again and retries. While someone is typing in the Notes on this
+  // page, it waits until they're saved.
+  const portalNotes = (() => {
+    const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const TITLES = { cc: 'Claude Code research', patent: 'Claude Code patent check', ai: 'Claude research (claude.ai)' };
+    const OURS = new Set(Object.values(TITLES).map(t => `## ${t}`));
+    const MAX_BYTES = 190 * 1024;   // the portal takes up to 200 KB
+    async function call(id, method = 'GET', body) {
+      const res = await W.fetch(`/api/research/duty-disputes/${encodeURIComponent(id)}`, {
+        method, credentials: 'same-origin',
+        headers: { 'x-app-mode': portal.mode(), ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+      let data = null;
+      try { data = await res.json(); } catch { /* no JSON */ }
+      return { status: res.status, data };
+    }
+    async function read(id) {
+      const r = await call(id);
+      if (r.status !== 200) throw new Error(r.data?.error || `the portal answered ${r.status}`);
+      return { body: typeof r.data?.doc?.body === 'string' ? r.data.doc.body : '', etag: r.data?.etag ?? null };
+    }
+    // The Notes on this page: wait while they say anything but Saved (someone is typing), at most a minute
+    async function settled() {
+      for (let i = 0; i < 60; i++) {
+        const st = document.querySelector('#work-order-tools section[aria-label="Notes"] [role="status"]');
+        if (!st || /^saved$/i.test(clean(st.textContent))) return;
+        await sleep(1000);
+      }
+    }
+    // The open Notes editor reads the new version: the portal re-reads its data when the browser says it's back online
+    const refresh = () => { try { W.dispatchEvent(new W.Event('online')); } catch { /* it shows on the next visit */ } };
+
+    // Claude's Markdown, as the Notes editor takes it: headings under the section's own (###), tables as lists, code as
+    // inline code, no rules (the section ends at one), and no "<" (the editor would read it as a tag)
+    function tidy(md) {
+      const out = [];
+      const lines = String(md || '').replace(/\r\n?/g, '\n').split('\n');
+      const cells = l => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+      const plain = l => /^\S/.test(l) && !/^([-*+]|\d+[.)])\s|^>|^#|^`|^\|/.test(l);
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i];
+        if (/^\s*(```|~~~)/.test(l)) {
+          for (i++; i < lines.length && !/^\s*(```|~~~)/.test(lines[i]); i++) if (lines[i].trim()) out.push('', `\`${lines[i].trim().replace(/`/g, "'")}\``);
+          out.push('');
+          continue;
+        }
+        if (/^\s*\|.*\|\s*$/.test(l) && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1] || '')) {
+          const head = cells(l);
+          for (i += 2; i < lines.length && /^\s*\|/.test(lines[i]); i++) {
+            const row = cells(lines[i]);
+            out.push(`- ${row.map((c, k) => (head[k] && c ? `**${head[k]}:** ${c}` : c)).filter(Boolean).join(' · ')}`);
+          }
+          i--;
+          out.push('');
+          continue;
+        }
+        if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(l) || /^\s*=+\s*$/.test(l)) continue;
+        const hd = l.match(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/);
+        if (hd) { out.push('', `### ${hd[1]}`, ''); continue; }
+        // Lines of plain text one under another ("**Final answer:** …", then "**Reasoning:** …") stay on their own lines
+        if (plain(l) && plain(out[out.length - 1] || '')) out.push('');
+        out.push(l);
+      }
+      return out.join('\n').replace(/</g, '&lt;').replace(/\n{3,}/g, '\n\n').trim();
+    }
+    // The notes without this script's sections, as the team wrote them
+    function strip(body) {
+      const lines = String(body || '').replace(/\r\n?/g, '\n').split('\n');
+      const out = [];
+      for (let i = 0; i < lines.length; i++) {
+        if (!OURS.has(lines[i].trim())) { out.push(lines[i]); continue; }
+        let j = i + 1;
+        while (j < lines.length && !/^\s*(\*\*\*|---|___)\s*$/.test(lines[j]) && !/^##\s/.test(lines[j])) j++;
+        i = j < lines.length && /^##\s/.test(lines[j]) ? j - 1 : j;
+      }
+      return out.join('\n').replace(/^\s+/, '').trim();
+    }
+    function section(kind, text, ref, at) {
+      const when = new Date(at || Date.now()).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+      return [`## ${TITLES[kind]}`, '',
+        `*${kind === 'ai' ? 'From claude.ai' : 'From Claude Code'} · ${when}${ref ? ` · ref ${ref}` : ''}. Added by Dispute Deck: the next answer replaces this section.*`,
+        '', tidy(text), '', '***'].join('\n');
+    }
+    // Puts the answer at the top of the dispute's Notes, in place of the last one of its kind. False when it's already there.
+    async function addAnswer(id, { text, kind = 'cc', ref = '', at = Date.now() }) {
+      if (!id || !String(text || '').trim()) return false;
+      for (let tries = 0; tries < 4; tries++) {
+        await settled();
+        const cur = await read(id);
+        if (ref && cur.body.includes(`ref ${ref}`)) return false;
+        const lines = cur.body.replace(/\r\n?/g, '\n').split('\n');
+        const start = lines.findIndex(l => l.trim() === `## ${TITLES[kind]}`);
+        let rest = cur.body;
+        if (start >= 0) {
+          let end = lines.findIndex((l, k) => k > start && (/^\s*(\*\*\*|---|___)\s*$/.test(l) || /^##\s/.test(l)));
+          if (end < 0) end = lines.length;
+          else if (/^##\s/.test(lines[end])) end -= 1;
+          rest = [...lines.slice(0, start), ...lines.slice(end + 1)].join('\n');
+        }
+        let sec = section(kind, text, ref, at);
+        const room = MAX_BYTES - new Blob([rest]).size - 200;
+        if (new Blob([sec]).size > room) sec = `${sec.slice(0, Math.max(0, room))}\n\n*(Cut short to fit the notes. The whole answer is in the case doc.)*\n\n***`;
+        const body = `${sec}\n\n${rest.trim()}`.trim() + '\n';
+        const r = await call(id, 'PUT', { body, etag: cur.etag });
+        if (r.status === 409) { await sleep(800); continue; }
+        if (r.status < 200 || r.status >= 300) throw new Error(r.data?.error || `the portal answered ${r.status}`);
+        refresh();
+        return true;
+      }
+      throw new Error('someone kept saving the notes at the same time');
+    }
+    // For the research prompt: what the team has written so far (without Claude's sections), or ''
+    async function teamNotes(id) {
+      if (!id) return '';
+      return strip((await read(id)).body);
+    }
+    return { addAnswer, teamNotes, tidy };
+  })();
+
   /* ------------------------------------------------- dashboard: the panel */
 
   const PANEL_CSS = `
@@ -7102,12 +7170,9 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     button { font: inherit; cursor: pointer; }
     button:disabled { opacity: .55; cursor: default; }
     button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .launch { position: fixed; z-index: 2147483000; width: 58px; height: 58px; display: grid; place-items: center; background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 50%; padding: 0; font-weight: 700; font-size: 12px; line-height: 1.1; box-shadow: 0 6px 20px rgba(0,0,0,.4); cursor: grab; touch-action: none; user-select: none; }
-    .launch .ico { display: block; font-size: 18px; }
-    .launch.dragging { cursor: grabbing; transform: scale(1.06); }
     .panel { position: fixed; top: 0; right: 0; height: 100vh; width: min(var(--w, 480px), 100vw); z-index: 2147483001; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); border-left: 1px solid var(--line); box-shadow: -10px 0 30px rgba(0,0,0,.3); }
     .panel.docked { box-shadow: none; }
-    .panel.overlay { top: 12px; right: 12px; height: calc(100vh - 24px); width: min(var(--w, 480px), calc(100vw - 24px)); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: 0 24px 70px rgba(0,0,0,.55); }
+    .panel.overlay { top: 12px; right: 12px; height: calc(100vh - 24px); width: min(var(--w, 480px), calc(100vw - 24px)); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,.18); }
     .panel.resizing, .panel.moving { user-select: none; }
     .panel.resizing iframe, .panel.moving iframe { pointer-events: none; }
     [hidden] { display: none !important; }
@@ -7129,7 +7194,10 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     .edge.n::after, .edge.s::after { left: 0; right: 0; height: 2px; } .edge.n::after { top: 0; } .edge.s::after { bottom: 0; }
     .edge.e::after, .edge.w::after { top: 0; bottom: 0; width: 2px; } .edge.e::after { right: 0; } .edge.w::after { left: 0; }
     .edge:hover::after, .edge.active::after { background: var(--accent); }
-    header { display: flex; align-items: flex-end; justify-content: flex-start; gap: 8px; padding: 6px 8px 0 10px; border-bottom: 1px solid var(--line); }
+    header { display: flex; align-items: center; gap: 8px; height: 48px; flex: none; padding: 0 10px 0 12px; border-bottom: 1px solid var(--line); }
+    .win-title { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 14px; font-weight: 500; }
+    .win-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .win-title svg { flex: none; }
     .panel.overlay header { cursor: grab; touch-action: none; }
     .panel.moving header, .panel.moving header button { cursor: grabbing; }
     .handle { display: none; align-self: center; margin-left: -4px; padding: 2px 3px; background: none; border: 0; border-radius: 6px; color: var(--muted); font-size: 15px; line-height: 1; cursor: grab; }
@@ -7139,7 +7207,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     .tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: 9px 7px 8px; font-weight: 600; white-space: nowrap; }
     .tab:hover { color: var(--fg); }
     .tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
-    .header-actions { display: flex; align-items: center; gap: 2px; padding-bottom: 5px; margin-left: auto; }
+    .header-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; }
     .icon { background: none; border: 0; color: var(--muted); font-size: 18px; line-height: 1; padding: 3px 6px; border-radius: 6px; }
     .icon:hover, .icon[aria-pressed="true"] { color: var(--fg); background: var(--soft); }
     .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -7249,8 +7317,6 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     .note-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 4px; font-size: 11px; color: var(--muted); }
     .note-meta .linkish { font-size: 11px; }
     textarea.answer { width: 100%; min-height: 110px; font: inherit; background: var(--soft); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; resize: vertical; }
-    .toolstrip { display: flex; align-items: center; gap: 5px; padding: 6px 8px; overflow: hidden; border-bottom: 1px solid var(--line); background: var(--soft); }
-    .toolstrip .spacer { flex: 1; }
     .tool { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-weight: 600; font-size: 12px; white-space: nowrap; }
     .tool:hover:not(:disabled) { border-color: var(--accent); }
     .tool[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
@@ -7432,172 +7498,28 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
   function createPanel() {
     const host = h('div', { id: 'zdr-host' });
     const root = host.attachShadow({ mode: 'open' });
-    // Keep the dashboard's keyboard shortcuts from firing while typing in the panel
-    for (const type of ['keydown', 'keyup', 'keypress']) host.addEventListener(type, e => e.stopPropagation());
+    // Keep the dashboard's keys from firing while typing in the window (Escape still reaches the page, to close it)
+    for (const type of ['keydown', 'keyup', 'keypress']) host.addEventListener(type, e => { if (e.key !== 'Escape') e.stopPropagation(); });
 
     const body = h('div', { class: 'body' });
     const status = h('div', { class: 'status', role: 'status' });
-    const ccBtn = h('button', { class: 'primary', type: 'button', text: 'Research in Claude Code', title: 'Puts this research in the Google Sheet for Claude Code. Its answer comes back here and in the case doc by itself.', onclick: () => run(sendToClaudeCode) });
-    const openBtn = h('button', { class: 'secondary', type: 'button', text: 'Open in claude.ai', onclick: () => run(handoff) });
-    const copyBtn = h('button', { class: 'secondary', type: 'button', text: 'Copy prompt', onclick: () => run(copyPrompt) });
-    // Search Slack & Front, beside the research buttons once it's turned on (access code and webhook saved)
-    const slackBtn = h('button', { class: 'secondary', type: 'button', text: 'Search Slack & Front', hidden: true,
-      title: "Sends this page's merchant and dispute to the Slack workflow, which looks for related Slack threads and Front conversations. To check or change the details first, use Settings > Search Slack & Front.",
-      onclick: async () => {
-        slackBtn.disabled = true;
-        setStatus('Sending to Slack…');
-        try { const r = await ssPost(ssFacts()); setStatus(r.text, r.ok ? 'ok' : 'err'); } catch (e) { setStatus(e.message, 'err'); } finally { slackBtn.disabled = false; }
-      } });
-    const slackSearchOn = () => batchUnlocked() && !!cfg().slackSearchUrl;
-    // A bubble you can drag anywhere (where you leave it is remembered); a click without a drag opens Tools
-    const BUBBLE_KEY = 'zt:bubble';
-    const launch = h('button', { class: 'launch', type: 'button', title: 'Tools: Classify, Quote, research and Entry Assistant. Drag to move; \\ to toggle.', 'aria-label': 'Open Tools', hidden: true,
-      onclick: () => { if (launch.dataset.dragged) { delete launch.dataset.dragged; return; } open(); } },
-      h('span', {}, h('span', { class: 'ico', text: '⚒' }), 'Tools'));
-    const clampX = x => Math.max(8, Math.min(innerWidth - 66, x));
-    const clampY = y => Math.max(8, Math.min(innerHeight - 66, y));
-    function placeBubble() {
-      const p = GM_getValue(BUBBLE_KEY, null);
-      launch.style.left = `${clampX(p ? p.x : innerWidth - 80)}px`;
-      launch.style.top = `${clampY(p ? p.y : innerHeight - 80)}px`;
-    }
-    placeBubble();
-    window.addEventListener('resize', placeBubble);
-    // The launcher: an orange Tools button at the bottom of the portal's sidebar, above References (the bubble
-    // above is no longer offered: it stays hidden). It lives in the page, so it's put back whenever the portal
-    // redraws its sidebar. Without the sidebar (a narrow window),  opens Tools.
-    const launcherMode = () => 'sidebar';
-    // A red "!" beside "Tools" when a newer version is out (see checkUpdate)
-    const updateDot = h('span', { 'aria-hidden': 'true', text: '!',
-      style: 'margin-left:-4px;display:none;place-items:center;width:17px;height:17px;border-radius:50%;background:#dc2626;color:#ffffff;font-size:11px;font-weight:700;line-height:1' });
-    const sideBtn = h('button', { type: 'button', id: 'zt-side-launch', 'aria-label': 'Open Tools', title: 'Tools (\\ to toggle)',
-      class: 'flex w-full items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors',
-      style: 'border-color:#f59e0b;color:#f59e0b;background:rgba(245,158,11,.10);font-weight:600;cursor:pointer',
-      onclick: () => { if (panel.hidden) open(); else close(); } },
-      h('span', { 'aria-hidden': 'true', text: '⚒' }), h('span', { text: 'Tools' }), updateDot);
-    // Above it, on dispute and order pages, when turned on under Settings > Panel and pages (off at first): claim
-    // the order and start research in one click, in Claude Code when it's set up for you, else in claude.ai. Tools
-    // stays closed while it works (what it's doing shows right above the button), and opens once it's started.
-    const QUICK_KEY = 'zt:quickResearch';
     const RESEARCH_LOG_KEY = 'zt:researchLog';   // Claude Code also writes its full research log for the case doc
-    const AUTO_SAVE_KEY = 'zt:autoSaveChat';     // claude.ai answers are saved without pressing Save
-    // Just "Research"; how (Claude Code or claude.ai) is in its tooltip, and on the Research tab's own buttons
-    const quickTitle = () => `Claims this order and researches it ${desk.researchOn() ? 'in Claude Code' : 'in claude.ai'}, in a new tab`;
-    const sideQuick = h('button', { type: 'button', id: 'zt-side-research', hidden: true,
-      class: 'flex w-full items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors',
-      style: 'border-color:#f59e0b;color:#ffffff;background:#d97706;font-weight:600;cursor:pointer;margin-bottom:6px',
-      onclick: () => quickResearch() }, h('span', { 'aria-hidden': 'true', text: '✦' }), h('span', { text: 'Research' }));
-    const sideStatus = h('div', { id: 'zt-side-status', role: 'status', hidden: true, style: 'font-size:12px;line-height:1.35;margin:0 2px 6px;color:#b45309' });
-    let quickBusy = false;
-    let quietOpen = false;   // open() reads the page without showing the panel
-    const quickSay = (text, err = false) => { sideStatus.textContent = text; sideStatus.style.color = err ? '#dc2626' : '#b45309'; sideStatus.hidden = !text; };
-    // This page's work order, from the queue as you last left it, else the portal's search; claimed if nobody has it
-    async function claimHere() {
-      const ent = entityFromPathHere();
-      if (!ent) return '';
-      const nav = navPosition();
-      let wo = nav.i >= 0 ? { id: nav.items[nav.i].id } : null;
-      const tracking = (clean(document.querySelector('main')?.innerText || '').match(/\b[A-Z]{2}\d{9}[A-Z]{2}\b/) || [])[0] || '';
-      for (const q of [tracking, ent.id].filter(Boolean)) {
-        const found = (await portal.search(q, 25).catch(() => [])).find(n => (wo ? n.id === wo.id : (n.subject?.id || n.subjectKey) === ent.id));
-        if (found) { wo = found; break; }
-      }
-      if (!wo?.type) return wo ? '' : "Couldn't find its work order to claim";
-      const me = await portal.me();
-      if (wo.assigneeId === me.id) return 'Already yours';
-      if (wo.assigneeId) {
-        if (!confirm(`This order is claimed by ${wo.assigneeName || 'someone else'}. Research it anyway (without claiming it)?`)) throw new Error(`Not started: it's claimed by ${wo.assigneeName || 'someone else'}.`);
-        return `Claimed by ${wo.assigneeName || 'someone else'}`;
-      }
-      if (wo.status !== 'OPEN') return '';
-      const res = await portal.act('BrokerageWorkOrderClaim', [wo.id]);
-      if (res.failed.length) throw new Error(`Couldn't claim it: ${res.failed[0].error}`);
-      return 'Claimed';
-    }
+    // In the portal's Research tool (duty disputes): the button that takes the place of its Copy prompt, and a line
+    // under it saying how research is going. Both are the portal's own look (its classes), in the page.
+    const rsBtn = h('button', { type: 'button', 'data-zt': 'research', onclick: () => researchFromPortal() });
+    const rsStatus = h('p', { 'data-zt': 'research-status', class: 'text-xs text-muted-foreground', role: 'status', hidden: true });
+    // Entry Assistant in the portal's top bar, beside Research, Classify and Quote, with their look
+    const TOOL_BTN = 'flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset';
+    const eaBtn = h('button', { type: 'button', id: 'zt-entry-tool', 'aria-pressed': 'false', title: 'Entry Assistant: HTS codes, notes, duties and CBP rulings for this order',
+      onclick: () => { if (!panel.hidden && view === 'entry') close(); else openWindow('entry'); } },
+      svgIcon(ICONS.book, 'h-4 w-4 shrink-0'), 'Entry Assistant');
+    // This page's case, as the queue and the sheet name it
     const entityFromPathHere = () => {
       let m = location.pathname.match(/^\/duty-disputes\/(duty_dispute_(?!item_)[A-Za-z0-9]+)/);
       if (m) return { id: m[1] };
       m = location.pathname.match(/^\/entry-writer-queue\/[A-Z][A-Z_]+\/([^/?#]+)/);
       return m ? { id: caseIdOf(decodeURIComponent(m[1])) } : null;
     };
-    async function quickResearch() {
-      if (quickBusy) return;
-      quickBusy = true;
-      sideQuick.disabled = true;
-      const path = location.pathname;
-      try {
-        quickSay('Reading this page…');
-        if (!(state && state.path === path)) { quietOpen = true; try { await open(); } finally { quietOpen = false; } }
-        if (!await waitFor(() => state && state.path === path && state.data, { timeout: 45000 })) throw new Error("Couldn't read this page yet. Try again once it has loaded.");
-        if (state.data.kind !== 'workOrder' && !state.selected?.size) state.selected = new Set(state.data.items.filter(i => i.inDispute).map(i => i.line));
-        quickSay('Claiming it…');
-        const claimed = await claimHere();
-        if (desk.researchOn()) {
-          quickSay(`${claimed ? `${claimed} · ` : ''}saving to the Google Sheet and starting Claude Code…`);
-          const r = await sendToClaudeCode();   // its session opens in a new tab, like the Research tab's button
-          if (r?.skipped) { quickSay(`${claimed ? `${claimed} · ` : ''}not sent again: ${r.why}`); return; }
-          if (!r?.session && !r?.dry) throw new Error(`${claimed ? `${claimed}, but ` : ''}the cloud session didn't start${r?.fireError ? ` (${r.fireError})` : ''}.`);
-          quickSay(`${claimed ? `${claimed} · ` : ''}${r.dry ? 'test mode: nothing sent' : 'research started in Claude Code'} ✓`);
-        } else {
-          quickSay(`${claimed ? `${claimed} · ` : ''}opening claude.ai…`);
-          await handoff();
-          quickSay(`${claimed ? `${claimed} · ` : ''}opened in claude.ai ✓`);
-        }
-        if (location.pathname === path) { await open(); setView('dispute'); }
-        setTimeout(() => { if (!quickBusy) quickSay(''); }, 10000);
-      } catch (e) {
-        quickSay(e.message, true);
-      } finally {
-        quickBusy = false;
-        sideQuick.disabled = false;
-      }
-    }
-    function placeQuick() {
-      const show = isCasePage() && GM_getValue(QUICK_KEY, false) === true;
-      if (!show && !quickBusy) quickSay('');
-      const title = quickTitle();
-      sideQuick.hidden = !show;
-      if (sideQuick.title !== title) sideQuick.title = title;
-    }
-    const sideWrap = h('div', { class: 'px-2 pb-2', id: 'zt-side-wrap' }, sideStatus, sideQuick, sideBtn);
-    // (runs every second: when the button is already in place by References, nothing is looked for)
-    let refHolder = null;
-    function placeLauncher() {
-      placeQuick();
-      const side = launcherMode() === 'sidebar';
-      if (side && refHolder?.isConnected && sideWrap.nextElementSibling === refHolder && refHolder.offsetParent) return;
-      const ref = side && [...document.querySelectorAll('aside button, aside a')].find(e => /References/.test(e.textContent));
-      const holder = ref?.parentElement;
-      refHolder = holder || null;
-      launch.style.display = 'none';
-      if (!(holder && holder.offsetParent)) { sideWrap.remove(); return; }   // no sidebar (a narrow window):  opens Tools
-      if (sideWrap.nextElementSibling !== holder) holder.before(sideWrap);
-    }
-    launch.addEventListener('pointerdown', e => {
-      if (e.button !== 0) return;
-      const sx = e.clientX, sy = e.clientY, r = launch.getBoundingClientRect();
-      let moved = false;
-      try { launch.setPointerCapture(e.pointerId); } catch { /* the drag still works while over the bubble */ }
-      const move = ev => {
-        if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 5) return;
-        moved = true;
-        launch.classList.add('dragging');
-        launch.style.left = `${clampX(r.left + ev.clientX - sx)}px`;
-        launch.style.top = `${clampY(r.top + ev.clientY - sy)}px`;
-      };
-      const up = () => {
-        launch.removeEventListener('pointermove', move);
-        launch.removeEventListener('pointerup', up);
-        launch.removeEventListener('pointercancel', up);
-        launch.classList.remove('dragging');
-        if (!moved) return;
-        launch.dataset.dragged = '1';   // the click that follows a drag doesn't open the panel
-        GM_setValue(BUBBLE_KEY, { x: parseFloat(launch.style.left), y: parseFloat(launch.style.top) });
-      };
-      launch.addEventListener('pointermove', move);
-      launch.addEventListener('pointerup', up);
-      launch.addEventListener('pointercancel', up);
-    });
     const tokenInput = h('input', { type: 'password', placeholder: 'Paste your Entry Assistant token', 'aria-label': 'Entry Assistant token', autocomplete: 'off' });
     const tokenNote = h('p', { class: 'hint' });
     // A new name also goes to the notes server, which puts it on the answers you already saved
@@ -7614,7 +7536,6 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         }
       },
     });
-    const notesKeyInput = h('input', { type: 'password', placeholder: 'Notes key (only if joining by yourself fails)', 'aria-label': 'Notes key', autocomplete: 'off' });
     const notesKeyNote = h('p', { class: 'hint' });
     const setNotesKeyNote = (text, kind = '') => { notesKeyNote.textContent = text; notesKeyNote.className = `hint ${kind}`; };
     function refreshNotesKeyNote() {
@@ -7626,26 +7547,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       else if (rec.error) setNotesKeyNote(rec.error, 'err');
       else setNotesKeyNote('Shared answers: you join on your own through your dashboard sign-in.');
     }
-    async function testNotesKey() {
-      if (!notesBase()) { refreshNotesKeyNote(); return; }
-      setNotesKeyNote('Testing…');
-      try {
-        const me = await notesApi('GET', '/me');
-        setNotesKeyNote(`Connected to shared answers as ${me.name}.`, 'ok');
-      } catch (e) {
-        setNotesKeyNote(e.message, 'err');
-      }
-    }
-    function saveNotesKey() {
-      const value = cleanToken(notesKeyInput.value);
-      if (value) GM_setValue(NOTES_KEY, value);
-      else GM_deleteValue(NOTES_KEY);
-      notesKeyInput.value = '';
-      refreshNotesKeyNote();
-      // With the box emptied, this joins through the dashboard sign-in
-      testNotesKey().then(() => state && syncNow());
-    }
-    // ---- Setup (the gear, and "Setup" in the Tools tab): everything personal, kept in Tampermonkey storage on
+    // ---- Settings (Manage account > Tools): everything personal, kept in Tampermonkey storage on
     // this computer. Every part is optional; what isn't set up is simply left out of the panel.
     const note = () => h('p', { class: 'hint' });
     const say = (el, text, kind = '') => { el.textContent = text; el.className = `hint ${kind}`; };
@@ -7655,7 +7557,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     // Each section folds up like a dropdown, so Settings opens as a short list of titles
     const group = (title, intro, ...kids) => h('details', { class: 'group setting' }, h('summary', { class: 'label', text: title }), h('div', { class: 'setting-body' }, intro ? h('p', { class: 'hint', style: 'margin:0 0 6px', text: intro }) : null, ...kids));
     const btn = (text, onclick) => h('button', { class: 'secondary', type: 'button', text, onclick });
-    const afterSetup = () => { if (state) render(); refreshTools(); if (view === 'dispute') showResearchIdle(); };
+    const afterSetup = () => { if (state) render(); refreshTools(); };
 
     // Entry Assistant
     const entryUrlInput = textField('entryUrl', CONFIG_DEFAULTS.entryUrl, 'Entry Assistant site');
@@ -7667,28 +7569,6 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       else { refreshTokenNote(); testConnection(); }
       tokenInput.placeholder = entryToken() ? 'Saved (paste a new one to replace it)' : 'Paste your Entry Assistant token';
       afterSetup();
-    };
-
-    // Prompts: the team's edits to the research prompts, in the sheet's Prompts tab
-    const promptsNote = note();
-    const showPromptsInfo = () => {
-      const i = desk.promptsInfo();
-      say(promptsNote, !desk.sheetsOn() ? 'Set up the Google Sheet above first. Until then the research prompts use the built-in text.'
-        : i?.rows ? `Using the team's prompts from the Prompts tab (read ${shortDate(i.at)}): ${i.edited} of the pieces differ from the built-in text.`
-        : i ? 'The sheet has no Prompts tab yet, so the built-in text is used. Press Set up Prompts to add it.' : 'Not read from the sheet yet. Press Refresh.');
-    };
-    const setUpPrompts = async () => {
-      try {
-        const r = await desk.setupPrompts(t => say(promptsNote, t));
-        promptsNote.replaceChildren(`${r.made ? 'Made the Prompts tab in the Google Sheet' : 'The Prompts tab is set up'}${r.added ? ` and added ${r.added} piece${r.added === 1 ? '' : 's'} with the built-in text` : ': every piece is already there'}. Edit the Text column there; a blank Text uses the built-in text. Everyone using the sheet gets the changes within 10 minutes. `,
-          r.url ? h('a', { href: r.url, target: '_blank', rel: 'noopener', text: 'Open the Prompts tab' }) : '');
-        promptsNote.className = 'hint ok';
-        afterSetup();
-      } catch (err) { say(promptsNote, err.message, 'err'); }
-    };
-    const refreshPrompts = async () => {
-      say(promptsNote, `Reading the prompts from ${trackedIn}…`);
-      try { await desk.loadPrompts(true); showPromptsInfo(); } catch (err) { say(promptsNote, err.message, 'err'); }
     };
 
     // Claude Code cloud research
@@ -7754,125 +7634,6 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     };
     say(extraNote, refusedNote() || describeRoutines(), refusedNote() ? 'err' : '');
 
-    // Shared answers server
-    const notesUrlInput = textField('notesUrl', 'Notes server address (optional)', 'Notes server address');
-    const saveNotesUrl = () => {
-      setCfg({ notesUrl: baseUrl(notesUrlInput.value) });
-      refreshNotesKeyNote();
-      if (cfg().notesUrl) testNotesKey().then(() => state && syncNow());
-      afterSetup();
-    };
-
-    // The team sheet's web app address and its secret (both come with the setup block)
-    const sheetsUrlInput = textField('sheetsUrl', 'Sheet web app address (…/exec)', 'Sheet web app address');
-    const sheetsSecretInput = secretField(() => !!cfg().sheetsSecret, 'Sheet secret');
-    const sheetsNote = note();
-    const saveSheets = async () => {
-      const secret = clean(sheetsSecretInput.value);
-      setCfg({ sheetsUrl: clean(sheetsUrlInput.value), ...(secret ? { sheetsSecret: secret } : {}) });
-      sheetsSecretInput.value = '';
-      sheetsSecretInput.placeholder = cfg().sheetsSecret ? 'Saved (paste a new one to replace it)' : 'Sheet secret';
-      afterSetup();
-      if (!cfg().sheetsUrl || !cfg().sheetsSecret) { say(sheetsNote, 'Saved. Add both the address and the secret to turn it on.'); return; }
-      say(sheetsNote, 'Saved. Testing…');
-      try { say(sheetsNote, `Saved. Connected to the sheet (version ${await desk.sheetsPing()}).`, 'ok'); } catch (err) { say(sheetsNote, `Saved, but: ${err.message}`, 'err'); }
-    };
-
-    // ---- Slack & Front search (only with the access code): sends this page's merchant and dispute to a Slack
-    // workflow that searches Slack and Front for related conversations. The webhook's address is a setting that
-    // comes in the setup block, never built into the script: anyone holding it could start the workflow.
-    const SS_FIELDS = [
-      ['merchant_name', 'Merchant'], ['dispute_type', 'Dispute type'], ['customer_name', 'Customer'],
-      ['customer_email_domain', 'Customer email domain'], ['order_number', 'Order number'], ['tracking_number', 'Tracking number'],
-      ['entry_number', 'Entry number'], ['dispute_id', 'Dispute / work order id'], ['product_name', 'Product'], ['sku', 'SKU'],
-      ['hts_code', 'HTS code'], ['front_conversation_id', 'Front conversation id'], ['callback_url', 'Callback URL'],
-    ];
-    const SS_HOOK = /^https:\/\/hooks\.slack\.com\/(triggers|workflows)\/\S+$/;
-    const ssInputs = Object.fromEntries(SS_FIELDS.map(([k, label]) => [k, h('input', { type: 'text', placeholder: label, 'aria-label': label, autocomplete: 'off', spellcheck: 'false' })]));
-    const ssUrlInput = secretField(() => !!cfg().slackSearchUrl, 'Slack workflow webhook (https://hooks.slack.com/triggers/…)');
-    const ssCallbackInput = textField('slackSearchCallback', 'Callback URL for results (optional)', 'Callback URL');
-    const ssSetupNote = note();
-    const ssNote = note();
-    const ssSaveSetup = () => {
-      const url = ssUrlInput.value.trim();
-      if (url && !SS_HOOK.test(url)) { say(ssSetupNote, 'That isn\'t a Slack workflow webhook (it starts with https://hooks.slack.com/triggers/).', 'err'); return; }
-      setCfg({ ...(url ? { slackSearchUrl: url } : {}), slackSearchCallback: ssCallbackInput.value.trim() });
-      ssUrlInput.value = '';
-      ssUrlInput.placeholder = cfg().slackSearchUrl ? 'Saved (paste a new one to replace it)' : 'Slack workflow webhook (https://hooks.slack.com/triggers/…)';
-      ssInputs.callback_url.value = cfg().slackSearchCallback || '';
-      say(ssSetupNote, cfg().slackSearchUrl ? 'Saved on this computer. The Research tab now has a Search Slack & Front button.' : 'Saved. Add the webhook to turn on Send.', cfg().slackSearchUrl ? 'ok' : '');
-      refreshTools();
-    };
-    // What the page shows: the Research tab's reading of it when that's this page, otherwise read now
-    function ssFacts() {
-      const main = document.querySelector('main');
-      let d = state && state.path === location.pathname ? state.data : null;
-      if (!d && main) {
-        try { d = WORK_ORDER_PATH.test(location.pathname) ? readWorkOrder() : /\/duty-disputes\//.test(location.pathname) ? extractDispute() : null; } catch { d = null; }
-      }
-      const dl = [];
-      main?.querySelectorAll('dt').forEach(dt => dl.push([clean(dt.textContent).toLowerCase(), clean(dt.nextElementSibling?.textContent)]));
-      const pick = re => (dl.find(([k, v]) => re.test(k) && v) || [])[1] || '';
-      const text = main?.innerText || '';
-      const items = d?.items || [];
-      const uniq = list => [...new Set(list.map(clean).filter(Boolean))];
-      const fieldVals = re => uniq(items.flatMap(i => i.fields.filter(f => re.test(f.label)).map(f => f.current || f.claimed || '')));
-      const wo = d?.kind === 'workOrder';
-      const claimed = uniq(items.flatMap(i => (i.claims || []).map(c => c.field)));
-      const front = desk.caseLinks().front || '';
-      const email = pick(/e-?mail/);
-      return {
-        merchant_name: d?.org || pick(/^(organization|merchant|company|store|seller)\b/),
-        dispute_type: wo ? (d.label || d.type || '') : d ? `Duty dispute${claimed.length ? `: ${claimed.join(', ')}` : ''}` : '',
-        customer_name: pick(/^(customer|recipient|consignee|buyer|ship to|ship-to)( name)?$/),
-        customer_email_domain: d?.emailDomain || (email.split('@')[1] || '').toLowerCase(),
-        order_number: d?.order || pick(/^(original )?order( #| number| id)?$/),
-        tracking_number: pick(/^tracking/) || d?.tracking || (text.match(/\b[A-Z]{2}\d{9}[A-Z]{2}\b/) || [])[0] || '',
-        entry_number: pick(/^entry( #| number| no\.?)?$/) || (text.match(/\b[A-Z0-9]{3}-\d{7}-\d\b/) || [])[0] || '',
-        dispute_id: wo ? (d.workOrderId || '') : (d?.disputeId || ''),
-        product_name: uniq(items.map(i => i.title)).join('; ') || pick(/^(product|item|description)( name)?$/),
-        sku: fieldVals(/^sku\b/i).join(', ') || pick(/^sku\b/),
-        hts_code: (fieldVals(/^(hs|hts)\b/i).join(', ')) || (wo ? (d.current || (d.codes || []).map(c => c.code).join(', ')) : ''),
-        front_conversation_id: (front.match(/\bcnv_[a-z0-9]+/i) || [])[0] || front,
-        callback_url: cfg().slackSearchCallback || '',
-      };
-    }
-    const ssFill = () => {
-      const f = ssFacts();
-      for (const [k] of SS_FIELDS) ssInputs[k].value = f[k] || '';
-      say(ssNote, f.merchant_name || f.tracking_number || f.dispute_id ? 'Filled from this page. Check it, fix anything that\'s off, then Send.' : 'Nothing found on this page. Open a dispute or work order (or type the details), then Send.');
-    };
-    // Posts the details to the workflow (every field, as text, which is what it wants); { ok, text } says how it went
-    async function ssPost(facts) {
-      if (!batchUnlocked()) return { ok: false, text: 'Search Slack & Front needs the access code (Settings).' };
-      const url = cfg().slackSearchUrl;
-      if (!url) return { ok: false, text: 'Add the Slack workflow webhook in Settings > Search Slack & Front first.' };
-      const payload = Object.fromEntries(SS_FIELDS.map(([k]) => [k, clean(facts[k] || '')]));
-      if (!payload.merchant_name && !payload.tracking_number && !payload.order_number && !payload.dispute_id) return { ok: false, text: 'Nothing to search for: no merchant, tracking number, order or dispute id on this page.' };
-      const r = await gmRequest({ method: 'POST', url, headers: { 'Content-Type': 'application/json' }, data: JSON.stringify(payload) });
-      let body = null;
-      try { body = JSON.parse(r.responseText); } catch { /* not JSON */ }
-      if (r.status >= 200 && r.status < 300 && body?.ok !== false) return { ok: true, text: `Sent to Slack (${new Date().toLocaleTimeString()}). The workflow posts what it finds in Slack.` };
-      return { ok: false, text: `Slack didn't take it (${r.status}${body?.error ? `: ${body.error}` : ''}).` };
-    }
-    const ssSend = async () => {
-      say(ssNote, 'Sending…');
-      try {
-        const r = await ssPost(Object.fromEntries(SS_FIELDS.map(([k]) => [k, ssInputs[k].value])));
-        say(ssNote, r.text, r.ok ? 'ok' : 'err');
-      } catch (err) { say(ssNote, err.message, 'err'); }
-    };
-    const slackSearchGroup = group('Search Slack & Front', 'Sends this page\'s merchant and dispute to the Slack workflow, which looks for related Slack threads and Front conversations. Opening this fills the details from the page; check them, then press Send. Only on computers unlocked with the access code.',
-      h('div', { class: 'row' }, ssUrlInput),
-      h('div', { class: 'row', style: 'margin-top:6px' }, ssCallbackInput, btn('Save', ssSaveSetup)),
-      ssSetupNote,
-      h('div', { style: 'display:grid;grid-template-columns:auto 1fr;gap:4px 8px;align-items:center;margin-top:8px' },
-        ...SS_FIELDS.flatMap(([k, label]) => [h('span', { class: 'hint', style: 'margin:0', text: label }), ssInputs[k]])),
-      h('div', { class: 'row', style: 'margin-top:8px' }, btn('Fill from this page', ssFill), btn('Send to Slack', ssSend)),
-      ssNote);
-    slackSearchGroup.hidden = !batchUnlocked();
-    slackSearchGroup.addEventListener('toggle', () => { if (slackSearchGroup.open) ssFill(); });
-
     // Back up / restore: everything above as one block of text, e.g. to move to another computer
     const importBox = h('textarea', { class: 'answer', rows: 4, placeholder: 'Paste a setup block here', 'aria-label': 'Setup to import', style: 'min-height:70px' });
     const backupNote = note();
@@ -7893,8 +7654,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       for (const k of Object.keys(CONFIG_DEFAULTS)) if (typeof s.config?.[k] === 'string') c[k] = s.config[k];
       setCfg(c);
       importBox.value = '';
-      for (const [input, k] of [[entryUrlInput, 'entryUrl'], [routineIdInput, 'routineId'], [notesUrlInput, 'notesUrl'], [sheetsUrlInput, 'sheetsUrl']]) input.value = cfg()[k] || '';
-      sheetsSecretInput.placeholder = cfg().sheetsSecret ? 'Saved (paste a new one to replace it)' : 'Sheet secret';
+      for (const [input, k] of [[entryUrlInput, 'entryUrl'], [routineIdInput, 'routineId']]) input.value = cfg()[k] || '';
       say(backupNote, 'Imported and saved.', 'ok');
       refreshTokenNote();
       refreshNotesKeyNote();
@@ -7929,7 +7689,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     function showLocked() {
       if (batchUnlocked() && !batchGroup) { batchGroup = batchTool({ group, note, say, btn }); accessGroup.after(batchGroup); }
       if (!batchUnlocked() && batchGroup) { batchGroup.remove(); batchGroup = null; }
-      stackRow.hidden = researchAllRow.hidden = slackSearchGroup.hidden = !batchUnlocked();
+      stackRow.hidden = researchAllRow.hidden = !batchUnlocked();
       stackBox.checked = GM_getValue(STACK_KEY, false) === true;
       researchAllBox.checked = GM_getValue(RESEARCH_ALL_KEY, false) === true;
       if (batchUnlocked()) say(codeNote, 'Unlocked on this computer: bulk actions in the queue work, the switches above turn on stacking and Research all, and Batch work is below.', 'ok');
@@ -7967,9 +7727,6 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       title: "Opens the newest version on GitHub; press Tampermonkey's Update (or Reinstall) there, then reload this page" }, updateLabel, updateSub);
     function showUpdate(latest) {
       const behind = latest && newer(latest, myVersion);
-      updateDot.style.display = behind ? 'inline-grid' : 'none';
-      sideBtn.title = behind ? `Tools (\\ to toggle) · Update ${latest} is ready: open Settings (the cog) and press Update` : 'Tools (\\ to toggle)';
-      sideBtn.setAttribute('aria-label', behind ? `Open Tools (update ${latest} is ready)` : 'Open Tools');
       updateBtn.className = `update-btn ${!latest ? 'checking' : behind ? 'new' : 'ok'}`;
       updateLabel.textContent = !latest ? '⟳ Update' : behind ? `⟳ Update to ${latest}` : '✓ Up to date';
       updateSub.textContent = !latest ? `You have ${myVersion || '?'}. Click to check on GitHub.`
@@ -7986,32 +7743,15 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         if (r.status === 200 && latest) { GM_setValue(UPDATE_CHECK_KEY, { at: Date.now(), latest }); showUpdate(latest); }
       } catch { /* offline: it stays as it was, and a click still checks */ }
     }
-    // Checked when the portal opens and every 30 minutes too (GitHub at most every 15), for the "!" on the Tools button
-    setTimeout(() => checkUpdate(), 8000);
-    setInterval(() => checkUpdate(), 30 * 60000);
+    // Checked when the settings open (GitHub at most every 15 minutes)
     const settingsBody = h('div', { class: 'body' },
       updateBtn,
-      h('p', { class: 'hint', style: 'margin:0 0 14px', text: "Tools works without any of this: the queue, Classify, Quote and research prompts need nothing. Each part below adds something, and what you save stays on this computer." }),
-      group('Your name', '', h('div', { class: 'row' }, authorInput)),
-      group('Entry Assistant', 'HTS facts for each line in the research prompt, and the lookup box. Uses your own token.',
+      h('p', { class: 'hint', style: 'margin:0 0 14px', text: "Every part is optional, and what you save stays on this computer (in Tampermonkey), not with your account." }),
+      group('Entry Assistant', 'HTS facts for each line in the research prompt, and the Entry Assistant window. Uses your own token.',
         h('div', { class: 'row' }, entryUrlInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, tokenInput, btn('Save', saveEntry), btn('Test', () => testConnection())),
         tokenNote),
-      teamSheet()
-        ? group('Google Sheet', "Each case you claim gets a row in the team sheet and its own Google Doc with the answers, decisions and comments. The sheet also holds the team's research prompts and the Claude Code research requests. It's built into this copy: nothing to set up.",
-          h('div', { class: 'row', style: 'margin-top:6px' }, btn('Test', async () => {
-            say(sheetsNote, 'Testing…');
-            try { say(sheetsNote, `Connected to the team sheet (version ${await desk.sheetsPing()}).`, 'ok'); } catch (err) { say(sheetsNote, err.message, 'err'); }
-          })),
-          sheetsNote)
-        : group('Google Sheet', "Each case you claim gets a row in the team sheet and its own Google Doc with the answers, decisions and comments. The sheet also holds the team's research prompts and the Claude Code research requests. Both values come in the setup block from Karsen.",
-          h('div', { class: 'row' }, sheetsUrlInput),
-          h('div', { class: 'row', style: 'margin-top:6px' }, sheetsSecretInput, btn('Save and test', saveSheets)),
-          sheetsNote),
-      group('Prompts', `The research prompts' fixed text (the brief, rules, research steps, claim checks, reply rules and each queue class's guide), editable by the team in the Prompts tab of the Google Sheet. The parts built from the case itself stay as they are.`,
-        h('div', { class: 'row', style: 'margin-top:6px' }, btn('Set up Prompts', () => setUpPrompts()), btn('Refresh', () => refreshPrompts())),
-        (showPromptsInfo(), promptsNote)),
-      group('Claude Code research', 'Adds "Research in Claude Code" beside Open in claude.ai on the Research tab: the request goes in the Research tab of the Google Sheet and starts your cloud routine, which reads it, researches, and sends its answer back to the sheet. The answer then shows up in the panel and the case doc by itself. The routine needs to be able to reach script.google.com.',
+      group('Claude Code research', "Puts \"Research in Claude Code\" in the portal's Research tool (duty disputes), in place of Copy prompt: the request goes in the Research tab of the Google Sheet and starts your cloud routine, which researches it and sends its answer back. The answer is then added to the dispute's Notes and the case doc by itself. Without a routine, the button is \"Open in claude.ai\" instead. The routine needs to be able to reach script.google.com.",
         h('div', { class: 'row' }, routineIdInput),
         h('div', { class: 'row', style: 'margin-top:6px' }, routineTokenInput, btn('Save', saveRoutine)),
         routineNote,
@@ -8021,22 +7761,15 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         extraNote,
         h('label', { class: 'doc', style: 'margin-top:8px' }, h('input', { type: 'checkbox', checked: GM_getValue(RESEARCH_LOG_KEY, false) === true, onchange: e => GM_setValue(RESEARCH_LOG_KEY, e.target.checked) }),
           h('span', { text: "Add Claude Code's full research log to the case doc (every search, page and source it checked, and how it reasoned), under its answer" }))),
-      group('claude.ai answers', "When you research in claude.ai (Open in claude.ai), Claude's finished answer comes back to the Research tab to save.",
-        h('label', { class: 'doc' }, h('input', { type: 'checkbox', checked: GM_getValue(AUTO_SAVE_KEY, false) === true, onchange: e => GM_setValue(AUTO_SAVE_KEY, e.target.checked) }),
-          h('span', { text: "Save it to the case doc by itself as soon as it's back (no Save button): next time the case's page is open" }))),
-      group('Shared answers', 'Shares saved answers with your team through a notes server. Leave the address empty to keep answers on this computer only.',
-        h('div', { class: 'row' }, notesUrlInput, btn('Save', saveNotesUrl)),
-        h('div', { class: 'row', style: 'margin-top:6px' }, notesKeyInput, btn('Save key', () => saveNotesKey()), btn('Test', () => testNotesKey())),
-        notesKeyNote),
+      group('Analytics', 'Who resolved and claimed what, who holds what now, and orders by class and company, from every work order\'s history in the portal.',
+        h('div', { class: 'row' }, btn('Open Analytics', () => { document.querySelector('.cl-modalCloseButton')?.click(); openWindow('analytics'); }))),
       accessGroup,
-      slackSearchGroup,
       group('Back up or move your setup', '',
         h('div', { class: 'row' }, btn('Copy my setup', exportSetup)),
         h('div', { style: 'margin-top:6px' }, importBox),
         h('div', { class: 'row', style: 'margin-top:6px' }, btn('Import', importSetup)),
         backupNote),
-      h('p', { class: 'fine', text: "Clicking a code on the page opens it in the Entry Assistant tab once that site allows being shown here (Alt-click for the portal's References). Claude never sends anything until you press Enter there." }),
-      h('p', { class: 'fine', text: 'Floating, drag the window\'s header to move it and any edge or corner to resize it; double-click its ⠿ handle to put it back beside the button at its usual size, just wide enough for Entry Assistant\'s full HTS table. Side by side, drag the panel\'s edge to make it wider or narrower; double-click the edge for the default width.' }));
+      h('p', { class: 'fine', text: "Entry Assistant opens from its button in the top bar, beside Research, Classify and Quote. Drag its header to move it and any edge or corner to resize it; double-click its ⠿ handle to put it back where it opens at first." }));
 
     // The Entry Assistant site, in frames that are kept while you switch tabs: the one showing, and one loaded ahead for
     // each code on the open order (loadEntryAhead), so a code opens at once. They're stacked in one slot, and the ones
@@ -8079,40 +7812,19 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       h('p', { text: "The Entry Assistant site doesn't allow being shown inside the dashboard yet, so it opens in its own tab for now." }),
       entryBlockedLink);
 
-    // ---- the Tools tab and the strip above every tab: the portal's Classify / Quote, and Prev / Next through
-    // the queue as you last left it in Portal+
-    const HIDE_RAIL_KEY = 'zt:hideRail';
-    // ---- Classify and Quote, built into the panel so they work on every portal page. They send the same
-    // requests as the portal's own Classify and Quote boxes (ClassificationsCalculate, ItemQuoteLandedCost).
+    // ---- Classify, inside the portal's own Classify tool (see mountClassify). It sends the same request as the portal's
+    // Classify (ClassificationsCalculate) and lays out more of the answer.
     const COUNTRIES = 'AD AE AF AG AI AL AM AO AR AS AT AU AW AZ BA BB BD BE BF BG BH BI BJ BM BN BO BR BS BT BW BY BZ CA CD CF CG CH CI CL CM CN CO CR CU CV CY CZ DE DJ DK DM DO DZ EC EE EG ER ES ET FI FJ FM FR GA GB GD GE GH GI GM GN GR GT GU GW GY HK HN HR HT HU ID IE IL IN IQ IR IS IT JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MG MH MK ML MM MN MO MR MT MU MV MW MX MY MZ NA NE NG NI NL NO NP NR NZ OM PA PE PG PH PK PL PR PS PT PW PY QA RO RS RU RW SA SB SC SD SE SG SI SK SL SM SN SO SR SS ST SV SY SZ TD TG TH TJ TL TM TN TO TR TT TV TW TZ UA UG US UY UZ VA VC VE VN VU WS YE ZA ZM ZW'.split(' ');
-    const countrySelect = (label, value = '', required = false) => h('select', { 'aria-label': label, class: 'field' },
-      h('option', { value: '', text: required ? 'Pick a country' : '—' }),
-      COUNTRIES.map(c => [c, regionName(c)]).sort((a, b) => a[1].localeCompare(b[1])).map(([c, n]) => h('option', { value: c, text: `${n} (${c})`, selected: c === value })));
     const fieldRow = (label, input, hint) => h('label', { class: 'frow' }, h('span', { class: 'flabel', text: label }), input, hint ? h('span', { class: 'hint', style: 'margin:0', text: hint }) : null);
-    const codeLine = code => h('span', { class: 'code-line' },
-      h('code', { text: code }),
-      h('button', { class: 'linkish', type: 'button', text: 'copy', onclick: () => { GM_setClipboard(code, 'text'); } }),
-      h('button', { class: 'linkish', type: 'button', text: 'Entry Assistant', onclick: () => showEntry({ codes: [code] }) }));
-    // What the current order says about its first item, to start the forms from
-    function orderItem() {
-      const it = navPosition().items[navPosition().i] || {};
-      let d = null;
-      try { d = state?.data; } catch { /* the panel is still being set up */ }
-      const line = d?.items?.[0] || d?.lines?.[0] || {};
-      return {
-        name: clean(line.name || line.description || it.title || ''),
-        hs: clean(line.hsCode || line.code || '').replace(/[^\d.]/g, ''),
-        coo: (line.origin || line.coo || '').toUpperCase().slice(0, 2),
-      };
-    }
-
     const classifyBody = h('div', { class: 'body' });
-    // The case this page's Research tab has read, or null. Tools can open Classify while the panel is still being built
-    // (on a page with nothing to research), before `state` exists, so it's read with care.
+    // The case read for research on this page, or else a dispute's lines read off the page now, or null. Classify can
+    // open before `state` exists, so it's read with care.
     function openCase() {
       let st = null;
-      try { st = state; } catch { /* the panel is still being set up */ }
-      return st && st.path === location.pathname ? st.data : null;
+      try { st = state; } catch { /* still being set up */ }
+      if (st && st.path === location.pathname) return st.data;
+      if (!disputeIdHere()) return null;
+      try { const d = extractDispute(); return d?.items?.length ? d : null; } catch { return null; }
     }
     // ---- Classify: the portal's own Classify request (the same one its Classify box sends, with each code's place in the
     // HTS), filled in from the order and laid out like the duty calculator. It changes nothing: it only classifies.
@@ -8164,13 +7876,6 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       [...frags].filter(x => x?.code).sort((a, b) => digitsOf(a.code).length - digitsOf(b.code).length)
         .map(x => h('li', {}, h('b', { text: tidyCode(x.code) || x.code }), x.description || human2(x.type || ''))) ) : null;
     const clCopy = code => h('button', { class: 'dc-chip', type: 'button', text: 'Copy', onclick: e => { GM_setClipboard(code, 'text'); e.currentTarget.textContent = 'Copied'; } });
-    // Sends a code to the duty calculator (the Duties tab), with the item's origin, the order's value when there's one
-    function clToDuties(code, origin) {
-      const base = dcPrefill();
-      const known = base.lines.find(l => sameCode(l.code, code)) || base.lines[0];
-      DC = { ...base, lines: [{ code: tidyCode(code), origin: origin || known?.origin || '', value: known?.value || '' }], filled: true, touched: true };
-      setView('quote');
-    }
     let clFormEl = null, clOutEl = null;
     function clDraw() {
       const S = CL;
@@ -8221,8 +7926,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
           r.customsDescription ? h('div', { class: 'cl-customs' }, h('small', { text: 'Customs description' }), r.customsDescription) : null,
           h('div', { class: 'dc-actions' },
             clCopy(code),
-            h('button', { class: 'dc-chip', type: 'button', text: 'Open in Entry Assistant', onclick: () => showEntry({ codes: [code], from: asked.origin || '' }) }),
-            dutyCalcOn() ? h('button', { class: 'dc-chip', type: 'button', text: 'Duties for this code', title: 'Work out its duties and Chapter 99 codes in the duty calculator', onclick: () => clToDuties(code, asked.origin) }) : null)));
+            h('button', { class: 'dc-chip', type: 'button', text: 'Open in Entry Assistant', onclick: () => showEntry({ codes: [code], from: asked.origin || '' }) }))));
         if (v.length && clean(asked.hs)) {
           const mine = tidyCode(asked.hs) || asked.hs;
           const lvl = x => human2(x.type === 'TARIFF' ? 'tariff line' : x.type || '').toLowerCase();
@@ -8247,8 +7951,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
                 h('div', { class: 'cl-alt-top' }, h('span', { class: 'cl-alt-code', text: ac }), h('span', { style: 'font-size:12.5px', text: a.description?.friendly || '' })),
                 (a.fragments || []).length ? h('details', { class: 'dc-fold' }, h('summary', { style: 'padding:6px 0 0;font-size:12px;color:var(--dc-blue)' }, 'Where it sits'), h('div', {}, clPath(a.fragments))) : null,
                 h('div', { class: 'dc-actions', style: 'margin-top:8px' }, clCopy(ac),
-                  h('button', { class: 'dc-chip', type: 'button', text: `Compare with ${code}`, onclick: () => showEntry({ codes: [code, ac], from: asked.origin || '' }) }),
-                  dutyCalcOn() ? h('button', { class: 'dc-chip ghost', type: 'button', text: 'Duties', onclick: () => clToDuties(ac, asked.origin) }) : null));
+                  h('button', { class: 'dc-chip', type: 'button', text: `Compare with ${code}`, onclick: () => showEntry({ codes: [code, ac], from: asked.origin || '' }) })));
             })));
         }
         out.push(h('p', { class: 'dc-hint', style: 'margin-top:14px', text: "From Zonos Classify, the same as the portal's Classify box. It isn't a binding ruling: check the HTS notes and CBP rulings (Entry Assistant) before relying on it." }));
@@ -8271,62 +7974,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       clDraw();
       // Opened before the order was read: filled in once it is (unless you've started typing)
       if (!S.picks.length && isCasePage()) waitFor(() => openCase(), { timeout: 30000 })
-        .then(ok => { if (ok && CL === S && !clean(S.form.name) && view === 'classify') renderClassify(true); });
-    }
-
-    const quoteBody = h('div', { class: 'body' });
-    function renderQuote() {
-      const pre = orderItem();
-      const name = h('input', { type: 'text', class: 'field', value: pre.name, 'aria-label': 'Name' });
-      const desc = h('textarea', { class: 'field', rows: 2, 'aria-label': 'Description' });
-      const hs = h('input', { type: 'text', class: 'field', value: pre.hs, placeholder: 'e.g. 6403.91.9045', 'aria-label': 'HS code' });
-      const origin = countrySelect('Country of origin', pre.coo, true);
-      const shipFrom = countrySelect('Ship from', pre.coo, true);
-      const qty = h('input', { type: 'number', class: 'field', min: '1', step: '1', value: '1', 'aria-label': 'Quantity' });
-      const amount = h('input', { type: 'number', class: 'field', min: '0', step: '0.01', placeholder: '0.00', 'aria-label': 'Amount' });
-      const currency = h('input', { type: 'text', class: 'field', value: 'USD', maxlength: '3', 'aria-label': 'Currency' });
-      const out = h('div', { class: 'result', role: 'status' });
-      const go = h('button', { class: 'primary', type: 'submit', text: 'Quote' });
-      const form = h('form', { class: 'form', onsubmit: async e => {
-        e.preventDefault();
-        const err = !shipFrom.value ? 'Pick a ship-from country.' : !origin.value ? 'Pick a country of origin.' : !clean(hs.value) ? 'Enter an HS code.'
-          : !(Number.isInteger(Number(qty.value)) && Number(qty.value) >= 1) ? 'Quantity must be a whole number of at least 1.'
-          : !amount.value || Number.isNaN(Number(amount.value)) ? 'Enter an item amount.' : !/^[A-Za-z]{3}$/.test(clean(currency.value)) ? 'Enter a currency code such as USD.' : '';
-        if (err) { out.replaceChildren(h('p', { class: 'err', text: err })); return; }
-        go.disabled = true;
-        out.replaceChildren(h('p', { class: 'muted', text: 'Quoting…' }));
-        const cur = clean(currency.value).toUpperCase();
-        const from = { location: { countryCode: shipFrom.value } };
-        try {
-          const data = await portal.gql('ItemQuoteLandedCost', `mutation ItemQuoteLandedCost($originParty: PartyCreateWorkflowInput!, $destinationParty: PartyCreateWorkflowInput!, $payorParty: PartyCreateWorkflowInput!, $items: [ItemCreateWorkflowInput!]!, $landedCostCalculation: LandedCostWorkFlowInput!) {
-            partyCreateQuoterWorkflow(input: [$originParty, $destinationParty, $payorParty]) { id type }
-            itemCreateQuoterWorkflow(input: $items) { id }
-            cartonsCreateQuoterWorkflow(input: [{dimensionalUnit: INCH, length: 1, width: 1, height: 1, weight: 1, weightUnit: POUND}]) { id }
-            shipmentRatingCreateQuoterWorkflow(input: {amount: 0, currencyCode: USD, serviceLevelCode: "ups.express"}) { id }
-            landedCostCalculateQuoterWorkflow(input: $landedCostCalculation) { id currencyCode
-              additionalHsCodes { id additionalHsCode additionalScheme customsDescription formula condition item { id } } } }`,
-          { originParty: { ...from, type: 'ORIGIN' }, payorParty: { ...from, type: 'PAYOR' }, destinationParty: { location: { countryCode: 'US' }, type: 'DESTINATION' },
-            items: [{ amount: String(amount.value), countryOfOrigin: origin.value, currencyCode: cur, hsCode: clean(hs.value), quantity: Number(qty.value),
-              name: clean(name.value) || undefined, description: clean(desc.value) || undefined }],
-            landedCostCalculation: { currencyCode: cur, endUse: 'NOT_FOR_RESALE', tariffRate: 'ZONOS_PREFERRED' } });
-          const lc = (data.landedCostCalculateQuoterWorkflow || []).find(Boolean);
-          const extra = (lc?.additionalHsCodes || []).filter(x => x?.additionalHsCode);
-          out.replaceChildren(h('div', { class: 'order-card' },
-            h('p', { class: 'label', text: `Quote · ${clean(hs.value)} from ${regionName(origin.value)} to the US` }),
-            extra.length ? [h('p', { class: 'hint', style: 'margin:0 0 6px', text: 'Additional HS codes (Chapter 99) that apply:' }),
-              extra.map(x => h('div', { class: 'quote-line' }, codeLine(x.additionalHsCode),
-                h('span', { class: 'hint', style: 'display:block;margin:0', text: [x.customsDescription, x.formula && `Formula: ${x.formula}`, x.condition && `Condition: ${x.condition}`, x.additionalScheme && human2(x.additionalScheme)].filter(Boolean).join(' · ') })))]
-              : h('p', { class: 'ok', style: 'margin:0', text: 'No additional (Chapter 99) HS codes apply.' })));
-        } catch (err2) { out.replaceChildren(h('p', { class: 'err', text: err2.message })); }
-        finally { go.disabled = false; }
-      } },
-      h('p', { class: 'hint', style: 'margin:0 0 8px', text: 'Ship-to is the United States. Shipping cost, service and carton size are placeholders, as in the portal.' }),
-      fieldRow('Name', name), fieldRow('Description', desc), fieldRow('HS code', hs),
-      h('div', { class: 'frow2' }, fieldRow('Country of origin', origin), fieldRow('Ship from', shipFrom)),
-      h('div', { class: 'frow3' }, fieldRow('Quantity', qty), fieldRow('Amount', amount), fieldRow('Currency', currency)),
-      h('div', { class: 'actions' }, go), out);
-      quoteBody.replaceChildren(form);
-      (pre.hs ? amount : hs).focus();
+        .then(ok => { if (ok && CL === S && !clean(S.form.name) && clHost.isConnected) renderClassify(true); });
     }
 
     // ---- Analytics: who did what, from the portal's own history of every work order (each claim, resolve, release,
@@ -8475,430 +8123,233 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       showAnalytics();
     }
 
-    // ---- Duty calculator: the Entry Assistant site's calculator, in place of Quote (Settings > Panel and pages), with
-    // the site's layout and look. It's filled in from the order (its lines' HTS codes, origins and values, how it ships,
-    // when it was ordered and arrived, and what the dispute's order was charged), works out as you type, and the
-    // questions it can't settle are answered right here. It changes nothing anywhere: the calculator only calculates.
-    const DUTY_CALC_KEY = 'zt:dutyCalcQuote';
-    const dutyCalcOn = () => GM_getValue(DUTY_CALC_KEY, false) === true;
-    const DC_MODES = [['unknown', 'Not sure (ocean)'], ['ocean', 'Ocean'], ['air', 'Air or courier'], ['truck', 'Truck'], ['rail', 'Rail'], ['mail', 'Mail']];
-    const DC_ENTRY = [['unknown', 'Not sure (formal)'], ['formal', 'Formal'], ['informal', 'Informal ($2,500 or less)']];
-    const usd = n => (typeof n === 'number' ? `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—');
-    let DC = null;
-    let dcCurrencies = null;
-    function dcPrefill() {
-      const ship = { currency: 'USD', exportDate: new Date().toLocaleDateString('sv-SE'), entryDate: '', mode: 'unknown', entryType: 'unknown', freight: '' };
-      let lines = [];
-      const d = openCase();
-      // A dispute: its disputed lines as the page shows them, the order date, and mail for a postal tracking number
-      if (d && d.kind !== 'workOrder') {
-        for (const i of d.items.filter(x => x.inDispute)) {
-          const fv = re => i.fields.find(x => re.test(x.label))?.current;
-          const money = parseMoney(fv(/^declared value$/i));
-          lines.push({ code: tidyCode(hsCodeIn(fv(/^hs code$/i))), origin: isoCountry(fv(/^country of origin$/i)), value: money ? String(money.value) : '' });
-          if (money && lines.length === 1) ship.currency = money.currency;
-        }
-        const t = Date.parse(d.ordered);
-        if (t) ship.exportDate = new Date(t).toLocaleDateString('sv-SE');
-        if (d.postedIn) ship.mode = 'mail';
-      }
-      // The portal's own data: a work order's consignment items, how it travels and when it arrived
-      const p = desk.calcPrefill();
-      if (!lines.length && p.lines?.length) { lines = p.lines.map(({ code, origin, value }) => ({ code: tidyCode(code), origin: isoCountry(origin), value })); ship.currency = p.currency || ship.currency; }
-      if (!lines.length && d?.kind === 'workOrder') lines = d.codes.map(c => ({ code: c.code, origin: c.from || '', value: '' }));
-      if (p.mode && ship.mode === 'unknown') ship.mode = p.mode;
-      if (d?.postedIn && ship.mode === 'unknown') ship.mode = 'mail';
-      if (p.entryDate) ship.entryDate = p.entryDate;
-      return { for: location.pathname, lines: lines.length ? lines.slice(0, 20) : [{ code: '', origin: '', value: '' }], ship,
-        charged: p.charged || { what: 'duties', amount: '', inUsd: true }, answers: {}, seen: {}, result: null, error: '', busy: false, seq: 0, filled: lines.length > 0 };
-    }
-    let dcTimer = 0;
-    const dcSoon = () => { clearTimeout(dcTimer); dcTimer = setTimeout(dcRun, 600); };
-    async function dcRun() {
-      const S = DC;
-      if (!S) return;
-      const used = S.lines.map((l, i) => ({ i, code: tidyCode(l.code), origin: l.origin || '', value: Number(String(l.value).replace(/,/g, '')) }))
-        .filter(l => l.code && l.value > 0);
-      S.used = used;
-      if (!used.length) { S.result = null; S.error = ''; dcDrawResults(); return; }
-      const amount = Number(String(S.charged.amount).replace(/,/g, ''));
-      const body = { currency: S.ship.currency || 'USD', exportDate: S.ship.exportDate || new Date().toLocaleDateString('sv-SE'), mode: S.ship.mode, entryType: S.ship.entryType,
-        ...(S.ship.entryDate ? { entryDate: S.ship.entryDate } : {}), ...(Number(S.ship.freight) > 0 ? { freight: Number(S.ship.freight) } : {}),
-        lines: used.map(({ code, origin, value }) => ({ code, origin, value })), answers: S.answers,
-        ...(amount > 0 ? { charged: { [S.charged.what]: amount, inUsd: !!S.charged.inUsd } } : {}) };
-      const seq = ++S.seq;
-      S.busy = true;
-      dcDrawResults();
-      try {
-        const j = await entryApi('calculate', 30000, body);
-        if (seq !== S.seq || DC !== S) return;
-        S.result = j; S.error = '';
-        for (const q of j?.questions || []) S.seen[q.id] = q;
-      } catch (e) { if (seq === S.seq && DC === S) S.error = e.message; }
-      if (seq === S.seq && DC === S) { S.busy = false; dcDrawResults(); }
-    }
-    const dcSel = (opts, value, onchange, label) => h('select', { 'aria-label': label, onchange }, opts.map(([v, t]) => h('option', { value: v, text: t, selected: v === value })));
-    const dcFold = (title, meta, body, open = false, key = '') => h('details', { class: 'dc-fold', open, 'data-k': key || null },
-      h('summary', {}, h('span', { class: 'dc-fold-title', text: title }), meta ? h('span', { class: 'dc-fold-meta' }, meta) : null), h('div', { class: 'dc-fold-body' }, body));
-    let dcLinesEl = null, dcResultsEl = null, dcDetailsEl = null;
-    const dcSlots = [];
-    function dcLineCard(l, i) {
-      const S = DC;
-      const set = (k, v) => { l[k] = v; S.touched = true; dcSoon(); };
-      const slot = h('div');
-      dcSlots[i] = slot;
-      return h('div', { class: 'dc-line' },
-        h('div', { class: 'dc-line-head' }, h('span', { class: 'dc-line-num', text: `Line ${i + 1}` }),
-          S.lines.length > 1 ? h('button', { class: 'dc-chip ghost', type: 'button', text: 'Remove', onclick: () => { S.lines.splice(i, 1); S.touched = true; dcDrawForm(); dcRun(); } }) : null),
-        h('div', { class: 'dc-grid' },
-          h('label', {}, 'HTS code', h('input', { class: 'dc-mono', type: 'text', placeholder: '8418.10.00.10', value: l.code, spellcheck: 'false', oninput: e => set('code', e.target.value) })),
-          h('label', {}, 'Country of origin', h('select', { onchange: e => set('origin', e.target.value) }, h('option', { value: '', text: 'Not sure (the costliest)' }),
-            COUNTRIES.map(c => [c, regionName(c)]).sort((a, b) => a[1].localeCompare(b[1])).map(([c, n]) => h('option', { value: c, text: n, selected: c === l.origin })))),
-          h('label', {}, `Value (${S.ship.currency || 'USD'})`, h('input', { type: 'text', inputmode: 'decimal', placeholder: '0.00', value: l.value, oninput: e => set('value', e.target.value) }))),
-        slot);
-    }
-    function dcDrawForm() {
-      const S = DC;
-      dcSlots.length = 0;
-      dcLinesEl.replaceChildren(...S.lines.map(dcLineCard));
-      dcDrawResults();
-    }
-    function dcDrawResults() {
-      const S = DC;
-      const j = S.result;
-      // Each line's own result, in its card
-      S.lines.forEach((l, i) => {
-        const slot = dcSlots[i];
-        if (!slot) return;
-        const k = (S.used || []).findIndex(u => u.i === i);
-        const r = k >= 0 && j?.lines?.[k];
-        if (!r) { slot.replaceChildren(); return; }
-        const origin = typeof r.origin === 'object' ? r.origin : { code: r.origin };
-        slot.replaceChildren(h('div', { class: 'dc-line-result' },
-          r.error ? h('p', { class: 'hint err', style: 'margin:0', text: r.error }) : [
-            h('div', { class: 'dc-line-sum' },
-              h('div', { class: 'dc-line-what' },
-                h('button', { class: 'dc-code', type: 'button', text: tidyCode(r.code) || r.code, title: 'Open it in the Entry Assistant tab', onclick: () => showEntry({ codes: [tidyCode(r.code)], from: origin.code || '' }) }),
-                ` ${r.desc || ''}`, h('span', { class: 'dc-sub', text: ` · ${origin.name || origin.code || 'origin not sure'}${origin.assumed ? ' (the costliest)' : ''} · ${usd(r.usd)}` })),
-              h('div', { class: 'dc-line-duty' }, usd(r.duty), h('span', { class: 'dc-sub', text: `Duty, ${typeof r.pct === 'number' ? `${Math.round(r.pct * 100) / 100}%` : '?'} of the value` }))),
-            dcFold("How it's worked out", '', [
-              h('table', { class: 'dc-table' }, h('tbody', {},
-                (r.parts || []).map(p => h('tr', {},
-                  h('td', {}, h('button', { class: 'dc-code', type: 'button', text: p.code, onclick: () => showEntry({ codes: [p.code], from: isChapter99(p.code) ? '' : origin.code || '' }) }),
-                    ` ${p.name}`, p.assumed ? h('span', { class: 'dc-pill', text: 'assumed', title: 'An open question below decides it; counted the costlier way' }) : null,
-                    p.note ? h('div', { class: 'dc-sub', text: p.note }) : null),
-                  h('td', { class: 'num', text: p.rate }), h('td', { class: 'num', text: usd(p.amount) }))),
-                h('tr', { class: 'dc-row-total' }, h('td', { text: 'Duty' }), h('td'), h('td', { class: 'num', text: usd(r.duty) })))),
-              ...(r.notes || []).filter(n => !/needs review/.test(n)).slice(0, 4).map(n => h('p', { class: 'dc-sub', style: 'margin:6px 0 0', text: n })),
-            ]),
-          ]));
-      });
-      // The total, the questions, and the details
-      const kids = [];
-      if (S.error) kids.push(h('p', { class: 'hint err', text: S.error }));
-      if (!j && !S.error) kids.push(h('p', { class: 'dc-hint', text: S.busy ? 'Working it out…' : 'Enter an HTS code and the value to work out what the entry owes.' }));
-      if (j) {
-        const c = j.charged;
-        kids.push(h('div', { class: 'dc-total' },
-          h('h3', { text: S.busy ? 'Owed · updating…' : 'Owed' }),
-          h('div', { class: 'dc-total-num', text: usd(j.total) }),
-          h('p', { class: 'dc-total-parts', text: `Duties ${usd(j.duty)} · Fees ${usd(j.feeTotal)}` }),
-          typeof j.lowest === 'number' && j.lowest < j.total ? h('p', { class: 'dc-total-low', text: `As low as ${usd(j.lowest)} if every open question goes the cheaper way. The total above counts each the costlier way.` }) : null,
-          c ? h('p', { class: `dc-verdict ${c.verdict}`, text: c.verdict === 'over' ? `Charged ${usd(c.amount)} in ${c.what}: overpaid by ${usd(c.difference)}.`
-            : c.verdict === 'under' ? `Charged ${usd(c.amount)} in ${c.what}: ${usd(-c.difference)} less than owed.` : `Charged ${usd(c.amount)} in ${c.what}: matches.` }) : null));
-        const open = j.questions || [];
-        const answered = Object.keys(S.answers).map(id => S.seen[id]).filter(Boolean);
-        const lineOf = q => (q.lines || []).map(k => S.used?.[k] ? `Line ${S.used[k].i + 1}` : '').filter(Boolean).join(', ');
-        const qItem = q => h('li', { class: 'dc-q' },
-          h('div', { class: 'dc-q-text' }, lineOf(q) ? h('span', { class: 'dc-q-line', text: lineOf(q) }) : null, q.text),
-          q.why ? h('div', { class: 'dc-q-why', text: q.why }) : null,
-          h('div', { class: 'dc-q-row' },
-            h('div', { class: 'dc-q-answers' }, [['yes', 'Yes'], ['no', 'No'], ['', 'Not sure']].map(([v, t]) => h('button', {
-              class: `dc-chip${(S.answers[q.id] || '') === v ? ' on' : ''}`, type: 'button', text: t,
-              onclick: () => { if (v) S.answers[q.id] = v; else delete S.answers[q.id]; dcRun(); } }))),
-            typeof q.ifYes === 'number' ? h('span', { class: 'dc-q-stake', text: `If yes: ${usd(q.ifYes)} · If no: ${usd(q.ifNo)}` }) : null));
-        if (open.length || answered.length) {
-          kids.push(h('div', { class: 'dc-qs-head' }, h('h3', { text: 'Questions' }), h('span', { class: 'dc-sub', text: `· ${open.length} open` })),
-            h('p', { class: 'dc-sub', style: 'margin:0', text: 'Most money first. Until it’s answered, each counts the way that costs more.' }));
-          if (open.length) kids.push(h('ul', { class: 'dc-qs' }, open.map(qItem)));
-          if (answered.length) kids.push(h('p', { class: 'dc-sub', style: 'margin:10px 0 0', text: 'Answered' }), h('ul', { class: 'dc-qs done' }, answered.map(qItem)));
-        }
-      }
-      dcResultsEl.replaceChildren(...kids);
-      dcDrawDetails();
-    }
-    function dcDrawDetails() {
-      const S = DC;
-      const j = S.result;
-      const sh = S.ship;
-      const set = (k, v) => { sh[k] = v; S.touched = true; dcSoon(); };
-      const modeT = DC_MODES.find(([v]) => v === sh.mode)?.[1] || sh.mode;
-      const entryT = DC_ENTRY.find(([v]) => v === sh.entryType)?.[1] || sh.entryType;
-      const curOpts = (dcCurrencies || [{ id: 'USD', label: 'U.S. dollar (USD)' }]).map(c => [c.id, c.label]);
-      if (!curOpts.some(([v]) => v === sh.currency)) curOpts.push([sh.currency, sh.currency]);
-      const tips = [...(j?.suggestions || []).map(t => ({ tone: t.tone, title: t.title, text: t.text })),
-        ...(j?.warnings || []).filter(w => !/needs review/.test(w)).map(w => ({ tone: 'gray', title: '', text: w }))];
-      const was = DC_DETAILS_OPEN;
-      dcDetailsEl.replaceChildren(h('p', { class: 'dc-line-num', style: 'margin:18px 0 0', text: 'More details' }),
-        h('div', { class: 'dc-folds' },
-          dcFold('The shipment', `${sh.currency} · exported ${sh.exportDate} · ${modeT} · ${entryT}`, h('div', { class: 'dc-grid two' },
-            h('label', {}, 'Currency of the values', dcSel(curOpts, sh.currency, e => { set('currency', e.target.value); dcDrawForm(); }, 'Currency')),
-            h('label', {}, 'Export date', h('input', { type: 'date', value: sh.exportDate, onchange: e => set('exportDate', e.target.value) })),
-            h('label', {}, 'Entry date (optional)', h('input', { type: 'date', value: sh.entryDate, onchange: e => set('entryDate', e.target.value) })),
-            h('label', {}, 'How it came in', dcSel(DC_MODES, sh.mode, e => set('mode', e.target.value), 'Mode')),
-            h('label', {}, 'Entry type', dcSel(DC_ENTRY, sh.entryType, e => set('entryType', e.target.value), 'Entry type')),
-            h('label', {}, `Freight and insurance in the values (${sh.currency})`, h('input', { type: 'text', inputmode: 'decimal', placeholder: '0.00', value: sh.freight, oninput: e => set('freight', e.target.value) }))), was.ship, 'ship'),
-          dcFold('What was charged', Number(S.charged.amount) > 0 ? `${S.charged.what} ${S.charged.amount}${S.charged.inUsd ? ' USD' : ` ${sh.currency}`}` : 'Optional', h('div', { class: 'dc-grid' },
-            h('label', {}, 'What it was', dcSel([['duties', 'Duties'], ['fees', 'Fees'], ['total', 'Duties and fees']], S.charged.what, e => { S.charged.what = e.target.value; dcSoon(); }, 'What was charged')),
-            h('label', {}, 'Amount', h('input', { type: 'text', inputmode: 'decimal', placeholder: '0.00', value: S.charged.amount, oninput: e => { S.charged.amount = e.target.value; dcSoon(); } })),
-            h('label', {}, 'In', dcSel([['usd', 'U.S. dollars'], ['inv', `The values' currency (${sh.currency})`]], S.charged.inUsd ? 'usd' : 'inv', e => { S.charged.inUsd = e.target.value === 'usd'; dcSoon(); }, 'Currency charged'))), was.charged, 'charged'),
-          j ? dcFold('Fees on the entry', usd(j.feeTotal), h('table', { class: 'dc-table' }, h('tbody', {},
-            (j.fees || []).map(fe => h('tr', {}, h('td', {}, fe.name, fe.assumed ? h('span', { class: 'dc-pill', text: 'assumed' }) : null), h('td', { class: 'num', text: fe.rate }), h('td', { class: 'num', text: usd(fe.amount) }))))), was.fees, 'fees') : null,
-          j && tips.length ? dcFold('Worth knowing', h('span', { class: 'dc-pill', text: `${tips.length} to check` }),
-            tips.slice(0, 12).map(t => h('div', { class: `dc-tip ${t.tone}` }, t.title ? h('b', { text: t.title }) : null, t.text)), was.tips, 'tips') : null,
-          j ? dcFold('Worked out from', '', [
-            // Only https links: these are drawn in the dashboard itself, so a javascript: address would run here
-            ...(j.sources || []).map(src => h('p', { class: 'dc-tip' }, /^https:\/\//i.test(src.url || '') ? h('a', { href: src.url, target: '_blank', rel: 'noopener', text: src.name }) : src.name, src.edition ? `: ${src.edition}` : '')),
-            j.fx && j.fx.currency !== 'USD' ? h('p', { class: 'dc-tip', text: `${j.fx.label}: ${j.fx.perUsd} per U.S. dollar (${j.fx.date}). ${j.fx.source || ''}` }) : null,
-          ], was.from, 'from') : null));
-      // Which folds are open is kept across redraws
-      dcDetailsEl.querySelectorAll('.dc-fold[data-k]').forEach(el => el.addEventListener('toggle', () => { DC_DETAILS_OPEN[el.dataset.k] = el.open; }));
-    }
-    const DC_DETAILS_OPEN = {};
-    function renderDutyCalc(fresh = false) {
-      const body = quoteBody;
-      if (!entryToken()) {
-        body.replaceChildren(h('p', { class: 'muted', text: 'The duty calculator needs your Entry Assistant token.' }),
-          h('p', { class: 'hint' }, 'Save it in ', h('button', { class: 'linkish', type: 'button', text: 'Settings', onclick: () => setView('settings') }), ' (the cog), under Entry Assistant.'));
-        return;
-      }
-      if (fresh || !DC || DC.for !== location.pathname) DC = dcPrefill();
-      const S = DC;
-      if (!dcCurrencies) entryApi('currencies').then(c => { dcCurrencies = c?.currencies || null; if (DC === S && dcDetailsEl?.isConnected) dcDrawDetails(); }).catch(() => {});
-      dcLinesEl = h('div');
-      dcResultsEl = h('div');
-      dcDetailsEl = h('div');
-      body.replaceChildren(h('div', { class: 'dc' },
-        h('div', { class: 'dc-kicker', text: 'Entry Assistant' }),
-        h('h2', { class: 'dc-title', text: 'Duty calculator' }),
-        h('p', { class: 'dc-experimental', role: 'note' }, h('b', { text: 'Experimental:' }), ' double check your info'),
-        h('p', { class: 'dc-sub', style: 'margin:8px 0 0', text: 'What an entry owes in duties and fees, in U.S. dollars. Anything not known is counted the costlier way and asked below.' }),
-        h('div', { class: 'dc-section' }, h('h3', { text: 'The goods' }), dcLinesEl,
-          h('div', { class: 'dc-chips' },
-            h('button', { class: 'dc-chip', type: 'button', text: 'Add a line', onclick: () => { S.lines.push({ code: '', origin: '', value: '' }); dcDrawForm(); } }),
-            isCasePage() ? h('button', { class: 'dc-chip', type: 'button', text: 'Fill from this order', title: 'Fill in the lines and shipment again from the order on this page', onclick: () => renderDutyCalc(true) }) : null,
-            h('button', { class: 'dc-chip ghost', type: 'button', text: 'Start over', onclick: () => { DC = { ...dcPrefill(), lines: [{ code: '', origin: '', value: '' }], charged: { what: 'duties', amount: '', inUsd: true } }; renderDutyCalc(); } }),
-            h('a', { class: 'dc-chip ghost', href: `${entrySite()}?calculator=1`, target: '_blank', rel: 'noreferrer', text: 'On the website ↗' })),
-          !S.filled && isCasePage() ? h('p', { class: 'dc-hint', text: 'Nothing to fill in from this page yet: press Fill from this order once it has loaded.' }) : null),
-        dcResultsEl, dcDetailsEl));
-      dcDrawForm();
-      dcRun();
-      // Opened before the order was read: filled in once it is (unless you've started typing)
-      if (!S.filled && isCasePage()) waitFor(() => openCase(), { timeout: 30000 })
-        .then(ok => { if (ok && DC === S && !S.touched && view === 'quote') renderDutyCalc(true); });
-    }
-
-    function openTool(name) {
-      if (panel.hidden) open();
-      setView(name);
-    }
-    const analyticsBtn = h('button', { class: 'icon', type: 'button', text: '▤', title: 'Analytics: who resolved and claimed what, who holds what now, and orders by class and company', 'aria-label': 'Analytics', 'aria-pressed': 'false', onclick: () => setView(view === 'analytics' ? lastView : 'analytics') });
-    // On order pages only: Prev / Next through your queue as you last left it, and back to the queue
-    const prevBtn = h('button', { class: 'tool', type: 'button', text: '◀', title: 'Previous order in your queue ([)', 'aria-label': 'Previous order', onclick: () => step(-1) });
-    const nextBtn = h('button', { class: 'tool', type: 'button', text: '▶', title: 'Next order in your queue (])', 'aria-label': 'Next order', onclick: () => step(1) });
-    const posLabel = h('span', { class: 'pos' });
-    const queueBtn = h('button', { class: 'tool', type: 'button', text: 'Queue', title: 'Back to the work queue', onclick: () => goTo(QUEUE_PATH) });
-    const toolstrip = h('div', { class: 'toolstrip' }, prevBtn, posLabel, nextBtn, h('span', { class: 'spacer' }), queueBtn);
-    function step(d) {
-      const { items, i } = navPosition();
-      const it = items[i + d];
-      if (it) goTo(it.url);
-    }
-    // Cheap enough to run every second: the queue position and what's set up
-    function refreshTools() {
-      hideRail(GM_getValue(HIDE_RAIL_KEY, false));
-      const onOrder = isCasePage();
-      analyticsBtn.setAttribute('aria-pressed', String(view === 'analytics'));
-      tabs.quote.textContent = dutyCalcOn() ? 'Duties' : 'Quote';
-      tabs.quote.title = dutyCalcOn() ? 'Duty calculator (Entry Assistant): what the entry owes, its Chapter 99 codes and the questions that settle them' : '';
-      toolstrip.hidden = !onOrder;
-      // Research only exists on a dispute or an order; elsewhere Tools opens on Classify, and comes back to
-      // Research once you open one
-      tabs.dispute.hidden = !onOrder;
-      if (!onOrder && view === 'dispute') { leftResearch = true; setView('classify'); return; }
-      if (onOrder && leftResearch && view === 'classify') { leftResearch = false; setView('dispute'); return; }
-      const { items, i } = navPosition();
-      prevBtn.disabled = !(i > 0);
-      nextBtn.disabled = !(i >= 0 && i < items.length - 1) && !(i < 0 && items.length);
-      posLabel.textContent = i >= 0 ? `${i + 1} of ${items.length}` : '';
-      // Research in Claude Code once a cloud routine is saved (if something else is missing, pressing it says
-      // what); otherwise claude.ai leads
-      ccBtn.hidden = !desk.researchOn() && !cfg().routineId && !cfg().routineToken;
-      openBtn.className = ccBtn.hidden ? 'primary' : 'secondary';
-      slackBtn.hidden = !slackSearchOn();
-    }
-
-    // ---- the panel's own options, at the top of Settings (the cog), out of the way of the tabs
-    const check =(label, on, change) => h('label', { class: 'doc' }, h('input', { type: 'checkbox', checked: on, onchange: e => change(e.target.checked) }), h('span', { text: label }));
-    const prefsGroup = group('Panel and pages', "Changes to the portal's own pages are off until you turn them on here.",
-      check('A "Research" button above Tools on dispute and order pages: claims the order and starts research in one click (Claude Code when it\'s set up, else claude.ai), its chat in a new tab', GM_getValue(QUICK_KEY, false) === true, on => { GM_setValue(QUICK_KEY, on); placeLauncher(); }),
+    // ---- Portal pages: the options that change the portal's own pages, near the top of the settings
+    const check = (label, on, change) => h('label', { class: 'doc' }, h('input', { type: 'checkbox', checked: on, onchange: e => change(e.target.checked) }), h('span', { text: label }));
+    const prefsGroup = group('Portal pages', "Changes to the portal's own pages are off until you turn them on here.",
       h('label', { class: 'frow', style: 'margin-bottom:6px' }, h('span', { class: 'flabel', text: 'Entry Writer Queue page' }),
         h('select', { class: 'field', 'aria-label': 'Entry Writer Queue page', onchange: e => setQueueView(e.target.value) },
           h('option', { value: 'portal', text: "Default Portal: the portal's own queue", selected: queueView() === 'portal' }),
           h('option', { value: 'classic', text: 'Portal+: the portal\'s queue in one sortable list, with search, one-click claim and bulk actions', selected: queueView() === 'classic' }))),
       check('Hide escalated orders in Portal+ (they still show in a search)', hideEscalated(), on => { GM_setValue(HIDE_ESC_KEY, on); queueCtl?.refreshView(); }),
-      check("Quote tab: use my duty calculator (Entry Assistant) instead of the portal's quoter, filled in from the order, with its questions to answer", dutyCalcOn(), on => { GM_setValue(DUTY_CALC_KEY, on); refreshTools(); }),
       check('Easier-to-read order pages (labeled details, CBP messages in plain English)', GM_getValue(READABLE_KEY, false), on => { GM_setValue(READABLE_KEY, on); if (on) makeReadable(); else undoReadable(); }),
-      check("Hide the portal's own Classify / Quote rail", GM_getValue(HIDE_RAIL_KEY, false), on => { GM_setValue(HIDE_RAIL_KEY, on); refreshTools(); }),
       check('Denied-party reviews: "Listed on" opens the official list (and copies the name) instead of a Google search', GM_getValue(LIST_LINKS_KEY, false), on => { GM_setValue(LIST_LINKS_KEY, on); fixListLinks(); }),
-      check("Clicking an HS code on the page opens it in the Entry Assistant tab (off: the portal's own References window)", GM_getValue(ENTRY_CLICKS_KEY, false), on => GM_setValue(ENTRY_CLICKS_KEY, on)),
-      check("Load each order's HS codes in Entry Assistant in the background, so they open at once (up to 4 per order)", GM_getValue(ENTRY_AHEAD_KEY, true), on => { GM_setValue(ENTRY_AHEAD_KEY, on); if (on) loadEntryAhead(); }),
-      check('Questionnaire disputes: show what each "Disputed program" is, with its questions and answers', GM_getValue(PROGRAMS_KEY, false), on => { GM_setValue(PROGRAMS_KEY, on); showPrograms(); }),
-      h('details', { class: 'docs', style: 'margin-top:6px' }, h('summary', { text: 'Keyboard shortcuts' }),
-        h('div', { class: 'keys', style: 'margin-top:6px' },
-          h('kbd', { text: '\\' }), h('span', { text: 'Open or close Tools' }),
-          h('kbd', { text: 'Shift+C' }), h('span', { text: 'Classify' }),
-          h('kbd', { text: 'Shift+Q' }), h('span', { text: 'Quote' }),
-          h('kbd', { text: '[  ]' }), h('span', { text: 'Previous / next order' }),
-          h('kbd', { text: '/' }), h('span', { text: 'Search the queue (Portal+)' }),
-          h('kbd', { text: 'j k x Enter o' }), h('span', { text: 'Move, select, open, new tab (Portal+)' }))));
-    settingsBody.insertBefore(prefsGroup, settingsBody.children[1]);
+      check("Clicking an HS code on the page opens it in Entry Assistant (off: the portal's own References window)", GM_getValue(ENTRY_CLICKS_KEY, false), on => GM_setValue(ENTRY_CLICKS_KEY, on)),
+      check("Load each order's HS codes in Entry Assistant in the background, so they open at once (up to 4 per order)", GM_getValue(ENTRY_AHEAD_KEY, true), on => { GM_setValue(ENTRY_AHEAD_KEY, on); if (on) loadEntryAhead(); }));
+    settingsBody.insertBefore(prefsGroup, settingsBody.children[2] || null);
     showLocked();
 
-    // Off an order page there's nothing to research: the Research tab says so instead of showing stale content
-    const researchIdle = h('div', { class: 'body', hidden: true });
-    let researchFooter = null;
-    function showResearchIdle() {
-      const idle = !isCasePage();
-      if (idle) researchIdle.replaceChildren(
-        h('p', { class: 'muted', text: 'Open a dispute or a work order to research it here. Classify and Quote work on any page.' }),
-        !entryToken() && !desk.tracking()
-          ? h('p', { class: 'hint' }, 'To add HTS facts, Google Sheet tracking or Claude Code research, open ', h('button', { class: 'linkish', type: 'button', text: 'Settings', onclick: () => setView('settings') }), ' (the cog).')
-          : null);
-      researchIdle.hidden = !idle;
-      body.hidden = idle;
-      if (researchFooter) researchFooter.hidden = idle;
-    }
-
-    // The Doc tab: the case's Google Doc as a scratch pad, inside the panel. Google may refuse to
-    // show itself in a frame, so there's always the link out, and the note box adds lines to the doc either way.
-    const docFrame = h('iframe', { class: 'entry-frame', title: 'Case doc', referrerpolicy: 'no-referrer', allow: 'clipboard-read; clipboard-write' });
-    const docLink = h('a', { target: '_blank', rel: 'noopener', text: 'Open in a new tab' });
-    const docNote = h('textarea', { class: 'answer', rows: 2, placeholder: 'Quick note for the doc (goes in its log with your name)', 'aria-label': 'Note for the case doc', style: 'min-height:48px' });
-    const docNoteStatus = h('p', { class: 'hint', style: 'margin:4px 0 0' });
-    const addDocNote = async () => {
-      const text = docNote.value.trim();
-      if (!text) return;
-      docNoteStatus.textContent = 'Adding…';
-      try {
-        await desk.docNote(text);
-        docNote.value = '';
-        docNoteStatus.textContent = 'Added to the doc.';
-        docFrame.src = docFrame.src;   // show it
-      } catch (e) { docNoteStatus.textContent = e.message; }
-    };
-    const docId = url => (String(url || '').match(/\/d\/([\w-]+)/) || String(url || '').match(/[?&]id=([\w-]+)/) || [])[1] || '';
-    function showDoc() {
-      const id = docId(desk.caseDoc());
-      if (!id) return;
-      const src = `https://docs.google.com/document/d/${id}/edit?rm=minimal`;
-      if (docFrame.src !== src) docFrame.src = src;
-      docLink.href = `https://docs.google.com/document/d/${id}/edit`;
-    }
-
+    // ---- The window: Entry Assistant (its button in the top bar, or a code clicked on the page) or Analytics (from the
+    // settings), over the page. The portal's open tool closes when it opens, so the two never sit on top of each other.
     const views = {
-      classify: h('section', { class: 'view', hidden: true }, classifyBody),
-      quote: h('section', { class: 'view', hidden: true }, quoteBody),
-      analytics: h('section', { class: 'view', hidden: true }, analyticsBody),
-      dispute: h('section', { class: 'view' }, body, researchIdle,
-        researchFooter = h('footer', {},
-          h('div', { class: 'actions', style: 'flex-wrap:wrap' }, ccBtn, openBtn, slackBtn),
-          status)),
-      doc: h('section', { class: 'view', hidden: true },
-        h('div', { class: 'entry-bar' }, h('span', { class: 'entry-caption', text: 'Case doc: answers, decisions and notes' }), docLink),
-        docFrame,
-        h('footer', {}, docNote, h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'secondary', type: 'button', text: 'Add note', onclick: () => addDocNote() })), docNoteStatus)),
       entry: h('section', { class: 'view keep', hidden: true },
         h('div', { class: 'entry-bar' }, entryCaption, entryNewTab),
         entryBlocked, entrySlot),
-      settings: h('section', { class: 'view', hidden: true }, settingsBody),
+      analytics: h('section', { class: 'view', hidden: true }, analyticsBody),
     };
-    const tab = (name, text) => h('button', { class: 'tab', type: 'button', role: 'tab', 'aria-selected': 'false', text, onclick: () => setView(name) });
-    const tabs = { dispute: tab('dispute', 'Research'), doc: tab('doc', 'Doc'), classify: tab('classify', 'Classify'), quote: tab('quote', 'Quote'), entry: tab('entry', 'Entry Assistant') };
-    tabs.doc.hidden = true;   // only when the case has a Google Doc
-    const gear = h('button', { class: 'icon', type: 'button', 'aria-label': 'Settings', title: 'Settings: options, keys and connections', 'aria-pressed': 'false', text: '⚙︎', onclick: () => setView(view === 'settings' ? lastView : 'settings') });
+    const WINDOW = { entry: ['Entry Assistant', ICONS.book], analytics: ['Analytics', ICONS.chart] };
+    const winTitle = h('div', { class: 'win-title' });
     // Overlay (floats over the page) or side by side (the page narrows beside it); your choice is remembered
     const LAYOUT_KEY = 'zt:layout';
     let layout = GM_getValue(LAYOUT_KEY, 'overlay');
-    const layoutBtn = h('button', { class: 'icon', type: 'button', onclick: () => { layout = layout === 'side' ? 'overlay' : 'side'; GM_setValue(LAYOUT_KEY, layout); dock(); refreshTools(); } });
+    const layoutBtn = h('button', { class: 'icon', type: 'button', onclick: () => { layout = layout === 'side' ? 'overlay' : 'side'; GM_setValue(LAYOUT_KEY, layout); dock(); } });
     const grip = h('div', { class: 'grip', role: 'separator', tabindex: '0', 'aria-orientation': 'vertical', 'aria-label': 'Resize panel', title: 'Drag to resize. Double-click for the default width.' });
     // The floating window: a handle to drag it by (the whole header drags too) and edges and corners to resize it
     const handle = h('button', { class: 'handle', type: 'button', 'aria-label': 'Move the window', text: '⠿',
-      title: 'Drag to move the window (the header works too); drag an edge or corner to resize it. Double-click to put it back beside the button at its usual size. Arrow keys move it.' });
+      title: 'Drag to move the window (the header works too); drag an edge or corner to resize it. Double-click to put it back where it opens at first. Arrow keys move it.' });
     const EDGES = { n: [0, -1], s: [0, 1], e: [1, 0], w: [-1, 0], ne: [1, -1], nw: [-1, -1], se: [1, 1], sw: [-1, 1] };
     const edges = Object.fromEntries(Object.keys(EDGES).map(k => [k, h('div', { class: `edge ${k}`, 'aria-hidden': 'true' })]));
     const header = h('header', {},
       handle,
-      h('nav', { class: 'tabs', role: 'tablist' }, tabs.dispute, tabs.doc, tabs.classify, tabs.quote, tabs.entry),
+      winTitle,
       h('div', { class: 'header-actions' },
-        analyticsBtn,
         layoutBtn,
-        gear,
-        h('button', { class: 'icon', type: 'button', 'aria-label': 'Close panel', title: 'Close', text: '×', onclick: () => close() })));
-    const panel = h('aside', { class: 'panel', hidden: true, 'aria-label': 'Tools' },
-      grip, Object.values(edges), header,
-      toolstrip,
-      views.dispute, views.doc, views.classify, views.quote, views.analytics, views.entry, views.settings);
-    root.append(h('style', { text: PANEL_CSS }), h('div', { class: 'wrap' }, launch, panel));
-    // Where the tabs' pages start, under the header and the order strip: the Entry Assistant tab is kept laid out
-    // there while another tab shows. Kept up to date as they change size, and measured right before frames load
-    // ahead (an observer only runs while the browser tab is painting, and an order can open in a background tab).
-    const syncViewTop = () => panel.style.setProperty('--view-top', `${header.offsetHeight + (toolstrip.hidden ? 0 : toolstrip.offsetHeight)}px`);
-    const viewTop = new ResizeObserver(syncViewTop);
-    viewTop.observe(header);
-    viewTop.observe(toolstrip);
+        h('button', { class: 'icon', type: 'button', 'aria-label': 'Close', title: 'Close (Escape)', text: '×', onclick: () => close() })));
+    const panel = h('aside', { class: 'panel', hidden: true, 'aria-label': 'Entry Assistant' },
+      grip, Object.values(edges), header, views.entry, views.analytics);
+    root.append(h('style', { text: PANEL_CSS }), h('div', { class: 'wrap' }, panel));
+    // Where the window's pages start, under its header: Entry Assistant is kept laid out there while hidden, so a page
+    // loaded ahead gets the size it will show at
+    const syncViewTop = () => panel.style.setProperty('--view-top', `${header.offsetHeight}px`);
+    new ResizeObserver(syncViewTop).observe(header);
 
-    let view = 'dispute';
-    let drawQueued = 0;          // a Research redraw waiting for the next frame (see render)
-    let researchStale = false;   // Research changed while another tab was showing
-    let lastView = 'dispute';
-    let leftResearch = false;   // Tools moved off Research because the page has nothing to research
-    function setView(name) {
-      view = name;
-      if (name !== 'settings') lastView = name;
-      for (const [k, el] of Object.entries(views)) el.hidden = k !== name;
-      for (const [k, el] of Object.entries(tabs)) el.setAttribute('aria-selected', String(k === name));
-      gear.setAttribute('aria-pressed', String(name === 'settings'));
-      if (name === 'classify') renderClassify();
-      if (name === 'quote') { if (dutyCalcOn()) renderDutyCalc(); else renderQuote(); }
-      if (name === 'analytics') renderAnalytics();
-      if (name === 'settings') checkUpdate();
-      // The view can be changed from the queue's own picker since Settings was drawn
-      if (name === 'settings') { const vs = root.querySelector('select[aria-label="Entry Writer Queue page"]'); if (vs) vs.value = queueView(); }
-      if (name === 'dispute') { showResearchIdle(); if (researchStale && state) render(); }
-      refreshTools();
-      if (name === 'entry') showEntryPage();
-      if (name === 'doc') showDoc();
-      if (name === 'settings') refreshNotesKeyNote();
+    let view = 'entry';
+    let drawQueued = 0;   // a redraw of the research state waiting for the next frame (see render)
+    function setView(name, load = true) {
+      view = WINDOW[name] ? name : 'entry';
+      for (const [k, el] of Object.entries(views)) el.hidden = k !== view;
+      const [title, icon] = WINDOW[view];
+      winTitle.replaceChildren(svgIcon(icon), h('span', { text: title }));
+      panel.setAttribute('aria-label', title);
+      if (!load) return;
+      if (view === 'analytics') renderAnalytics();
+      if (view === 'entry') showEntryPage();
     }
-    setView('dispute');
+    setView('entry', false);
 
-    // The desk redraws the Research tab when the case changes, and hands over Claude Code's answers,
-    // which are saved like a pasted answer (shared with the team); the sheet already has them.
-    // The Doc tab shows only while the open case has a Google Doc.
-    desk.subscribe(() => {
-      const hasDoc = !!desk.caseDoc();
-      tabs.doc.hidden = !hasDoc;
-      if (!hasDoc && view === 'doc') setView('dispute');
-      if (state && !panel.hidden) render();
+    function openWindow(name) {
+      attach();
+      // The portal's open tool (Research, Classify or Quote) closes first: one tool at a time, as in the portal
+      document.querySelector('#work-order-tool-bar [role="tablist"] [role="tab"][aria-selected="true"]')?.click();
+      setView(name);
+      panel.hidden = false;
+      dock();
+      syncTopButton();
+    }
+    function close() {
+      panel.hidden = true;
+      dock();
+      syncTopButton();
+    }
+    function syncTopButton() {
+      const on = !panel.hidden && view === 'entry';
+      if (eaBtn.getAttribute('aria-pressed') !== String(on)) eaBtn.setAttribute('aria-pressed', String(on));
+      const cls = `${TOOL_BTN} ${on ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`;
+      if (eaBtn.className !== cls) eaBtn.className = cls;
+    }
+    // Pressing one of the portal's tools closes the window over the page, so the tool's card isn't hidden under it
+    document.addEventListener('click', e => {
+      if (!panel.hidden && layout !== 'side' && e.target?.closest?.('#work-order-tool-bar [role="tab"]')) close();
+    }, true);
+    // Over the page, Escape closes it, as it closes the portal's own tools
+    window.addEventListener('keydown', e => {
+      if (e.key !== 'Escape' || panel.hidden || layout === 'side' || e.defaultPrevented) return;
+      if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return;
+      close();
     });
-    desk.setImporter(({ text, lines }) => {
+    // The settings and the research call this when something changed
+    function refreshTools() {
+      syncTopButton();
+      mountResearch();
+    }
+
+    // ---- The portal's own tools, where this script's parts go: checked whenever the page changes (once a frame at most)
+    // and every second. Each part is put back if the portal draws its tool again, and nothing is done twice.
+    const EMBED_CSS = `${PANEL_CSS}
+    :host { display: block; }
+    .wrap > .body { padding: 0; overflow: visible; }`;
+    // The portal's own Classify form gives way to this one (it's still there, hidden, and comes back if the script is off)
+    const portalCss = h('style', { id: 'zt-portal-css', text: '#work-order-tools section[role="tabpanel"][aria-label="Classify"] > :not(#zt-classify) { display: none !important; }' });
+
+    // Classify, in the portal's Classify tool
+    const clHost = h('div', { id: 'zt-classify' });
+    const clShadow = clHost.attachShadow({ mode: 'open' });
+    for (const type of ['keydown', 'keyup', 'keypress']) clHost.addEventListener(type, e => { if (e.key !== 'Escape') e.stopPropagation(); });
+    clShadow.append(h('style', { text: EMBED_CSS }), h('div', { class: 'wrap' }, classifyBody));
+    let clShownFor = '';
+    function mountClassify() {
+      const sec = document.querySelector('#work-order-tools section[role="tabpanel"][aria-label="Classify"]');
+      if (!sec) return;
+      if (clHost.parentElement !== sec) sec.append(clHost);
+      const theme = pageIsDark() ? 'dark' : 'light';
+      if (clHost.dataset.theme !== theme) clHost.dataset.theme = theme;
+      // Filled in from the order the first time it shows on each page; after that it keeps what you typed
+      if (sec.hidden || clShownFor === location.pathname) return;
+      clShownFor = location.pathname;
+      renderClassify();
+    }
+
+    // Research, in the portal's Research tool (duty disputes): its Copy prompt gives way to Research in Claude Code (or
+    // Open in claude.ai, without a routine), and Claude's answer comes back into the dispute's Notes by itself
+    const ccOn = () => !!(desk.researchOn() || cfg().routineId || cfg().routineToken);
+    let researchBusy = false;
+    function mountResearch() {
+      const sec = document.querySelector('#work-order-tools section[role="tabpanel"][aria-label="Research"]');
+      const copy = sec && [...sec.querySelectorAll('button')].find(b => !b.dataset.zt && /^(copy prompt|copying…)$/i.test(clean(b.textContent)));
+      if (!copy) return;
+      if (copy.style.display !== 'none') copy.style.setProperty('display', 'none', 'important');
+      if (copy.previousElementSibling !== rsBtn) copy.before(rsBtn);
+      const cc = ccOn();
+      const label = researchBusy ? (cc ? 'Sending…' : 'Opening…') : cc ? 'Research in Claude Code' : 'Open in claude.ai';
+      const key = `${copy.className}|${label}`;
+      if (rsBtn.dataset.k !== key) {
+        rsBtn.dataset.k = key;
+        rsBtn.className = copy.className;
+        rsBtn.disabled = researchBusy;
+        rsBtn.title = cc ? "Sends this dispute to Claude Code (your cloud routine). Its answer is added to Notes below, and to the case doc, when it's done."
+          : "Opens claude.ai with the research prompt and the order's files in its message box; nothing is sent until you press Enter there. Claude's answer is added to Notes below when it's done.";
+        rsBtn.replaceChildren(svgIcon(cc ? ICONS.bot : ICONS.external), label);
+      }
+      const row = copy.parentElement;
+      if (row.nextElementSibling !== rsStatus) row.after(rsStatus);
+      const desc = row.parentElement?.querySelector('p.text-xs:not([data-zt])');
+      const text = cc ? "Researches every claim, the merchant’s reasons, the automated review and your notes below in Claude Code. Its answer is added to Notes when it’s done."
+        : "Opens claude.ai with every claim, the merchant’s reasons, the automated review, your notes below and the order’s files, ready to send. Claude’s answer is added to Notes when it’s done.";
+      if (desc && desc.textContent !== text) desc.textContent = text;
+    }
+    // The button: read the dispute (every disputed line, every document), add the team's notes, and send it
+    async function researchFromPortal() {
+      if (researchBusy) return;
+      researchBusy = true;
+      mountResearch();
+      const path = location.pathname;
+      try {
+        setStatus('Reading this dispute…');
+        if (!(state && state.path === path)) await loadCase();
+        if (!(state && state.path === path && state.data)) throw new Error("Couldn't read this dispute. Wait for the page to finish loading, then try again.");
+        if (state.data.kind !== 'workOrder') state.selected = new Set(state.data.items.filter(i => i.inDispute).map(i => i.line));
+        state.teamNotes = await portalNotes.teamNotes(disputeIdHere()).catch(() => '');
+        if (ccOn()) await sendToClaudeCode();
+        else await handoff();
+      } catch (e) {
+        setStatus(e.message, 'err');
+      } finally {
+        researchBusy = false;
+        mountResearch();
+      }
+    }
+
+    // Settings, in the account window (Manage account > Tools), under the portal's own Tools settings
+    const setHost = h('div', { id: 'zt-settings-host' });
+    const setShadow = setHost.attachShadow({ mode: 'open' });
+    for (const type of ['keydown', 'keyup', 'keypress']) setHost.addEventListener(type, e => { if (e.key !== 'Escape') e.stopPropagation(); });
+    setShadow.append(h('style', { text: EMBED_CSS }), h('div', { class: 'wrap' }, settingsBody));
+    const setWrap = h('div', { id: 'zt-settings', class: 'space-y-3', style: 'margin-top:28px' },
+      h('hr', { class: 'border-border' }),
+      h('div', {},
+        h('h2', { class: 'text-base font-semibold', text: 'Dispute Deck' }),
+        h('p', { class: 'text-sm text-muted-foreground', text: 'The Dispute Deck userscript in this browser: Claude research, Classify, Entry Assistant, Portal+ and its other options.' })),
+      setHost);
+    function mountSettings() {
+      const page = document.querySelector('[role="radiogroup"][aria-label="Open tool"]')?.closest('fieldset')?.parentElement;
+      if (!page) return;
+      const theme = pageIsDark() ? 'dark' : 'light';
+      if (setHost.dataset.theme !== theme) setHost.dataset.theme = theme;
+      if (setWrap.parentElement === page) return;
+      page.append(setWrap);
+      checkUpdate();
+      refreshTokenNote();
+      const vs = setShadow.querySelector('select[aria-label="Entry Writer Queue page"]');
+      if (vs) vs.value = queueView();
+    }
+
+    function syncPortal() {
+      if (!portalCss.isConnected) (document.head || document.documentElement).append(portalCss);
+      const tabsEl = document.querySelector('#work-order-tool-bar [role="tablist"][aria-label="Tools"]');
+      if (tabsEl) { if (tabsEl.nextElementSibling !== eaBtn) tabsEl.after(eaBtn); syncTopButton(); }
+      else if (eaBtn.isConnected) eaBtn.remove();
+      mountClassify();
+      mountResearch();
+      mountSettings();
+    }
+    let syncQueued = 0;
+    new MutationObserver(() => { if (!syncQueued) syncQueued = requestAnimationFrame(() => { syncQueued = 0; syncPortal(); }); })
+      .observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'aria-selected'] });
+
+    // The desk tells the research when the case changes, and hands over Claude Code's answers. Each goes in the dispute's
+    // Notes (replacing the last one of its kind), and, with the case read here, in the shared answers too.
+    desk.subscribe(() => { if (state) render(); });
+    desk.setImporter(({ text, lines, ref, kind }) => {
+      const nid = disputeIdHere();
+      if (nid) {
+        portalNotes.addAnswer(nid, { text, kind: PATENT_KIND_RE.test(kind || '') ? 'patent' : 'cc', ref })
+          .then(added => setStatus(added ? 'Claude Code answered: its answer is in Notes below, and in the case doc.' : 'Claude Code answered (its answer is already in Notes).', 'ok'))
+          .catch(e => setStatus(`Claude Code answered, but its answer couldn't be added to Notes (${e.message}). It's in the case doc.`, 'warn'));
+      }
       if (!state) return;
       const d = state.data;
       const use = d.kind === 'workOrder' ? [] : lines.length ? lines : d.items.filter(i => i.inDispute).map(i => i.line);
       addAnswer(d.disputeId, use, text);
       state.selected = unresearchedLines(d);
-      setStatus('Claude Code answered. The answer is saved below and shared with your team.', 'ok');
       answersChanged();
     });
 
@@ -8906,8 +8357,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     let entryTarget = null;
     function showEntry(target) {
       entryTarget = target;
-      setView('entry');
-      open();
+      openWindow('entry');
     }
     // The code picked (on the page or in Tools); with none picked, the open order's first code
     async function showEntryPage() {
@@ -8952,7 +8402,6 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (!targets.length) return;
       entryAhead = targets;
       entrySlot.hidden = false;
-      toolstrip.hidden = false;   // an order page has the strip (as refreshTools sets it), so the frames get the height they'll show at
       syncViewTop();
       for (const t of targets) entryFrameFor(entryLink(t, true));
       // The tab already open on this order with no code picked shows the first code now
@@ -8999,15 +8448,17 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         // Where you last left it, kept inside the browser window. Before that, beside the button: to its left
         // when the button is on the right half of the screen, otherwise to its right, lined up with it.
         const pw = Math.min(w, innerWidth - 2 * EDGE_GAP);
-        const ph = panelHeight();
+        let ph = panelHeight();
         let left, top;
         if (box) { left = box.x; top = box.y; }
         else {
-          // The anchor is the sidebar button when that's the chosen launcher, otherwise the bubble
-          const a = launcherMode() === 'sidebar' && sideBtn.isConnected ? sideBtn.getBoundingClientRect()
-            : (() => { const x = parseFloat(launch.style.left) || innerWidth - 80, y = parseFloat(launch.style.top) || innerHeight - 80; return { left: x, top: y, right: x + 58, bottom: y + 58 }; })();
-          left = (a.left + a.right) / 2 <= innerWidth / 2 ? a.right + 10 : a.left - 10 - pw;
-          top = (a.top + a.bottom) / 2 - ph / 2;
+          // Until it's moved: where the portal opens its own tools, on the page's left edge just under the top bar,
+          // running down the page
+          const bar = document.getElementById('work-order-tool-bar')?.parentElement?.getBoundingClientRect();
+          const rail = document.getElementById('work-order-tool-rail')?.getBoundingClientRect();
+          top = (bar?.bottom || 0) + 8;
+          left = (rail?.left ?? bar?.left ?? 0) + 16;
+          ph = Math.round(Math.max(MIN_HEIGHT, innerHeight - top - 16));
         }
         panel.style.left = `${Math.round(Math.max(EDGE_GAP, Math.min(innerWidth - pw - EDGE_GAP, left)))}px`;
         panel.style.top = `${Math.round(Math.max(EDGE_GAP, Math.min(innerHeight - ph - EDGE_GAP, top)))}px`;
@@ -9135,7 +8586,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     const syncState = h('p', { class: 'hint', style: 'margin:0 0 8px' });
     const rest = h('div');
 
-    // While the panel is open, coworkers' answers are picked up every 15 seconds and when you come back to the tab
+    // While a case is read on this page, coworkers' answers are picked up every 15 seconds and when you come back to the tab
     const NOTES_POLL_MS = 15000;
     let pollTimer = null;
     // The panel is only redrawn when the answers changed, so reading or selecting text in an open answer
@@ -9154,7 +8605,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
           if (first || JSON.stringify(pad.notes) !== before) render();
           else showSyncState(pad);
         }
-        if (view !== 'settings') refreshNotesKeyNote();
+        refreshNotesKeyNote();
       });
     }
 
@@ -9173,7 +8624,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     function startPolling() {
       stopPolling();
       pollTimer = setInterval(() => {
-        if (state && !panel.hidden && document.visibilityState === 'visible') {
+        if (state && document.visibilityState === 'visible') {
           syncNow();
           claudeTabNews();
           desk.pollAnswers();
@@ -9185,7 +8636,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       pollTimer = null;
     }
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && state && !panel.hidden) syncNow();
+      if (document.visibilityState === 'visible' && state) syncNow();
     });
 
     // Show the change at once, then send it to the notes server in the background
@@ -9203,18 +8654,44 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
 
     // Coming back from the Claude tab: it may have filled the message box and kept Claude's answer
     window.addEventListener('focus', () => {
-      if (!state || panel.hidden) return;
+      if (!state) { checkPending(); return; }
       render();
       claudeTabNews();
     });
 
-    const setStatus = (text, kind = '') => { status.textContent = text; status.className = `status ${kind}`; };
+    // How research is going, under the button in the portal's Research tool
+    const setStatus = (text, kind = '') => {
+      status.textContent = text;
+      status.className = `status ${kind}`;
+      rsStatus.textContent = text;
+      rsStatus.hidden = !text;
+      rsStatus.style.color = kind === 'err' ? '#dc2626' : kind === 'warn' ? '#b45309' : '';
+    };
+
+    // A claude.ai answer for this page (or Claude Code research still out) while the case isn't read here yet, e.g. after
+    // coming back to it later: read it, so the answer is saved and added to Notes. Checked every 15 seconds too.
+    let pendingFor = '';
+    function pendingReply() {
+      const wm = WORK_ORDER_PATH.exec(location.pathname);
+      const ids = [disputeIdHere(), wm ? `wo_${caseIdOf(decodeURIComponent(wm[2]))}` : ''].filter(Boolean);
+      return ids.some(id => GM_getValue(REPLY_PREFIX + id, null));
+    }
+    function checkPending() {
+      if (state || !isCasePage() || pendingFor === location.pathname || !pendingReply()) return;
+      pendingFor = location.pathname;
+      loadCase().catch(e => console.warn('[Tools] reading the case for its answer', e));
+    }
+    setInterval(() => {
+      if (document.visibilityState !== 'visible' || !isCasePage()) return;
+      desk.pollAnswers();
+      checkPending();
+    }, NOTES_POLL_MS);
 
     // What the Claude tab left for this panel: how filling its message box went (shown once), and Claude's
     // finished answer, which render() offers to save
     function claudeTabNews() {
       const s = state;
-      if (!s || panel.hidden) return;
+      if (!s) return;
       const last = s.lastHandoff;
       const fill = last && GM_getValue(FILL_PREFIX + last.id, null);
       if (fill && fill.at !== last.reportedAt) {
@@ -9235,7 +8712,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (!fill.typed) return say(`Claude's message box couldn't be filled, so the prompt is on your clipboard: click the box there and press Ctrl+V.${names ? ` Then attach ${names} from the page.` : ''}`, false);
       if (!fill.attached) return say(`Claude has the prompt, but the files didn't attach: add ${names} from the page.`, false);
       const n = fill.files.length;
-      return say(`Claude has the prompt${n ? ` and ${n} ${n === 1 ? 'file' : 'files'}` : ''}. Nothing has been sent: check it there and press Enter. Claude's answer shows up here to save once it's done.`, true);
+      return say(`Claude has the prompt${n ? ` and ${n} ${n === 1 ? 'file' : 'files'}` : ''}. Nothing has been sent: check it there and press Enter. Claude's answer is added to Notes once it's done.`, true);
     }
 
     const setTokenNote = (text, kind = '') => { tokenNote.textContent = text; tokenNote.className = `hint ${kind}`; };
@@ -9341,37 +8818,22 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       host.dataset.theme = pageIsDark() ? 'dark' : 'light';
     }
 
-    async function open() {
-      attach();
-      if (!quietOpen) {
-        launch.hidden = true;
-        panel.hidden = false;
-        dock();
-      }
-      refreshTools();
-      // Off an order page there's nothing to research, so the Research tab gives way to Tools
-      if (!isCasePage()) {
-        setView(view);
-        return;
-      }
-      if (view === 'dispute') showResearchIdle();
+    // Reads this page's case (a dispute's lines, claims and documents, or a work order), for research
+    async function loadCase() {
+      if (!isCasePage()) return;
       if (state && state.path === location.pathname) {
         reopenSync();
         return;
       }
       const path = location.pathname;
-      setStatus('');
-      if (WORK_ORDER_PATH.test(path)) {
-        openOrder(path);
-        return;
-      }
+      if (WORK_ORDER_PATH.test(path)) return openOrder(path);
       body.replaceChildren(h('p', { class: 'muted', text: 'Reading the dispute…' }));
       const ready = await waitFor(() => lineHeaders(document.querySelector('main') || document.body).length > 0);
       if (path !== location.pathname) return;
       if (ready) await expandItems(document.querySelector('main') || document.body);
       const data = ready && extractDispute();
       if (!data || !data.items.length) {
-        body.replaceChildren(h('p', { class: 'err', text: "Couldn't find any items on this page. Wait for it to finish loading, then close and reopen this panel." }));
+        body.replaceChildren(h('p', { class: 'err', text: "Couldn't find any items on this page." }));
         return;
       }
       // A site you entered before wins, then the dashboard's own Website field, then a guess from the email
@@ -9409,7 +8871,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (data?.type === 'DUTY_DISPUTE_REVIEW' && /^duty_dispute_/.test(data.workOrderId) && programsFor !== data.workOrderId) await loadPrograms(data.workOrderId);
       if (path !== location.pathname) return;
       if (!data || !data.lines.length) {
-        body.replaceChildren(h('p', { class: 'err', text: "Couldn't read this order. Wait for the page to finish loading, then close and reopen this panel." }));
+        body.replaceChildren(h('p', { class: 'err', text: "Couldn't read this order." }));
         return;
       }
       state = { kind: 'workOrder', path, data, site: null, matches: {}, checked: {}, facts: {}, factsPromise: null, selected: new Set(), answerOpen: false, showAnswer: {}, openAnswers: {} };
@@ -9421,14 +8883,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       state.factsPromise = loadFacts();
     }
 
-    function close() {
-      panel.hidden = true;
-      dock();
-      stopPolling();
-      launch.hidden = false;
-    }
-
-    // Reopening an already-loaded panel picks up coworkers' answers straight away
+    // Reading an already-read case again picks up coworkers' answers straight away
     function reopenSync() {
       if (state && !pollTimer) startPolling();
       syncNow();
@@ -9468,16 +8923,14 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       }
     }
 
-    // Redraws of the Research tab are batched: however many lookups, site searches and sheet updates finish at
-    // once, the tab is drawn once per frame, and not while another tab is showing (it's drawn on coming back).
-    // (drawQueued and researchStale are declared with `view`, since setView reads them during setup.)
+    // The research state is redrawn at most once a frame, however many lookups, site searches and sheet updates finish at
+    // once. It's no longer shown (the portal has its own Research tool), but drawing it is what saves a claude.ai answer
+    // and keeps the case's facts current for the sheet. (drawQueued is declared with `view`.)
     function render() {
-      if (view !== 'dispute') { researchStale = true; return; }
       if (drawQueued) return;
       drawQueued = requestAnimationFrame(() => { drawQueued = 0; if (state) draw(); });
     }
     function draw() {
-      researchStale = false;
       const s = state;
       const d = s.data;
       const isOrder = d.kind === 'workOrder';
@@ -9594,15 +9047,19 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         GM_deleteValue(replyKey);
         reply = null;
       }
-      // Saved by itself when that's turned on (after this draw: saving draws the panel again)
-      if (reply && GM_getValue(AUTO_SAVE_KEY, false) === true && !s.autoSaving) {
+      // Saved by itself (after this draw: saving draws it again), and added to the dispute's Notes in the portal
+      if (reply && !s.autoSaving) {
         s.autoSaving = true;
-        const { text } = reply;
+        const { text, at, handoffId } = reply;
         const lines = isOrder ? [] : reply.lines.length ? reply.lines : inDispute.map(i => i.line);
         GM_deleteValue(replyKey);
         setTimeout(() => {
-          try { storeAnswer(text, lines); setStatus("Claude's answer from claude.ai was saved to the case doc by itself.", 'ok'); }
+          try { storeAnswer(text, lines); setStatus("Claude's answer from claude.ai is saved to the case doc.", 'ok'); }
           finally { s.autoSaving = false; }
+          const nid = disputeIdHere();
+          if (nid) portalNotes.addAnswer(nid, { text, kind: 'ai', ref: handoffId || String(at || ''), at })
+            .then(() => setStatus("Claude's answer from claude.ai is in Notes below, and in the case doc.", 'ok'))
+            .catch(e => setStatus(`Claude's answer from claude.ai is saved to the case doc, but couldn't be added to Notes (${e.message}).`, 'warn'));
         }, 0);
         reply = null;
       }
@@ -9866,10 +9323,12 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       const page = extractDispute();
       const d = page && page.disputeId === state.data.disputeId && page.items.length ? page : state.data;
       const items = d.items.filter(i => i.inDispute && state.selected.has(i.line));
-      if (!items.length) throw new Error('Tick at least one line to research.');
+      if (!items.length) throw new Error('No line on this dispute has a claim to research.');
       return withAutomatedReviews({ ...d, items });
     }
-    const promptFor = (d, names, forClaudeAi = false) => (d.kind === 'workOrder' ? buildWorkOrderPrompt(d, state, forClaudeAi) : buildPrompt(d, state, names, forClaudeAi));
+    // The team's notes on the dispute (its Notes in the portal, without Claude's own answers), after the prompt
+    const withTeamNotes = (prompt, notes) => (notes ? `${prompt}\n\n## The team's research notes so far\nFrom the dispute's Notes in the broker portal, shared by everyone working it. Build on them rather than repeat them, check anything you rely on, and say where you disagree.\n\n${notes.slice(0, 8000)}` : prompt);
+    const promptFor = (d, names, forClaudeAi = false) => withTeamNotes(d.kind === 'workOrder' ? buildWorkOrderPrompt(d, state, forClaudeAi) : buildPrompt(d, state, names, forClaudeAi), state?.teamNotes);
     const copyNote = note => {
       GM_setClipboard(note, 'text');
       setStatus(`Note copied. Paste it into the note box on the page: "${note}"`, 'ok');
@@ -9878,13 +9337,10 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
 
     async function run(action) {
       if (!state) return;
-      ccBtn.disabled = openBtn.disabled = copyBtn.disabled = true;
       try {
         await action();
       } catch (e) {
         setStatus(e.message, 'err');
-      } finally {
-        ccBtn.disabled = openBtn.disabled = copyBtn.disabled = false;
       }
     }
 
@@ -9903,7 +9359,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (r?.skipped) { setStatus(`Not sent again. ${r.why}`, 'warn'); return r; }
       markSent(d.disputeId, d.items);
       render();
-      setStatus(r.session ? 'Sent to Claude Code. Its research session opened in a new tab; the answer shows up here and in the case doc when it finishes.'
+      setStatus(r.session ? 'Sent to Claude Code. Its research session opened in a new tab; its answer is added to Notes below (and the case doc) when it finishes.'
         : `The cloud session didn't start${r.fireError ? ` (${r.fireError})` : ''}, so nothing is researching it. Press Research in Claude Code to try again.`, r.session ? 'ok' : 'warn');
       return r;
     }
@@ -9912,7 +9368,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     // whole work order), and send it to Claude Code without opening a tab. Nothing on the portal is clicked.
     // `task`: 'patent' sends the quick patent check instead of the full research
     async function autoResearch({ task = 'research' } = {}) {
-      await open();
+      await loadCase();
       const path = location.pathname;
       const ok = await waitFor(() => state && state.path === path && state.data, { timeout: 45000 });
       if (!ok) throw new Error("Couldn't read this page (it didn't finish loading).");
@@ -9983,17 +9439,6 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       setStatus('Some HTS lookups took too long; the prompt asks Claude to look those codes up.', 'warn');
     }
 
-    async function copyPrompt() {
-      await waitForFacts();
-      const d = await freshData();
-      const names = selectedDocs(d).map(doc => doc.name);
-      GM_setClipboard(promptFor(d, names, true), 'text');
-      markSent(d.disputeId, d.items);
-      render();
-      const warning = lookupWarning();
-      setStatus((names.length ? `Prompt copied. Paste it into Claude and attach ${names.join(', ')}.` : 'Prompt copied. Paste it into Claude.') + warning, warning ? 'warn' : 'ok');
-    }
-
     async function downloadDoc(doc) {
       const r = await gmRequest({ url: doc.url, responseType: 'blob', timeout: 60000, anonymous: true });
       if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
@@ -10034,22 +9479,15 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     }
 
     return {
-      show() { attach(); if (panel.hidden) launch.hidden = false; placeLauncher(); },
-      hide() { stopPolling(); launch.hidden = true; panel.hidden = true; dock(); },
-      reset() { stopPolling(); state = null; panel.hidden = true; dock(); setStatus(''); },
+      show() { attach(); },
+      // A new page: what was read for the last one goes (the window stays open, as the portal's tools do)
+      reset() { stopPolling(); state = null; pendingFor = ''; setStatus(''); setTimeout(checkPending, 3000); },
       keepAttached() {
-        placeLauncher();
-        if (!host.isConnected && (!launch.hidden || !panel.hidden)) attach();
+        if (!host.isConnected) attach();
         if (!panel.hidden && !dockStyle.isConnected) dock();
-        if (!panel.hidden) refreshTools();
-        else hideRail(GM_getValue(HIDE_RAIL_KEY, false));
+        syncPortal();
       },
-      isOpen: () => !panel.hidden,
-      toggle() { if (panel.hidden) open(); else close(); },
-      tools() { setView('dispute'); open(); },
-      openTool,
-      step,
-      open,
+      openWindow,
       showEntry,
       loadEntryAhead,
       autoResearch,
@@ -10076,13 +9514,17 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     trimStoredAnswers();
     let ui = null;
     let lastPath = null;
-    // A way in from the Tampermonkey toolbar menu, in case the button doesn't show
-    GM_registerMenuCommand('Open Tools', () => {
+    // A way in from the Tampermonkey toolbar menu too
+    GM_registerMenuCommand('Open Entry Assistant', () => {
       ui = ui || createPanel();
-      ui.open();
+      ui.openWindow('entry');
     });
-    // A code on the dispute page (the dashboard's "Look up in the HTS" buttons) opens in the panel's Entry
-    // Assistant tab instead of the dashboard's References window, comparing the line's two codes when the
+    GM_registerMenuCommand('Open Analytics', () => {
+      ui = ui || createPanel();
+      ui.openWindow('analytics');
+    });
+    // A code on the dispute page (the dashboard's "Look up in the HTS" buttons) opens in the Entry Assistant
+    // window instead of the dashboard's References window, comparing the line's two codes when the
     // merchant claims another one. This runs before the dashboard's own click handler; Alt-click skips it.
     // While the site doesn't allow being shown in the dashboard, the click goes to the dashboard as before.
     window.addEventListener('click', e => {
@@ -10099,8 +9541,8 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       ui = ui || createPanel();
       ui.showEntry(target);
     }, true);
-    // Tools is on every portal page. It stays open as you move from order to order, and the work queue
-    // page shows the portal's own queue unless Portal+ is chosen under Tools.
+    // The script's parts go in the portal's own tools on every page. The Entry Assistant window stays open as you move
+    // from order to order, and the work queue page shows the portal's own queue unless Portal+ is chosen in the settings.
     let queue = null;
     const onRoute = () => {
       ui?.keepAttached();
@@ -10115,28 +9557,10 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       desk.onRoute();
       if (isCasePage()) entryFrameable(); // known by the time a code is clicked
       ui = ui || createPanel();
-      const wasOpen = ui.isOpen();
       ui.reset();
       ui.loadEntryAhead();
       ui.show();
-      if (wasOpen) ui.open();
     };
-    // Keys anywhere on the portal, never while typing: \ Tools, Shift+C Classify, Shift+Q Quote, [ ] previous / next order
-    window.addEventListener('keydown', e => {
-      if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
-      if (!['\\', 'C', 'Q', '[', ']'].includes(e.key)) return;   // the only keys handled here: nothing else is looked at
-      const t = e.composedPath()[0];
-      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
-      if (document.querySelector('[role="dialog"]:not([hidden])')) return;
-      ui = ui || createPanel();
-      const k = e.key;
-      if (k === '\\') ui.toggle();
-      else if (k === 'C' && e.shiftKey) ui.openTool('classify');
-      else if (k === 'Q' && e.shiftKey) ui.openTool('quote');
-      else if ((k === '[' || k === ']') && isCasePage()) ui.step(k === ']' ? 1 : -1);
-      else return;
-      e.preventDefault();
-    }, true);   // before the panel, which keeps its keys from the page, so these also work after clicking in it
     if (window.onurlchange === null) window.addEventListener('urlchange', onRoute);
     setInterval(onRoute, 1000); // fallback for client-side navigation, and re-attaches if the app re-renders <body>
     onRoute();

@@ -7,16 +7,16 @@ It has no ads and no analytics. It never sells data, and it uses data only for t
 ## What it reads
 
 - **The portal pages you open, and the portal's own data.** It uses your existing sign-in, the same way the portal does: the work queue, orders, disputes, questionnaire sessions, screening details, and company names.
-- **A merchant's website**, only the one you enter in the Research tab. It fetches public pages and never sends your cookies.
-- **claude.ai**, only in the tab that **Open in claude.ai** opens. It fills the message box there, and keeps Claude's finished answer on your computer until you save or dismiss it.
+- **A merchant's website**, when you research a dispute: the one saved for that merchant, the portal's Website field, or a guess from the email domain. It fetches public pages and never sends your cookies.
+- **claude.ai**, only in the tab that **Open in claude.ai** opens. It fills the message box there, and keeps Claude's finished answer on your computer until the dispute's page saves it.
 
 ## Where data goes
 
-- **The portal itself.** Classify, Quote, Analytics, the Tools queue and its bulk actions call the portal's own API, in the mode the portal is in. Bulk actions change orders only after you confirm them.
+- **The portal itself.** Classify, Analytics, the Portal+ queue and its bulk actions call the portal's own API, in the mode the portal is in. Bulk actions change orders only after you confirm them. Claude's answers (from Claude Code or claude.ai) are added to the dispute's Notes through the portal's own notes API, and the team's Notes are read into the research prompt.
 - **claude.ai**, only when you click Open in claude.ai: the research prompt and the documents you leave ticked. They go into your own chat and are not sent until you press Enter.
 - **Entry Assistant** (entry.kars3n.com):
   - HS codes and countries of origin, for the HTS facts in research prompts. This uses your own token and only happens once you save one.
-  - In the Entry Assistant tab, the codes being looked up.
+  - In the Entry Assistant window, the codes being looked up.
 - **The team's Google Sheet (script.google.com)**, only once its address and secret are set up. For the disputes and orders you work it sends the case's name, type and portal link, what you do to it in the portal (claim, release, wait, escalate, resolve and decisions), saved answers, the Front / Slack / chat links you paste, your comments and research requests, with your name. It reads back the case's row, comments, the team's prompts and Claude Code's answers.
 - **Claude Code (api.anthropic.com)**, only if you set up a cloud routine. It sends the research request's id, that request's own one-time token and the sheet's web app address to start your routine; the routine reads only that request.
 - **A notes server**, only if you enter its address. It sends saved answers, with your name, to share them with coworkers who use the same server. To join, it sends your dashboard sign-in token once; the server checks it and keeps your name and zonos.com email.
@@ -28,7 +28,7 @@ Nothing else leaves your browser.
 
 Tampermonkey's storage for this script keeps:
 - **Your settings and keys.** These are never shown again once saved. Copy my setup puts them on your clipboard only when you click it.
-- **Panel and queue preferences:** layout, saved views, the bubble's position.
+- **Window and queue preferences:** the Entry Assistant window's place and size, saved views.
 - **Research records and answers.** For each dispute, the latest saved answer and when each line was sent to Claude.
 - **Company names** the portal returns, cached to load the queue faster.
 
