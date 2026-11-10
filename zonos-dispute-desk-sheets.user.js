@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.81.0
+// @version      7.81.1
 // @description  Tools for the Zonos broker portal, built into its own pages: Research in Claude Code (or claude.ai) in the portal's Research tool, with the answer written into the dispute's Notes; a fuller Classify inside the portal's Classify; Entry Assistant in the top bar beside Research, Classify and Quote; the Portal+ queue with search and bulk actions; easier-to-read order pages. Settings are under Manage account > Tools. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -8137,7 +8137,9 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         h('button', { type: 'button', class: HEAD_BTN, 'aria-label': 'Close tools', title: 'Close', onclick: () => close() }, svgIcon(ICONS.x, 'h-4 w-4'))));
     root.append(h('style', { text: `${PANEL_CSS}
     .wrap.card-body { position: absolute; inset: 0; display: flex; flex-direction: column; }` }), h('div', { class: 'wrap card-body' }, views.entry, views.analytics));
-    host.setAttribute('style', 'display:block;position:relative;flex:1 1 0%;min-height:0');
+    // visibility and pointer-events follow the card: the shadow root's `:host { all: initial }` would otherwise reset them,
+    // and the closed card's pages would show through it
+    host.setAttribute('style', 'display:block;position:relative;flex:1 1 0%;min-height:0;visibility:inherit;pointer-events:inherit');
     const CARD = 'pointer-events-auto flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-lg animate-in fade-in-0 duration-150 motion-reduce:animate-none';
     const OVERLAID = 'absolute top-2 bottom-4 left-4 md:bottom-6 md:left-6';
     const DOCKED = 'shrink-0 self-stretch';
