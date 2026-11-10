@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zonos Dispute Desk (Sheets)
 // @namespace    zonos-brokerage-sheets
-// @version      7.81.1
+// @version      7.82.0
 // @description  Tools for the Zonos broker portal, built into its own pages: Research in Claude Code (or claude.ai) in the portal's Research tool, with the answer written into the dispute's Notes; a fuller Classify inside the portal's Classify; Entry Assistant in the top bar beside Research, Classify and Quote; the Portal+ queue with search and bulk actions; easier-to-read order pages. Settings are under Manage account > Tools. No keys are built in. Changes the dashboard only through bulk actions you confirm.
 // @homepageURL  https://github.com/kars3n-zonos/zonos-dispute-researcher
 // @supportURL   https://github.com/kars3n-zonos/zonos-dispute-researcher/issues
@@ -3340,14 +3340,29 @@
     }
     // The case's chats: its Claude Code research session, and the claude.ai chat Open in claude.ai started for it on
     // this computer (else the AI chat link on its row, whichever kind it is)
-    function chatLinks(ent) {
+    function chatUrls(ent = D.ent) {
+      if (!ent) return { code: '', ai: '' };
       const row = (D.sheetCase?.id === ent.id && D.sheetCase.links?.chat) || '';
       const code = D.research?.session || GM_getValue(`desk:research:${ent.id}`, null)?.session
         || (D.sessions?.id === ent.id && D.sessions.latest) || (/claude\.ai\/code\//.test(row) && row) || '';
       const ai = GM_getValue(CHAT_URL_PREFIX + ent.id, '') || GM_getValue(CHAT_URL_PREFIX + `wo_${ent.id}`, '') || (/claude\.ai\/chat\//.test(row) && row) || '';
+      return { code, ai };
+    }
+    function chatLinks(ent) {
+      const { code, ai } = chatUrls(ent);
       const a = (href, text, title) => h('a', { href, target: '_blank', rel: 'noopener', text, title });
       return [code && a(code, 'Claude Code chat', 'The Claude Code session that researched this case'),
         ai && a(ai, 'claude.ai chat', 'The claude.ai chat this case was researched in')].filter(Boolean);
+    }
+    // Any dispute's past research in the sheet (not only the one on screen), to fill in its Notes: its row's links
+    // (Front, Slack, AI chat), case doc and sheet, and its Claude Code requests with their answers and sessions.
+    // Both calls only read.
+    async function caseHistory(id) {
+      if (!sheetsOn()) return { links: {}, doc: '', sheet: '', requests: [], error: '' };
+      const ctx = { id, name: '', kind: 'Duty dispute', url: `${location.origin}/duty-disputes/${id}` };
+      const quiet = e => (/not found|no such case|no case/i.test(e.message) ? {} : { error: e.message });
+      const [f, r] = await Promise.all([sheetsCall('find', ctx).catch(quiet), sheetsCall('researchStatus', ctx).catch(quiet)]);
+      return { links: f?.links || {}, doc: f?.doc || '', sheet: f?.sheet || '', requests: r?.requests || [], error: f?.error || r?.error || '' };
     }
     async function addToSheet() {
       const ent = D.ent;
@@ -3621,7 +3636,7 @@
           done[q.id] = Date.now();
           news = true;
           if (q.status === 'Done' && q.answer) {
-            importer({ text: q.answer, lines: q.lines.split(/[,\s]+/).filter(Boolean).map(Number), title: `Claude Code answer · ${q.id}`, ref: q.id, kind: q.kind || '' });
+            importer({ text: q.answer, lines: q.lines.split(/[,\s]+/).filter(Boolean).map(Number), title: `Claude Code answer · ${q.id}`, ref: q.id, kind: q.kind || '', session: q.session || '' });
             D.msg = 'Claude Code answered. Its answer is saved below and in the case doc.';
           } else D.msg = `Claude Code couldn't finish the research: ${q.answer || 'no reason given'}`;
         }
@@ -3785,7 +3800,9 @@
       myName: () => D.myName || '',
       // The case in plain lines (the portal's own data), for a chat that starts without the research prompt
       caseFacts: () => { try { return D.ent ? caseContext(D.ent).facts : []; } catch { return []; } },
-      dryRun, testMode, onRoute, setPageData, onAnswer, queueResearch, pollAnswers, card,
+      dryRun, testMode, onRoute, setPageData, onAnswer, queueResearch, pollAnswers, card, caseHistory,
+      // The case on screen's research chats: its Claude Code session and its claude.ai chat, where known
+      chatUrls: () => chatUrls(),
       subscribe: fn => listeners.add(fn),
       setImporter: fn => { importer = fn; },
       screeningLines,
@@ -7046,7 +7063,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
   // page, it waits until they're saved.
   const portalNotes = (() => {
     const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-    const TITLES = { cc: 'Claude Code research', patent: 'Claude Code patent check', ai: 'Claude research (claude.ai)' };
+    const TITLES = { cc: 'Claude Code research', patent: 'Claude Code patent check', ai: 'Claude research (claude.ai)', history: 'Earlier Claude research' };
     const OURS = new Set(Object.values(TITLES).map(t => `## ${t}`));
     const MAX_BYTES = 190 * 1024;   // the portal takes up to 200 KB
     async function call(id, method = 'GET', body) {
@@ -7077,7 +7094,8 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
 
     // Claude's Markdown, as the Notes editor takes it: headings under the section's own (###), tables as lists, code as
     // inline code, no rules (the section ends at one), and no "<" (the editor would read it as a tag)
-    function tidy(md) {
+    // (`bold`: headings become bold lines, for answers inside a section that has its own ### entries)
+    function tidy(md, bold = false) {
       const out = [];
       const lines = String(md || '').replace(/\r\n?/g, '\n').split('\n');
       const cells = l => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
@@ -7101,7 +7119,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         }
         if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(l) || /^\s*=+\s*$/.test(l)) continue;
         const hd = l.match(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/);
-        if (hd) { out.push('', `### ${hd[1]}`, ''); continue; }
+        if (hd) { out.push('', bold ? `**${hd[1].replace(/\*\*/g, '')}**` : `### ${hd[1]}`, ''); continue; }
         // Lines of plain text one under another ("**Final answer:** …", then "**Reasoning:** …") stay on their own lines
         if (plain(l) && plain(out[out.length - 1] || '')) out.push('');
         out.push(l);
@@ -7120,14 +7138,16 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       }
       return out.join('\n').replace(/^\s+/, '').trim();
     }
-    function section(kind, text, ref, at) {
+    const mdLink = (text, url) => `[${text}](${String(url).replace(/[()\s]/g, encodeURIComponent)})`;
+    function section(kind, text, ref, at, chat) {
       const when = new Date(at || Date.now()).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+      const open = /^https:\/\//.test(chat || '') ? ` · ${mdLink(kind === 'ai' ? 'open the chat' : 'open the session', chat)}` : '';
       return [`## ${TITLES[kind]}`, '',
-        `*${kind === 'ai' ? 'From claude.ai' : 'From Claude Code'} · ${when}${ref ? ` · ref ${ref}` : ''}. Added by Dispute Deck: the next answer replaces this section.*`,
+        `*${kind === 'ai' ? 'From claude.ai' : 'From Claude Code'} · ${when}${ref ? ` · ref ${ref}` : ''}${open}. Added by Dispute Deck: the next answer replaces this section.*`,
         '', tidy(text), '', '***'].join('\n');
     }
     // Puts the answer at the top of the dispute's Notes, in place of the last one of its kind. False when it's already there.
-    async function addAnswer(id, { text, kind = 'cc', ref = '', at = Date.now() }) {
+    async function addAnswer(id, { text, kind = 'cc', ref = '', at = Date.now(), chat = '' }) {
       if (!id || !String(text || '').trim()) return false;
       for (let tries = 0; tries < 4; tries++) {
         await settled();
@@ -7142,7 +7162,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
           else if (/^##\s/.test(lines[end])) end -= 1;
           rest = [...lines.slice(0, start), ...lines.slice(end + 1)].join('\n');
         }
-        let sec = section(kind, text, ref, at);
+        let sec = section(kind, text, ref, at, chat);
         const room = MAX_BYTES - new Blob([rest]).size - 200;
         if (new Blob([sec]).size > room) sec = `${sec.slice(0, Math.max(0, room))}\n\n*(Cut short to fit the notes. The whole answer is in the case doc.)*\n\n***`;
         const body = `${sec}\n\n${rest.trim()}`.trim() + '\n';
@@ -7159,7 +7179,95 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (!id) return '';
       return strip((await read(id)).body);
     }
-    return { addAnswer, teamNotes, tidy };
+    // ---- Earlier Claude research: every past answer and research chat of a dispute, in one section after the current
+    // answers. Each run only adds what isn't there yet (answers by their ref, links by address); nothing in it is changed.
+    const ENTRY_MAX = 12000;   // characters of one past answer
+    const iso = d => { const t = typeof d === 'number' ? d : Date.parse(String(d || '').replace(' ', 'T')); return t ? new Date(t).toISOString().slice(0, 10) : ''; };
+    const fingerprint = t => String(t || '').replace(/[\s*_#>`|-]+/g, ' ').trim().toLowerCase().slice(0, 300);
+    function bounds(lines, title) {
+      const start = lines.findIndex(l => l.trim() === `## ${title}`);
+      if (start < 0) return null;
+      let end = lines.findIndex((l, k) => k > start && (/^\s*(\*\*\*|---|___)\s*$/.test(l) || /^##\s/.test(l)));
+      if (end < 0) end = lines.length - 1;
+      else if (/^##\s/.test(lines[end])) end -= 1;
+      return { start, end };
+    }
+    function entryText(a) {
+      const meta = [`ref ${a.key}`, a.author && `saved by ${a.author}`, a.lines?.length && `line${a.lines.length > 1 ? 's' : ''} ${a.lines.join(', ')}`].filter(Boolean).join(' · ');
+      let text = tidy(a.text, true);
+      if (text.length > ENTRY_MAX) text = `${text.slice(0, ENTRY_MAX)}…\n\n*(Cut short. The whole answer is in the case doc.)*`;
+      return [`### ${a.label}${a.date ? ` · ${a.date}` : ''}`, '', `*${meta}*`, '', text].join('\n');
+    }
+    // { answers: [{ key, label, date, text, author?, lines?, also? }], links: [{ label, url }] }; false when nothing was new
+    async function mergeHistory(id, { answers = [], links = [] }) {
+      if (!id || (!answers.length && !links.length)) return false;
+      for (let tries = 0; tries < 4; tries++) {
+        await settled();
+        const cur = await read(id);
+        const lines = cur.body.replace(/\r\n?/g, '\n').split('\n');
+        const b = bounds(lines, TITLES.history);
+        const inside = b ? lines.slice(b.start + 1, b.end + (/^\s*(\*\*\*|---|___)\s*$/.test(lines[b.end] || '') ? 0 : 1)) : [];
+        // What's there: its links, and its entries (each from a ### heading to the next)
+        const oldLinks = [];
+        const oldEntries = [];
+        let curEntry = null;
+        for (const l of inside) {
+          if (/^###\s/.test(l)) { curEntry = { head: l, lines: [l] }; oldEntries.push(curEntry); continue; }
+          if (curEntry) curEntry.lines.push(l);
+        }
+        const linkEntry = oldEntries.find(e => /^###\s+Chats and links/i.test(e.head));
+        for (const m of (linkEntry?.lines.join('\n') || '').matchAll(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g)) oldLinks.push({ label: m[1], url: m[2] });
+        const entries = oldEntries.filter(e => e !== linkEntry).map(e => ({ text: e.lines.join('\n').trim(), date: (e.head.match(/(\d{4}-\d{2}-\d{2})/) || [])[1] || '' }));
+        const seen = new Set(entries.map(e => fingerprint(e.text.split('\n').slice(3).join(' '))));
+        const fresh = [];
+        for (const a of answers) {
+          if (!String(a.text || '').trim()) continue;
+          if (cur.body.includes(`ref ${a.key}`) || (a.also && cur.body.includes(`ref ${a.also}`))) continue;
+          const fp = fingerprint(tidy(a.text, true));
+          if (seen.has(fp)) continue;
+          seen.add(fp);
+          fresh.push({ text: entryText(a), date: a.date || '' });
+        }
+        const linkMap = new Map(oldLinks.map(l => [l.url, l]));
+        let newLinks = 0;
+        for (const l of links) if (/^https:\/\//.test(l.url || '') && !linkMap.has(l.url) && !cur.body.includes(l.url)) { linkMap.set(l.url, l); newLinks++; }
+        if (!fresh.length && !newLinks) return false;
+        const all = [...entries, ...fresh].sort((x, y) => (y.date || '').localeCompare(x.date || ''));
+        const head = [`## ${TITLES.history}`, '',
+          "*Claude's past answers and research chats on this dispute, gathered by Dispute Deck, newest first. Running it again only adds what's new.*"];
+        const linkPart = linkMap.size ? ['', '### Chats and links', '', ...[...linkMap.values()].map(l => `- ${mdLink(l.label, l.url)}`)] : [];
+        // The rest of the notes, without this section
+        const rest = b ? [...lines.slice(0, b.start), ...lines.slice(b.end + 1)] : lines;
+        const room = MAX_BYTES - new Blob([rest.join('\n')]).size - 600;
+        let kept = all;
+        const build = list => [...head, ...linkPart, ...list.flatMap(e => ['', e.text]), '', '***'].join('\n');
+        while (kept.length && new Blob([build(kept)]).size > room) kept = kept.slice(0, -1);
+        let sec = build(kept);
+        if (kept.length < all.length) sec = sec.replace(/\n\*\*\*$/, `\n\n*(${all.length - kept.length} older answer${all.length - kept.length === 1 ? '' : 's'} didn't fit in the notes: they're in the case doc.)*\n\n***`);
+        // In its old place, or after the current answers at the top
+        let at = b ? b.start : 0;
+        if (!b) {
+          for (let k = 0; k < rest.length;) {
+            if (!rest[k].trim()) { k++; continue; }
+            const cur2 = Object.values(TITLES).find(t => t !== TITLES.history && rest[k].trim() === `## ${t}`);
+            if (!cur2) break;
+            const bb = bounds(rest, cur2);
+            k = bb.end + 1;
+            at = k;
+          }
+        }
+        const body = [...rest.slice(0, at), '', sec, '', ...rest.slice(at)].join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+        const r = await call(id, 'PUT', { body, etag: cur.etag });
+        if (r.status === 409) { await sleep(800); continue; }
+        if (r.status < 200 || r.status >= 300) throw new Error(r.data?.error || `the portal answered ${r.status}`);
+        refresh();
+        return true;
+      }
+      throw new Error('someone kept saving the notes at the same time');
+    }
+    // Whether the dispute's Notes have the Earlier Claude research section yet (someone already filled them in)
+    const hasHistory = async id => (await read(id)).body.split(/\r?\n/).some(l => l.trim() === `## ${TITLES.history}`);
+    return { addAnswer, teamNotes, tidy, mergeHistory, hasHistory, iso };
   })();
 
   /* ------------------------------------------------- dashboard: the panel */
@@ -7468,7 +7576,10 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     const RESEARCH_LOG_KEY = 'zt:researchLog';   // Claude Code also writes its full research log for the case doc
     // In the portal's Research tool (duty disputes): the button that takes the place of its Copy prompt, and a line
     // under it saying how research is going. Both are the portal's own look (its classes), in the page.
-    const rsBtn = h('button', { type: 'button', 'data-zt': 'research', onclick: () => researchFromPortal() });
+    const rsBtn = h('button', { type: 'button', 'data-zt': 'research', onclick: () => {
+      if (rsBtn.dataset.chat) GM_openInTab(rsBtn.dataset.chat, { active: true, insert: true, setParent: true });
+      else researchFromPortal();
+    } });
     const rsStatus = h('p', { 'data-zt': 'research-status', class: 'text-xs text-muted-foreground', role: 'status', hidden: true });
     // Entry Assistant in the portal's top bar, beside Research, Classify and Quote, with their look
     const TOOL_BTN = 'flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset';
@@ -7706,6 +7817,129 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       } catch { /* offline: it stays as it was, and a click still checks */ }
     }
     // Checked when the settings open (GitHub at most every 15 minutes)
+    // ---- Past research into Notes: each dispute's earlier Claude answers and research chats go in its Notes, in an
+    // "Earlier Claude research" section. From the Google Sheet (its Research tab's answers and sessions, its row's links,
+    // case doc and sheet), the shared answers server, and what's saved on this computer (answers, claude.ai chats).
+    // Notes are shared, so one run fills them in for everyone; anyone else's run adds what only their computer had.
+    const FILLED_KEY = 'zt:notesFilled';   // { live|test: { disputeId: when } }
+    const filled = () => GM_getValue(FILLED_KEY, {});
+    const markFilled = id => { const f = filled(); const m = portal.mode(); f[m] = { ...(f[m] || {}), [id]: Date.now() }; GM_setValue(FILLED_KEY, f); };
+    // What this computer has on a dispute: saved answers (with the team's, from the shared answers server) and chat links
+    async function localPast(id) {
+      const answers = [];
+      const links = [];
+      if (sharedNotesOn()) await syncNotes(id).catch(() => null);
+      for (const pid of [id, `wo_${id}`]) {
+        for (const n of visibleAnswers(loadNotes(pid))) answers.push({ key: `n:${n.id}`, label: /^\*\*Final answer:\*\*/.test(n.text) && n.text.length < 2000 ? 'Answer we found' : 'Saved answer', date: portalNotes.iso(n.createdAt), text: n.text, author: n.author, lines: n.lines });
+        for (const a of loadRecord(pid).answers || []) answers.push({ key: `r:${a.savedAt}`, label: 'Saved answer', date: portalNotes.iso(a.savedAt), text: a.text, lines: a.lines });
+        const chat = GM_getValue(CHAT_URL_PREFIX + pid, '');
+        if (chat) links.push({ label: 'claude.ai chat', url: chat });
+      }
+      const mine = GM_getValue(`desk:research:${id}`, null)?.session;
+      if (mine) links.push({ label: 'Claude Code session', url: mine });
+      return { answers, links };
+    }
+    // What the Google Sheet has on it: Claude Code's answers and sessions, and its row's links, doc and sheet
+    async function sheetPast(id) {
+      const answers = [];
+      const links = [];
+      const hist = await desk.caseHistory(id);
+      for (const q of hist.requests) {
+        const patent = PATENT_KIND_RE.test(q.kind || '');
+        if (q.session) links.push({ label: `Claude Code session${patent ? ' (patent check)' : ''}${q.asked ? `, ${String(q.asked).slice(0, 10)}` : ''}`, url: q.session });
+        if (q.status === 'Done' && q.answer) answers.push({ key: `cc:${q.id}`, also: q.id, label: patent ? 'Claude Code patent check' : 'Claude Code answer', date: portalNotes.iso(q.asked), text: q.answer,
+          lines: String(q.lines || '').split(/[,\s]+/).filter(Boolean) });
+      }
+      const L = hist.links || {};
+      if (L.chat) links.push({ label: /claude\.ai\/code\//.test(L.chat) ? 'Claude Code session' : /claude\.ai\//.test(L.chat) ? 'claude.ai chat' : 'AI chat', url: L.chat });
+      if (hist.doc) links.push({ label: 'Case doc (Google Doc)', url: hist.doc });
+      if (hist.sheet) links.push({ label: 'Google Sheet row', url: hist.sheet });
+      if (L.front) links.push({ label: 'Front conversation', url: L.front });
+      if (L.slack) links.push({ label: 'Slack thread', url: L.slack });
+      return { answers, links, error: hist.error };
+    }
+    // `light`: a dispute whose Notes someone already filled in gets only what this computer adds (no sheet calls), so
+    // everyone's background runs together read the sheet about once per dispute
+    async function fillNotes(id, { light = false } = {}) {
+      const local = await localPast(id);
+      if (light && await portalNotes.hasHistory(id)) {
+        const added = local.answers.length || local.links.length ? await portalNotes.mergeHistory(id, local) : false;
+        markFilled(id);
+        return { added, error: '' };
+      }
+      const sheet = await sheetPast(id);
+      const added = await portalNotes.mergeHistory(id, { answers: [...sheet.answers, ...local.answers], links: [...sheet.links, ...local.links] });
+      if (!sheet.error) markFilled(id);
+      return { added, error: sheet.error };
+    }
+    // The dispute on screen, by itself, a few seconds after it opens: once a day at most
+    let fillTimer = 0;
+    function fillHere() {
+      clearTimeout(fillTimer);
+      fillTimer = setTimeout(() => {
+        const id = disputeIdHere();
+        if (!id || Date.now() - ((filled()[portal.mode()] || {})[id] || 0) < 86400000) return;
+        fillNotes(id).catch(e => console.warn('[Tools] earlier research into Notes', e));
+      }, 6000);
+    }
+    let fillRun = null;   // { stop, auto } while every dispute is being filled in
+    const fillNote = note();
+    const fillBtn = btn('Fill in Notes', () => (fillRun ? (fillRun.stop = true) : fillAll()));
+    const fillAgain = h('label', { class: 'doc' }, h('input', { type: 'checkbox' }), h('span', { text: 'Go through disputes already done too (to add what changed since)' }));
+    const FILL_ALL_KEY = 'zt:notesFilledAll';     // { live|test: when a run through every dispute finished }
+    const FILL_OWNER_KEY = 'zt:notesFill:owner';  // { id, at }: the portal tab running it, so only one tab does
+    const fillTab = Math.random().toString(36).slice(2);
+    async function fillAll({ auto = false } = {}) {
+      const mode = portal.mode();
+      if (!auto && mode !== 'live' && !confirm('The portal is in TEST mode, and test mode has its own Notes. Fill in the test Notes?')) return;
+      const run = fillRun = { stop: false, auto };
+      fillBtn.textContent = 'Stop';
+      const beat = () => GM_setValue(FILL_OWNER_KEY, { id: fillTab, at: Date.now() });
+      beat();
+      try {
+        say(fillNote, 'Finding every duty dispute…');
+        const lists = await Promise.all([portal.workOrders({ status: 'OPEN' }), portal.workOrders({ status: 'WAITING' }),
+          portal.workOrders({ status: ['RESOLVED', 'AUTO_RESOLVED', 'CANCELLED'] }, 8000, { closed: true })]);
+        const ids = new Set();
+        for (const n of lists.flat()) { const sid = n.subject?.id || n.subjectKey || ''; if (/^duty_dispute_(?!item_)\w+$/.test(sid)) ids.add(sid); }
+        // and any dispute this computer has answers or chats for
+        for (const k of GM_listValues()) { const m = k.match(/(?:^zdr:(?:notes|chaturl|dispute):|^desk:research:)(?:wo_)?(duty_dispute_(?!item_)\w+)$/); if (m) ids.add(m[1]); }
+        const done = filled()[mode] || {};
+        const todo = [...ids].filter(id => (!auto && fillAgain.querySelector('input').checked) || !done[id]);
+        let n = 0, added = 0, failed = 0;
+        const errors = [];
+        const work = async () => {
+          while (todo.length && !run.stop && portal.mode() === mode) {
+            const id = todo.shift();
+            try { const r = await fillNotes(id, { light: auto }); if (r.added) added++; if (r.error) { failed++; errors.push(r.error); } }
+            catch (e) { failed++; errors.push(e.message); }
+            n++;
+            beat();
+            say(fillNote, `${auto ? 'Running by itself: ' : ''}${n} of ${n + todo.length} disputes · ${added} Notes filled in${failed ? ` · ${failed} couldn't be read (they're tried again next time)` : ''}${run.stop ? ' · stopping…' : ''}`);
+          }
+        };
+        // Two at a time from the button; one at a time when it runs by itself, to go easy on the Google Sheet
+        await Promise.all(auto ? [work()] : [work(), work()]);
+        if (!run.stop && portal.mode() === mode) GM_setValue(FILL_ALL_KEY, { ...GM_getValue(FILL_ALL_KEY, {}), [mode]: Date.now() });
+        console.info(`[Tools] earlier research into Notes: ${n} disputes, ${added} filled in, ${failed} not read`);
+        say(fillNote, `${run.stop ? 'Stopped' : 'Done'}: ${n} disputes gone through, ${added} Notes filled in${failed ? `, ${failed} couldn't be read (last error: ${errors[errors.length - 1]}). Press Fill in Notes to retry them` : ''}.`, failed ? 'warn' : 'ok');
+      } catch (e) { say(fillNote, e.message, 'err'); console.warn('[Tools] earlier research into Notes', e); }
+      finally { fillRun = null; fillBtn.textContent = 'Fill in Notes'; GM_deleteValue(FILL_OWNER_KEY); }
+    }
+    // By itself: once on each computer (live mode), in the background, in one portal tab at a time; a reload carries on
+    // where it stopped (each dispute done is remembered)
+    function autoFill() {
+      if (fillRun || portal.mode() !== 'live' || GM_getValue(FILL_ALL_KEY, {}).live) return;
+      const o = GM_getValue(FILL_OWNER_KEY, null);
+      if (o && o.id !== fillTab && Date.now() - o.at < 3 * 60000) return;
+      fillAll({ auto: true });
+    }
+    setTimeout(autoFill, 20000);
+    setInterval(autoFill, 5 * 60000);
+    window.addEventListener('pagehide', () => { if (fillRun) GM_deleteValue(FILL_OWNER_KEY); });
+    const fillGroup = group('Earlier research into Notes', "Puts every duty dispute's earlier Claude answers and research chats (Claude Code sessions, claude.ai chats, the case doc and sheet row, Front and Slack) in its Notes, in an \"Earlier Claude research\" section. From the Google Sheet, the shared answers server and this computer. It runs by itself once on each computer (live mode, in the background, one dispute at a time), and a dispute you open is filled in by itself too; Fill in Notes runs it now. Notes are shared, so one run fills them in for everyone; a teammate's adds what only their computer had. Nothing already in the Notes is changed.",
+      h('div', { class: 'row' }, fillBtn), fillAgain, fillNote);
+
     const settingsBody = h('div', { class: 'body' },
       updateBtn,
       h('p', { class: 'hint', style: 'margin:0 0 14px', text: "Every part is optional, and what you save stays on this computer (in Tampermonkey), not with your account." }),
@@ -7723,6 +7957,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
         extraNote,
         h('label', { class: 'doc', style: 'margin-top:8px' }, h('input', { type: 'checkbox', checked: GM_getValue(RESEARCH_LOG_KEY, false) === true, onchange: e => GM_setValue(RESEARCH_LOG_KEY, e.target.checked) }),
           h('span', { text: "Add Claude Code's full research log to the case doc (every search, page and source it checked, and how it reasoned), under its answer" }))),
+      fillGroup,
       group('Analytics', 'Who resolved and claimed what, who holds what now, and orders by class and company, from every work order\'s history in the portal.',
         h('div', { class: 'row' }, btn('Open Analytics', () => { document.querySelector('.cl-modalCloseButton')?.click(); openWindow('analytics'); }))),
       accessGroup,
@@ -8267,27 +8502,47 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     // Open in claude.ai, without a routine), and Claude's answer comes back into the dispute's Notes by itself
     const ccOn = () => !!(desk.researchOn() || cfg().routineId || cfg().routineToken);
     let researchBusy = false;
+    const rsAgain = h('button', { type: 'button', 'data-zt': 'research-again', onclick: () => researchFromPortal() });
+    // The dispute's research chat to go back to: its Claude Code session or its claude.ai chat (the one for how you research
+    // now first, when it has both)
+    function currentChat() {
+      const { code, ai } = desk.chatUrls();
+      if (code && (ccOn() || !ai)) return { url: code, label: 'Open Claude Code session', what: 'its Claude Code session' };
+      if (ai) return { url: ai, label: 'Open claude.ai chat', what: 'its claude.ai chat' };
+      return null;
+    }
     function mountResearch() {
       const sec = document.querySelector('#work-order-tools section[role="tabpanel"][aria-label="Research"]');
       const copy = sec && [...sec.querySelectorAll('button')].find(b => !b.dataset.zt && /^(copy prompt|copying…)$/i.test(clean(b.textContent)));
       if (!copy) return;
       if (copy.style.display !== 'none') copy.style.setProperty('display', 'none', 'important');
-      if (copy.previousElementSibling !== rsBtn) copy.before(rsBtn);
+      if (copy.previousElementSibling !== rsBtn && copy.previousElementSibling !== rsAgain) copy.before(rsBtn);
       const cc = ccOn();
-      const label = researchBusy ? (cc ? 'Sending…' : 'Opening…') : cc ? 'Research in Claude Code' : 'Open in claude.ai';
-      const key = `${copy.className}|${label}`;
+      const chat = researchBusy ? null : currentChat();
+      const how = cc ? 'Research in Claude Code' : 'Open in claude.ai';
+      const label = researchBusy ? (cc ? 'Sending…' : 'Opening…') : chat ? chat.label : how;
+      const key = `${copy.className}|${label}|${chat?.url || ''}`;
       if (rsBtn.dataset.k !== key) {
         rsBtn.dataset.k = key;
         rsBtn.className = copy.className;
         rsBtn.disabled = researchBusy;
-        rsBtn.title = cc ? "Sends this dispute to Claude Code (your cloud routine). Its answer is added to Notes below, and to the case doc, when it's done."
-          : "Opens claude.ai with the research prompt and the order's files in its message box; nothing is sent until you press Enter there. Claude's answer is added to Notes below when it's done.";
-        rsBtn.replaceChildren(svgIcon(cc ? ICONS.bot : ICONS.external), label);
+        rsBtn.dataset.chat = chat?.url || '';
+        rsBtn.title = chat ? `Opens ${chat.what} for this dispute in a new tab, to pick up where it left off. "Research again" starts a new one.`
+          : cc ? "Sends this dispute to Claude Code (your cloud routine). Its answer is added to Notes below, and to the case doc, when it's done."
+            : "Opens claude.ai with the research prompt and the order's files in its message box; nothing is sent until you press Enter there. Claude's answer is added to Notes below when it's done.";
+        rsBtn.replaceChildren(svgIcon(chat ? ICONS.external : cc ? ICONS.bot : ICONS.external), label);
+        // Research again: the portal's outline button, beside it
+        rsAgain.className = copy.className.split(/\s+/).filter(c => !/^(hover:)?(bg-primary|text-primary-foreground)/.test(c)).concat('border border-input bg-background hover:bg-accent hover:text-accent-foreground').join(' ');
+        rsAgain.title = `Researches this dispute again (${cc ? 'in Claude Code' : 'in claude.ai'}), in a new ${cc ? 'session' : 'chat'}.`;
+        rsAgain.replaceChildren(svgIcon(cc ? ICONS.bot : ICONS.external), 'Research again');
       }
+      if (chat) { if (rsBtn.nextElementSibling !== rsAgain) rsBtn.after(rsAgain); }
+      else if (rsAgain.isConnected) rsAgain.remove();
       const row = copy.parentElement;
       if (row.nextElementSibling !== rsStatus) row.after(rsStatus);
       const desc = row.parentElement?.querySelector('p.text-xs:not([data-zt])');
-      const text = cc ? "Researches every claim, the merchant’s reasons, the automated review and your notes below in Claude Code. Its answer is added to Notes when it’s done."
+      const text = chat ? 'This dispute was researched before: open its chat to pick up where it left off, or research it again. Claude’s answers are added to Notes below.'
+        : cc ? "Researches every claim, the merchant’s reasons, the automated review and your notes below in Claude Code. Its answer is added to Notes when it’s done."
         : "Opens claude.ai with every claim, the merchant’s reasons, the automated review, your notes below and the order’s files, ready to send. Claude’s answer is added to Notes when it’s done.";
       if (desc && desc.textContent !== text) desc.textContent = text;
     }
@@ -8354,11 +8609,11 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
 
     // The desk tells the research when the case changes, and hands over Claude Code's answers. Each goes in the dispute's
     // Notes (replacing the last one of its kind), and, with the case read here, in the shared answers too.
-    desk.subscribe(() => { if (state) render(); });
-    desk.setImporter(({ text, lines, ref, kind }) => {
+    desk.subscribe(() => { if (state) render(); mountResearch(); });
+    desk.setImporter(({ text, lines, ref, kind, session }) => {
       const nid = disputeIdHere();
       if (nid) {
-        portalNotes.addAnswer(nid, { text, kind: PATENT_KIND_RE.test(kind || '') ? 'patent' : 'cc', ref })
+        portalNotes.addAnswer(nid, { text, kind: PATENT_KIND_RE.test(kind || '') ? 'patent' : 'cc', ref, chat: session })
           .then(added => setStatus(added ? 'Claude Code answered: its answer is in Notes below, and in the case doc.' : 'Claude Code answered (its answer is already in Notes).', 'ok'))
           .catch(e => setStatus(`Claude Code answered, but its answer couldn't be added to Notes (${e.message}). It's in the case doc.`, 'warn'));
       }
@@ -8500,6 +8755,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
 
     // Coming back from the Claude tab: it may have filled the message box and kept Claude's answer
     window.addEventListener('focus', () => {
+      mountResearch();   // a claude.ai chat may have started for this case meanwhile
       if (!state) { checkPending(); return; }
       render();
       claudeTabNews();
@@ -8531,6 +8787,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
       if (document.visibilityState !== 'visible' || !isCasePage()) return;
       desk.pollAnswers();
       checkPending();
+      mountResearch();
     }, NOTES_POLL_MS);
 
     // What the Claude tab left for this panel: how filling its message box went (shown once), and Claude's
@@ -8904,7 +9161,8 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
           try { storeAnswer(text, lines); setStatus("Claude's answer from claude.ai is saved to the case doc.", 'ok'); }
           finally { s.autoSaving = false; }
           const nid = disputeIdHere();
-          if (nid) portalNotes.addAnswer(nid, { text, kind: 'ai', ref: handoffId || String(at || ''), at })
+          const chat = GM_getValue(CHAT_URL_PREFIX + d.disputeId, '') || (nid ? GM_getValue(CHAT_URL_PREFIX + nid, '') : '');
+          if (nid) portalNotes.addAnswer(nid, { text, kind: 'ai', ref: handoffId || String(at || ''), at, chat })
             .then(() => setStatus("Claude's answer from claude.ai is in Notes below, and in the case doc.", 'ok'))
             .catch(e => setStatus(`Claude's answer from claude.ai is saved to the case doc, but couldn't be added to Notes (${e.message}).`, 'warn'));
         }, 0);
@@ -9328,7 +9586,7 @@ Portal mode: ${portal.mode().toUpperCase()}`)) return;
     return {
       show() { attach(); },
       // A new page: what was read for the last one goes (the window stays open, as the portal's tools do)
-      reset() { stopPolling(); state = null; pendingFor = ''; setStatus(''); setTimeout(checkPending, 3000); },
+      reset() { stopPolling(); state = null; pendingFor = ''; setStatus(''); setTimeout(checkPending, 3000); fillHere(); },
       keepAttached() {
         attach();
         if (cardOpen) layoutCard();
